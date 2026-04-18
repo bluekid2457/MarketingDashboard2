@@ -8,13 +8,17 @@ This document describes the main screens required for the Marketing Dashboard, b
 **Purpose:** Secure user login, registration, and OAuth provider selection.
 **Components:**
 - Email/password fields
-- OAuth provider buttons (LinkedIn, Medium, etc.)
+- Client-side validation (email required + format, password required)
+- Inline user-safe error banner for auth failures
+- Loading state on submit with duplicate-submit prevention
+- OAuth provider buttons (currently visual placeholders)
 - Forgot password link
 - Registration link
-- Error messages
+- Firebase Email/Password sign-in integration
 **Main Actions:**
-- User authentication
-- Redirect to dashboard on success
+- Emit `login_attempt`, `login_success`, `login_failure` auth analytics events
+- Redirect authenticated users from `/login` to `/dashboard`
+- Redirect to dashboard on successful login
 
 ---
 
@@ -41,22 +45,30 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Sort/filter controls
 - Trend detection panel (shows trending topics) As well as ability to click into the articles that are relevant.
 - Competitor content panel (shows tracked competitor posts/gaps)
+- Selected-idea card with a Generate Angles button that routes to `/angles?ideaId=<ideaDocId>`
 **Main Actions:**
 - Submit/edit/delete ideas
 - Sort/filter backlog
 - View trends and competitor analysis
+- Trigger angles generation flow for the selected idea
 
 ---
 
 ## 4. AI Angle Selection & Outline Screen (AngleOutlineScreen.png)
 **Purpose:** Review AI-generated angles/outlines for an idea, select or edit before drafting.
 **Components:**
-- List of AI-generated angles/outlines (card/list view)
-- Inline editing for each angle
+- Query-based idea handoff via `ideaId`, with Firestore idea loading for signed-in user
+- Empty/guide state when no `ideaId` is provided
+- Provider-backed angle generation (`/api/angles`) using saved Settings provider/key
+- List of AI-generated angles/outlines (card/list view) with prev/next carousel controls
+- Inline section editing when "Unlock Detailed Editor" is enabled
 - Selection controls (radio/check)
-- Error/retry messages
+- Refine chat input that updates the selected angle and appends chat history
+- Error/retry messages and loading states
 **Main Actions:**
 - Select or edit an angle
+- Refine selected angle with AI
+- Retry angle generation for the same idea
 - Proceed to draft generation
 
 ---

@@ -44,6 +44,24 @@ npm run dev
 
 The app will be available at **http://localhost:3000**.
 
+#### Frontend Firebase Auth configuration
+
+1. Enable **Email/Password** sign-in in Firebase Console:
+	- `Authentication` -> `Sign-in method` -> enable `Email/Password`.
+2. In `frontend/`, create `.env.local` with your Firebase web app credentials:
+
+```env
+NEXT_PUBLIC_FIREBASE_API_KEY=your-api-key
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=your-project-id
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your-messaging-sender-id
+NEXT_PUBLIC_FIREBASE_APP_ID=your-app-id
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+The frontend login flow uses Firebase `signInWithEmailAndPassword`, redirects to `/dashboard` on success, and route-guards app screens under `src/app/(app)`.
+
 #### Available scripts
 
 | Script        | Description                  |
