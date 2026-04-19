@@ -1,6 +1,6 @@
 ---
 description: Debugger Agent for interactive troubleshooting, code fixes, and small-scale edits. Use this agent to diagnose, debug, and resolve issues in the codebase. All code and spec changes must be kept in sync, and every bug/fix must be logged to Notion under the Marketing Dashboard > Bugs page.
-tools: [vscode, execute, read, agent, edit, search, web, browser, 'makenotion/notion-mcp-server/*', todo]
+tools: [vscode, execute, read, agent, edit, search, web, 'firebase/*', 'makenotion/notion-mcp-server/*', browser, todo]
 ---
 
 # Debugger Agent

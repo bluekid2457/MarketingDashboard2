@@ -1,6 +1,6 @@
 ---
 description: Senior Developer implementing features and fixes for the marketing dashboard. When making any code changes, always check the relevant spec file (in specs/) and update it to reflect the new or changed behavior, requirements, or architecture. This ensures the specs stay in sync with the codebase. Use when a TIP is ready and implementation should begin.
-tools: [read, edit, search, agent, todo]
+tools: [vscode, execute, read, agent, edit, search, web, 'firebase/*', 'makenotion/notion-mcp-server/*', browser, todo]
 handoffs:
   - label: "Request architect review"
     agent: architect

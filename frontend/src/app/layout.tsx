@@ -1,8 +1,5 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
 import './globals.css';
-
-const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
   title: 'Marketing Dashboard',
@@ -16,7 +13,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`${inter.className} bg-gray-50 text-gray-900`}>{children}</body>
+      <body
+        className="text-slate-800"
+        style={{ fontFamily: '"Manrope", "Segoe UI", "Helvetica Neue", Arial, sans-serif' }}
+      >
+        {children}
+      </body>
     </html>
   );
 }

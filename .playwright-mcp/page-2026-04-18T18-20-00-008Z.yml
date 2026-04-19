@@ -1,0 +1,40 @@
+- generic [ref=e1]:
+  - button "Open Next.js Dev Tools" [ref=e9] [cursor=pointer]:
+    - img [ref=e10]
+  - alert [ref=e13]
+  - generic [ref=e15]:
+    - generic [ref=e16]:
+      - generic [ref=e17]: M
+      - heading "Marketing Dashboard" [level=1] [ref=e18]
+      - paragraph [ref=e19]: Welcome to your Hub!
+      - paragraph [ref=e20]: Sign in to amplify your reach.
+      - paragraph [ref=e21]: Access unified performance insights and campaign tools.
+    - region "Authentication form" [ref=e22]:
+      - generic [ref=e45]:
+        - generic [ref=e46]: ✕
+        - generic [ref=e47]: Password is required.
+        - button "Dismiss sign in error" [ref=e48] [cursor=pointer]: ✕
+      - heading "Marketing Dashboard" [level=2] [ref=e23]
+      - paragraph [ref=e24]: Sign in to your account
+      - generic [ref=e25]:
+        - generic [ref=e26]:
+          - generic [ref=e27]: ✉
+          - textbox "Email Address" [ref=e28]: qa@example.com
+        - generic [ref=e29]:
+          - generic [ref=e30]: 🔒
+          - textbox "Password" [ref=e31]
+        - link "Forgot Password?" [ref=e33] [cursor=pointer]:
+          - /url: "#"
+        - button "Sign In" [active] [ref=e34] [cursor=pointer]
+      - generic [ref=e35]: or sign in with
+      - generic [ref=e38]:
+        - button "in Sign in with LinkedIn" [ref=e39] [cursor=pointer]:
+          - generic [ref=e40]: in
+          - text: Sign in with LinkedIn
+        - button "G Sign in with Google" [ref=e41] [cursor=pointer]:
+          - generic [ref=e42]: G
+          - text: Sign in with Google
+      - paragraph [ref=e43]:
+        - text: Don't have an account?
+        - link "Register now" [ref=e44] [cursor=pointer]:
+          - /url: /register
