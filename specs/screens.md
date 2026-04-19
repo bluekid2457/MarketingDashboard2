@@ -83,23 +83,36 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Persona targeting options
 - A/B headline generator
 - Plagiarism/citation checker
-- Save, submit for review, or schedule buttons
+- Workflow breadcrumb that includes the next Multi-Channel Adaptation step
+- Save, **Adapt for Platforms**, submit for review, or schedule buttons
 **Main Actions:**
 - Edit content
 - Tune tone/sentiment
 - Check SEO/readability
 - Save/submit/schedule
+- Store draft handoff context and route to `/adapt/<ideaId>?angleId=<angleId>` when Adapt for Platforms is clicked
 
 ---
 
 ## 6. Multi-Channel Adaptation Screen (AdaptationScreen.jpg)
 **Purpose:** Adapt content for different platforms/formats.
 **Components:**
-- Platform selector (LinkedIn, Medium, Blog, Twitter, etc.)
-- Preview for each format
-- AI chat for editing/adapting content per platform
+- Route/context validation against draft handoff data in `localStorage['adapt_draft_context']`
+- Firestore-backed per-platform adaptation document at `users/{uid}/adaptations/{ideaId}_{angleId}`
+- Platform selector for LinkedIn, X/Twitter, Medium, Newsletter, and Blog
+- Explicit Generate action for the active platform (calls AI adaptation endpoint)
+- Platform-specific editor where only the active tab's copy is edited
+- Prompt-template resolver under `src/lib/prompts/platforms` with concise per-platform rules (LinkedIn, X/Twitter, Medium, Newsletter, Blog)
+- Visible autosave/manual-save status for adaptation persistence
+- AI chat for editing/adapting the currently active platform version
+- Optimization tools for SEO Optimizer, AI Check, and Source Check with on-screen results; each tool analyzes the currently active platform copy, uses the configured AI provider when a valid key exists, and falls back to deterministic per-tool results when a non-Ollama key is missing
+- Live preview of the active platform copy plus per-platform word counts
+- Live trends and relevant articles panel sourced from `/api/trends`
 **Main Actions:**
 - Adapt content per platform
+- Generate platform-specific copy from the source draft using AI prompt rules
+- Save/revisit retained platform adaptations
+- Run analysis tools on the active platform copy
 - Preview and approve
 
 ---
@@ -123,7 +136,7 @@ This document describes the main screens required for the Marketing Dashboard, b
 ## 8. Review & Approval Workflow Screen
 **Purpose:** Manage draft approvals, version history, and comments.
 **Components:**
-- Draft queue/list
+- Draft queue/list sourced from the signed-in user's Firestore drafts (`users/{uid}/drafts`)
 - Inline editor for review
 - Version history panel
 - Approval chain controls
@@ -133,6 +146,7 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Approve/reject drafts
 - Edit/comment
 - View/restore versions
+- Open any queue item to its corresponding draft detail route (`/drafts/<ideaId>?angleId=<angleId>`)
 
 ---
 

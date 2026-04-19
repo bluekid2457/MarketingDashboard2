@@ -12,6 +12,7 @@ export type CallAIParams = {
   apiKey: string;
   ollamaBaseUrl?: string;
   ollamaModel?: string;
+  signal?: AbortSignal;
   /** All messages, including an optional system message as the first item. */
   messages: AIMessage[];
   temperature?: number;
@@ -84,6 +85,7 @@ async function callOpenAI(params: CallAIParams): Promise<string> {
       Authorization: `Bearer ${params.apiKey}`,
       'Content-Type': 'application/json',
     },
+    signal: params.signal,
     body: JSON.stringify({
       model,
       temperature: params.temperature ?? 0.4,
@@ -131,6 +133,7 @@ async function callGemini(params: CallAIParams): Promise<string> {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: params.signal,
         body: JSON.stringify(requestBody),
       },
     );
@@ -181,6 +184,7 @@ async function callClaude(params: CallAIParams): Promise<string> {
       'anthropic-version': '2023-06-01',
       'content-type': 'application/json',
     },
+    signal: params.signal,
     body: JSON.stringify(body),
   });
 
@@ -206,6 +210,7 @@ async function callOllama(params: CallAIParams): Promise<string> {
   const response = await fetch(`${baseUrl}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: params.signal,
     body: JSON.stringify({
       model,
       stream: false,

@@ -7,6 +7,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { Spinner } from '@/components/Spinner';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -32,9 +33,15 @@ type DraftContext = {
   idea: IdeaRecord;
 };
 
+type AdaptDraftContext = DraftContext & {
+  draftContent: string;
+};
+
 type DraftApiResponse = {
   draft?: string;
   provider?: string;
+  promptUsed?: string;
+  modelText?: string;
   error?: string;
 };
 
@@ -92,6 +99,7 @@ type AnalyzeApiResponse = {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DRAFT_CONTEXT_STORAGE_KEY = 'draft_generation_context';
+const ADAPT_CONTEXT_STORAGE_KEY = 'adapt_draft_context';
 const SAVE_DEBOUNCE_MS = 2000;
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -121,6 +129,7 @@ export default function DraftEditorPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [firebaseLoaded, setFirebaseLoaded] = useState(false);
+  const [isFirebaseDraftLoading, setIsFirebaseDraftLoading] = useState(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstSaveRef = useRef(true);
 
@@ -191,12 +200,14 @@ export default function DraftEditorPage() {
 
     const db = getFirebaseDb();
     if (!db) {
+      setIsFirebaseDraftLoading(false);
       setFirebaseLoaded(true);
       return;
     }
 
     const docId = `${draftContext.ideaId}_${draftContext.angleId}`;
     const docRef = doc(db, 'users', currentUid, 'drafts', docId);
+    setIsFirebaseDraftLoading(true);
 
     void (async () => {
       try {
@@ -213,6 +224,7 @@ export default function DraftEditorPage() {
       } catch (err) {
         console.warn('[Draft] Failed to load draft from Firestore:', err);
       } finally {
+        setIsFirebaseDraftLoading(false);
         setFirebaseLoaded(true);
       }
     })();
@@ -296,25 +308,45 @@ export default function DraftEditorPage() {
     setIsGeneratingDraft(true);
 
     try {
+      const requestBody = {
+        provider: activeConfig.provider,
+        apiKey: activeConfig.apiKey,
+        ollamaBaseUrl: activeConfig.ollamaBaseUrl,
+        ollamaModel: activeConfig.ollamaModel,
+        idea: {
+          topic: draftContext.idea.topic,
+          tone: draftContext.idea.tone,
+          audience: draftContext.idea.audience,
+          format: draftContext.idea.format,
+        },
+        angle: draftContext.selectedAngle,
+      };
+
+      console.log('[Draft Editor] Sending AI request to /api/drafts', {
+        provider: requestBody.provider,
+        topic: requestBody.idea.topic,
+        tone: requestBody.idea.tone,
+        audience: requestBody.idea.audience,
+        format: requestBody.idea.format,
+        angleId: requestBody.angle.id,
+        angleTitle: requestBody.angle.title,
+      });
+
       const response = await fetch('/api/drafts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: activeConfig.provider,
-          apiKey: activeConfig.apiKey,
-          ollamaBaseUrl: activeConfig.ollamaBaseUrl,
-          ollamaModel: activeConfig.ollamaModel,
-          idea: {
-            topic: draftContext.idea.topic,
-            tone: draftContext.idea.tone,
-            audience: draftContext.idea.audience,
-            format: draftContext.idea.format,
-          },
-          angle: draftContext.selectedAngle,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       const payload = (await response.json()) as DraftApiResponse;
+
+      if (payload.promptUsed) {
+        console.log('[Draft Editor] API response payload prompt metadata (promptUsed):', payload.promptUsed);
+      }
+
+      if (payload.modelText) {
+        console.log('[Draft Editor] API response payload model response (modelText):', payload.modelText);
+      }
 
       if (!response.ok || !payload.draft) {
         throw new Error(payload.error ?? 'Draft generation failed.');
@@ -362,18 +394,27 @@ export default function DraftEditorPage() {
     setIsChatLoading(true);
 
     try {
+      const requestBody = {
+        provider: activeConfig.provider,
+        apiKey: activeConfig.apiKey,
+        ollamaBaseUrl: activeConfig.ollamaBaseUrl,
+        ollamaModel: activeConfig.ollamaModel,
+        draft: draftText,
+        messages: historySnapshot,
+        userMessage: message,
+      };
+
+      console.log('[Draft Editor] Sending AI request to /api/drafts/chat', {
+        provider: requestBody.provider,
+        draftLength: requestBody.draft.length,
+        historyCount: requestBody.messages.length,
+        userMessageLength: requestBody.userMessage.length,
+      });
+
       const response = await fetch('/api/drafts/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: activeConfig.provider,
-          apiKey: activeConfig.apiKey,
-          ollamaBaseUrl: activeConfig.ollamaBaseUrl,
-          ollamaModel: activeConfig.ollamaModel,
-          draft: draftText,
-          messages: historySnapshot,
-          userMessage: message,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       const payload = (await response.json()) as ChatApiResponse;
@@ -417,17 +458,25 @@ export default function DraftEditorPage() {
       setAnalyzeError(null);
 
       try {
+        const requestBody = {
+          provider: activeConfig.provider,
+          apiKey: activeConfig.apiKey,
+          ollamaBaseUrl: activeConfig.ollamaBaseUrl,
+          ollamaModel: activeConfig.ollamaModel,
+          draft: draftText,
+          type,
+        };
+
+        console.log('[Draft Editor] Sending AI request to /api/drafts/analyze', {
+          provider: requestBody.provider,
+          type: requestBody.type,
+          draftLength: requestBody.draft.length,
+        });
+
         const response = await fetch('/api/drafts/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            provider: activeConfig.provider,
-            apiKey: activeConfig.apiKey,
-            ollamaBaseUrl: activeConfig.ollamaBaseUrl,
-            ollamaModel: activeConfig.ollamaModel,
-            draft: draftText,
-            type,
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         const payload = (await response.json()) as AnalyzeApiResponse;
@@ -459,6 +508,23 @@ export default function DraftEditorPage() {
     [savedAt],
   );
 
+  const canAdaptDraft = Boolean(draftContext && draftText.trim());
+
+  const goToAdaptPage = useCallback(() => {
+    if (!draftContext || !draftText.trim()) return;
+
+    const adaptContext: AdaptDraftContext = {
+      ideaId: draftContext.ideaId,
+      angleId: draftContext.angleId,
+      idea: draftContext.idea,
+      selectedAngle: draftContext.selectedAngle,
+      draftContent: draftText,
+    };
+
+    localStorage.setItem(ADAPT_CONTEXT_STORAGE_KEY, JSON.stringify(adaptContext));
+    router.push(`/adapt/${draftContext.ideaId}?angleId=${draftContext.angleId}`);
+  }, [draftContext, draftText, router]);
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-5">
@@ -466,7 +532,7 @@ export default function DraftEditorPage() {
       <div className="page-header">
         <h1>Draft Editor</h1>
         <p className="breadcrumb mt-1">
-          1. Drafting → Editing (Active) → SEO/Readability → Review → Schedule
+          1. Drafting → Editing (Active) → SEO/Readability → Multi-Channel Adaptation → Review → Schedule
         </p>
 
         {draftContext ? (
@@ -486,7 +552,9 @@ export default function DraftEditorPage() {
               </span>
             ) : null}
             {isSaving ? (
-              <span className="text-yellow-300">Saving…</span>
+              <span className="text-yellow-300">
+                <Spinner size="sm" label="Saving..." />
+              </span>
             ) : savedAt ? (
               <span className="text-green-300">✓ Saved at {savedAtText}</span>
             ) : null}
@@ -532,7 +600,7 @@ export default function DraftEditorPage() {
                       disabled={isGeneratingDraft || !draftContext}
                       onClick={() => void generateDraft()}
                     >
-                      {isGeneratingDraft ? 'Generating…' : '↺ Regenerate'}
+                      {isGeneratingDraft ? <Spinner size="sm" label="Generating…" /> : '↺ Regenerate'}
                     </button>
 
                     <button
@@ -558,9 +626,17 @@ export default function DraftEditorPage() {
 
                 {/* Generating placeholder */}
                 {isGeneratingDraft && !draftText ? (
-                  <p className="mb-3 text-sm text-slate-500">
-                    Generating a robust draft from the selected angle…
-                  </p>
+                  <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
+                    <Spinner size="md" />
+                    <span>Generating a robust draft from the selected angle…</span>
+                  </div>
+                ) : null}
+
+                {isFirebaseDraftLoading ? (
+                  <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
+                    <Spinner size="sm" />
+                    <span>Loading draft from Firebase...</span>
+                  </div>
                 ) : null}
 
                 {/* Main textarea */}
@@ -580,7 +656,15 @@ export default function DraftEditorPage() {
                   disabled={isSaving || !draftText}
                   onClick={() => void saveDraft(draftText)}
                 >
-                  {isSaving ? 'Saving…' : '💾 Save Draft'}
+                  {isSaving ? <Spinner size="sm" label="Saving..." /> : '💾 Save Draft'}
+                </button>
+                <button
+                  type="button"
+                  className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                  disabled={!canAdaptDraft}
+                  onClick={goToAdaptPage}
+                >
+                  🎯 Adapt for Platforms
                 </button>
                 <button
                   type="button"
@@ -619,11 +703,11 @@ export default function DraftEditorPage() {
                       <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-500">
                         <p className="mb-1 font-semibold">Try asking:</p>
                         <ul className="list-inside list-disc space-y-1">
-                          <li>"Make the intro more engaging"</li>
-                          <li>"Shorten this to 800 words"</li>
-                          <li>"Add a more persuasive CTA"</li>
-                          <li>"Rewrite in a casual tone"</li>
-                          <li>"Add 3 concrete examples"</li>
+                          <li>&ldquo;Make the intro more engaging&rdquo;</li>
+                          <li>&ldquo;Shorten this to 800 words&rdquo;</li>
+                          <li>&ldquo;Add a more persuasive CTA&rdquo;</li>
+                          <li>&ldquo;Rewrite in a casual tone&rdquo;</li>
+                          <li>&ldquo;Add 3 concrete examples&rdquo;</li>
                         </ul>
                       </div>
                     ) : null}
@@ -646,7 +730,7 @@ export default function DraftEditorPage() {
 
                     {isChatLoading ? (
                       <div className="mr-4 rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-400">
-                        AI is thinking…
+                        <Spinner size="sm" label="AI is thinking…" />
                       </div>
                     ) : null}
 
@@ -749,7 +833,7 @@ export default function DraftEditorPage() {
                     disabled={isAnalyzing}
                     onClick={() => void runAnalysis(type)}
                   >
-                    {isAnalyzing && activeAnalysis === type ? 'Analyzing…' : label}
+                    {isAnalyzing && activeAnalysis === type ? <Spinner size="sm" label="Analyzing…" /> : label}
                   </button>
                 ))}
               </div>
@@ -764,7 +848,10 @@ export default function DraftEditorPage() {
 
             {/* Loading */}
             {isAnalyzing ? (
-              <p className="text-sm text-slate-500">Running analysis, this may take a moment…</p>
+              <div className="flex items-center gap-2 text-sm text-slate-500">
+                <Spinner size="sm" />
+                <span>Running analysis, this may take a moment…</span>
+              </div>
             ) : null}
 
             {/* Empty state */}
@@ -894,7 +981,9 @@ export default function DraftEditorPage() {
                     <div className="space-y-2">
                       {plagiarismResult.flaggedPhrases.map((item, i) => (
                         <div key={i} className="rounded-xl border border-yellow-200 bg-yellow-50 p-3">
-                          <p className="text-sm font-medium italic text-slate-800">"{item.phrase}"</p>
+                          <p className="text-sm font-medium italic text-slate-800">
+                            &ldquo;{item.phrase}&rdquo;
+                          </p>
                           <p className="mt-0.5 text-xs text-slate-500">{item.reason}</p>
                         </div>
                       ))}
@@ -961,7 +1050,7 @@ export default function DraftEditorPage() {
                         .filter((c) => c.needsCitation)
                         .map((item, i) => (
                           <div key={i} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                            <p className="text-sm text-slate-800">"{item.claim}"</p>
+                            <p className="text-sm text-slate-800">&ldquo;{item.claim}&rdquo;</p>
                             <p className="mt-1 text-xs text-emerald-600">
                               🔍 Search: {item.suggestedSearchQuery}
                             </p>

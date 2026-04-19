@@ -5,6 +5,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
 
 import Nav from '@/components/Nav';
+import { Spinner } from '@/components/Spinner';
 import { getFirebaseAuth } from '@/lib/firebase';
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -39,7 +40,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   if (isCheckingAuth || !isAuthenticated) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#f0f4f2] px-4 py-10">
-        <p className="text-sm font-semibold text-slate-600">Checking your session...</p>
+        <div className="flex items-center gap-2 text-sm font-semibold text-slate-600">
+          <Spinner size="sm" />
+          <span>Checking your session...</span>
+        </div>
       </div>
     );
   }

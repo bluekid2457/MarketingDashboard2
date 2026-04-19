@@ -7,6 +7,7 @@ import { doc, getDoc } from 'firebase/firestore';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { Spinner } from '@/components/Spinner';
 
 type IdeaRecord = {
   id: string;
@@ -177,33 +178,46 @@ export default function AnglesPage() {
       }
 
       try {
+        const requestBody = {
+          provider: activeConfig.provider,
+          apiKey: activeConfig.apiKey,
+          ollamaBaseUrl: activeConfig.ollamaBaseUrl,
+          ollamaModel: activeConfig.ollamaModel,
+          idea: {
+            topic: idea.topic,
+            tone: idea.tone,
+            audience: idea.audience,
+            format: idea.format,
+            selectedAngle: options?.selectedAngle ?? undefined,
+          },
+          count: isRefinementRequest ? 1 : 4,
+          selectedAngleId: options?.selectedAngleId,
+          refinementPrompt: options?.refinementPrompt,
+        };
+
+        console.log('[Angles Page] Sending AI request', {
+          provider: requestBody.provider,
+          count: requestBody.count,
+          selectedAngleId: requestBody.selectedAngleId,
+          hasRefinementPrompt: Boolean(requestBody.refinementPrompt),
+          topic: requestBody.idea.topic,
+          tone: requestBody.idea.tone,
+          audience: requestBody.idea.audience,
+          format: requestBody.idea.format,
+        });
+
         const response = await fetch('/api/angles', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            provider: activeConfig.provider,
-            apiKey: activeConfig.apiKey,
-            ollamaBaseUrl: activeConfig.ollamaBaseUrl,
-            ollamaModel: activeConfig.ollamaModel,
-            idea: {
-              topic: idea.topic,
-              tone: idea.tone,
-              audience: idea.audience,
-              format: idea.format,
-              selectedAngle: options?.selectedAngle ?? undefined,
-            },
-            count: isRefinementRequest ? 1 : 4,
-            selectedAngleId: options?.selectedAngleId,
-            refinementPrompt: options?.refinementPrompt,
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         const payload = (await response.json()) as AnglesApiResponse;
 
         if (payload.promptUsed) {
-          console.log(`[Angles Page] Prompt sent to AI (${payload.provider ?? activeConfig.provider}):\n${payload.promptUsed}`);
+          console.log(`[Angles Page] Prompt metadata returned in response payload (${payload.provider ?? activeConfig.provider}):\n${payload.promptUsed}`);
         }
         if (payload.modelText) {
           console.log(`[Angles Page] Response returned by AI (${payload.provider ?? activeConfig.provider}):\n${payload.modelText}`);
@@ -321,13 +335,56 @@ export default function AnglesPage() {
     setUnlockedEditors({});
     setChatHistory([]);
 
+    // Fast-path: check localStorage cache written by the Ideas page
+    let loadedFromCache = false;
+    try {
+      const cached = localStorage.getItem('angles_idea_context');
+      if (cached) {
+        const parsed = JSON.parse(cached) as {
+          ideaId: string;
+          topic: string;
+          tone: string;
+          audience: string;
+          format: string;
+          createdAtMs: number;
+        };
+        if (parsed.ideaId === ideaId) {
+          setIdea({
+            id: parsed.ideaId,
+            topic: parsed.topic,
+            tone: parsed.tone,
+            audience: parsed.audience,
+            format: parsed.format,
+            createdAtLabel: formatIdeaTimestamp(undefined, parsed.createdAtMs),
+          });
+          setIsIdeaLoading(false);
+          loadedFromCache = true;
+          // Continue to Firestore in background to keep data fresh (do not block UI)
+        }
+      }
+    } catch {
+      // localStorage unavailable — fall through to Firestore
+    }
+
+    const timeoutId = setTimeout(() => {
+      setIsIdeaLoading((prev) => {
+        if (prev) {
+          setIdeaError('Loading is taking longer than expected. Please go back to the Ideas page and try again.');
+          return false;
+        }
+        return prev;
+      });
+    }, 10_000);
+
     const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
       setCurrentUser(user);
 
       if (!user) {
-        setIdea(null);
-        setIdeaError('Sign in first, then choose an idea from the Ideas page.');
-        setIsIdeaLoading(false);
+        if (!loadedFromCache) {
+          setIdea(null);
+          setIdeaError('Sign in first, then choose an idea from the Ideas page.');
+          setIsIdeaLoading(false);
+        }
         return;
       }
 
@@ -336,9 +393,11 @@ export default function AnglesPage() {
         const snapshot = await getDoc(ideaRef);
 
         if (!snapshot.exists()) {
-          setIdea(null);
-          setIdeaError('That idea could not be found. Pick an idea from the Ideas page and try again.');
-          setIsIdeaLoading(false);
+          if (!loadedFromCache) {
+            setIdea(null);
+            setIdeaError('That idea could not be found. Pick an idea from the Ideas page and try again.');
+            setIsIdeaLoading(false);
+          }
           return;
         }
 
@@ -353,15 +412,22 @@ export default function AnglesPage() {
           format: typeof data.format === 'string' ? data.format : 'Unspecified',
           createdAtLabel: formatIdeaTimestamp(data.createdAt, createdAtMs),
         });
+        if (!loadedFromCache) {
+          setIsIdeaLoading(false);
+        }
       } catch {
-        setIdea(null);
-        setIdeaError('Unable to load the selected idea right now.');
-      } finally {
-        setIsIdeaLoading(false);
+        if (!loadedFromCache) {
+          setIdea(null);
+          setIdeaError('Unable to load the selected idea right now.');
+          setIsIdeaLoading(false);
+        }
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(timeoutId);
+      unsubscribe();
+    };
   }, [ideaId]);
 
   useEffect(() => {
@@ -548,7 +614,12 @@ export default function AnglesPage() {
           </section>
         ) : null}
 
-        {isIdeaLoading ? <p className="text-sm text-slate-500">Loading selected idea...</p> : null}
+        {isIdeaLoading ? (
+          <div className="flex items-center gap-2 text-sm text-slate-500">
+            <Spinner size="sm" />
+            <span>Loading selected idea...</span>
+          </div>
+        ) : null}
         {ideaError ? (
           <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {ideaError}
@@ -567,7 +638,12 @@ export default function AnglesPage() {
                 </div>
               </div>
 
-              {isGenerating ? <p className="mb-3 text-sm text-slate-500">Generating AI angles...</p> : null}
+              {isGenerating ? (
+                <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
+                  <Spinner size="sm" />
+                  <span>Generating AI angles...</span>
+                </div>
+              ) : null}
               {generationError ? (
                 <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {generationError}
@@ -744,7 +820,7 @@ export default function AnglesPage() {
                   }}
                   disabled={isRefining || isGenerating || !selectedAngleId}
                 >
-                  {isRefining ? 'Refining...' : 'Send Prompt'}
+                  {isRefining ? <Spinner size="sm" label="Refining..." /> : 'Send Prompt'}
                 </button>
               </div>
             </section>
@@ -758,7 +834,7 @@ export default function AnglesPage() {
                 }}
                 disabled={isGenerating || isRefining}
               >
-                {isGenerating ? 'Regenerating...' : 'Retry AI Generation'}
+                {isGenerating ? <Spinner size="sm" label="Regenerating..." /> : 'Retry AI Generation'}
               </button>
               <button
                 type="button"

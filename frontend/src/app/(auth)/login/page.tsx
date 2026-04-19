@@ -12,6 +12,7 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
+import { Spinner } from '@/components/Spinner';
 import { trackAuthEvent } from '@/lib/analytics';
 import { getFirebaseAuth } from '@/lib/firebase';
 
@@ -181,7 +182,10 @@ export default function LoginPage() {
   if (isCheckingAuth) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#f0f4f2] px-4 py-10">
-        <p className="text-sm font-semibold text-slate-600">Checking your session...</p>
+        <div className="flex items-center gap-2 text-sm font-semibold text-slate-600">
+          <Spinner size="sm" />
+          <span>Checking your session...</span>
+        </div>
       </div>
     );
   }
@@ -263,7 +267,7 @@ export default function LoginPage() {
               className="w-full rounded-xl py-3 text-sm font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
               style={{ background: '#1a7a5e' }}
             >
-              {isSubmitting ? 'Signing In...' : 'Sign In'}
+              {isSubmitting ? <Spinner size="sm" label="Signing In..." /> : 'Sign In'}
             </button>
           </form>
 
@@ -283,7 +287,7 @@ export default function LoginPage() {
               <span className="flex h-5 w-5 items-center justify-center rounded bg-blue-700 text-[10px] font-bold text-white">
                 in
               </span>
-              {socialLoading === 'linkedin' ? 'Signing in...' : 'Sign in with LinkedIn'}
+              {socialLoading === 'linkedin' ? <Spinner size="sm" label="Signing in..." /> : 'Sign in with LinkedIn'}
             </button>
             <button
               type="button"
@@ -294,7 +298,7 @@ export default function LoginPage() {
               <span className="flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white text-xs font-bold text-red-500">
                 G
               </span>
-              {socialLoading === 'google' ? 'Signing in...' : 'Sign in with Google'}
+              {socialLoading === 'google' ? <Spinner size="sm" label="Signing in..." /> : 'Sign in with Google'}
             </button>
           </div>
 

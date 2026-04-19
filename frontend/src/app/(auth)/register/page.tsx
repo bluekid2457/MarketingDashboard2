@@ -9,6 +9,7 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
+import { Spinner } from '@/components/Spinner';
 import { trackAuthEvent } from '@/lib/analytics';
 import { getFirebaseAuth } from '@/lib/firebase';
 
@@ -122,7 +123,10 @@ export default function RegisterPage() {
   if (isCheckingAuth) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#f0f4f2] px-4 py-10">
-        <p className="text-sm font-semibold text-slate-600">Checking your session...</p>
+        <div className="flex items-center gap-2 text-sm font-semibold text-slate-600">
+          <Spinner size="sm" />
+          <span>Checking your session...</span>
+        </div>
       </div>
     );
   }
@@ -211,7 +215,7 @@ export default function RegisterPage() {
               className="w-full rounded-xl py-3 text-sm font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
               style={{ background: '#1a7a5e' }}
             >
-              {isSubmitting ? 'Creating Account...' : 'Create Account'}
+              {isSubmitting ? <Spinner size="sm" label="Creating Account..." /> : 'Create Account'}
             </button>
           </form>
 

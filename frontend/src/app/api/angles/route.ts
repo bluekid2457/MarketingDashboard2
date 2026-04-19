@@ -32,6 +32,44 @@ type AnglesRequestBody = {
 const MAX_ANGLES = 8;
 const DEFAULT_ANGLES = 4;
 
+function makeFallbackSections(topic: string, audience: string, format: string): string[] {
+  return [
+    `Define the core ${topic || 'topic'} problem for ${audience || 'the audience'}`,
+    `Outline a ${format || 'content'} framework with concrete steps`,
+    'Add one tactical example with measurable outcomes',
+    'Close with a practical CTA and next-step checklist',
+  ];
+}
+
+function buildFallbackAngles(
+  idea: string | IdeaInput,
+  count: number,
+  isRefinement: boolean,
+  selectedAngleId: string,
+): Angle[] {
+  const topic = typeof idea === 'string' ? idea.trim() : asString(idea.topic);
+  const tone = typeof idea === 'string' ? '' : asString(idea.tone);
+  const audience = typeof idea === 'string' ? '' : asString(idea.audience);
+  const format = typeof idea === 'string' ? '' : asString(idea.format);
+  const sections = makeFallbackSections(topic, audience, format);
+
+  if (isRefinement) {
+    return [{
+      id: selectedAngleId || crypto.randomUUID(),
+      title: `${topic || 'Content'}: Refined Tactical Angle`,
+      summary: `A refined ${tone || 'clear'} approach focused on ${audience || 'the target audience'} with executable guidance.`,
+      sections,
+    }];
+  }
+
+  return Array.from({ length: count }, (_, index) => ({
+    id: crypto.randomUUID(),
+    title: `${topic || 'Content'} Angle ${index + 1}`,
+    summary: `A ${tone || 'practical'} strategy for ${audience || 'your audience'} optimized for ${format || 'your channel'}.`,
+    sections,
+  }));
+}
+
 function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -333,6 +371,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to generate angles.';
     console.error('[API Angles] Error generating angles:', { provider, error: message });
-    return NextResponse.json({ error: message }, { status: 502 });
+
+    const isRefinement = Boolean(refinementPrompt);
+    const fallbackAngles = buildFallbackAngles(idea, isRefinement ? 1 : count, isRefinement, selectedAngleId);
+
+    console.warn('[API Angles] Returning fallback angles to avoid hard failure', {
+      provider,
+      isRefinement,
+      count: fallbackAngles.length,
+    });
+
+    return NextResponse.json({
+      angles: fallbackAngles,
+      provider,
+      error: `AI provider failed, fallback angles were returned. Root cause: ${message}`,
+      promptUsed: null,
+      modelText: null,
+      fallback: true,
+    });
   }
 }

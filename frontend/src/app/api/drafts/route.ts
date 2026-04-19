@@ -141,6 +141,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({
       provider,
       draft,
+      promptUsed: prompt,
+      modelText: draft,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to generate draft.';

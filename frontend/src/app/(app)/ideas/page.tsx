@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore';
 
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { Spinner } from '@/components/Spinner';
 
 type IdeaRecord = {
   id: string;
@@ -437,7 +438,7 @@ export default function IdeasPage() {
                 style={{ background: '#1a7a5e' }}
                 disabled={isSubmitting}
               >
-                {isSubmitting ? 'Saving...' : 'Add Idea'}
+                {isSubmitting ? <Spinner size="sm" label="Saving..." /> : 'Add Idea'}
               </button>
             </div>
           </form>
@@ -488,7 +489,12 @@ export default function IdeasPage() {
               {ideasError}
             </div>
           ) : null}
-          {isIdeasLoading ? <p className="text-sm text-slate-500">Loading your saved ideas...</p> : null}
+          {isIdeasLoading ? (
+            <div className="flex items-center gap-2 text-sm text-slate-500">
+              <Spinner size="sm" />
+              <span>Loading your saved ideas...</span>
+            </div>
+          ) : null}
           {!isIdeasLoading && !ideasError && visibleIdeas.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-5 py-8 text-center text-sm text-slate-500">
               No ideas match the current filters yet.
@@ -546,7 +552,24 @@ export default function IdeasPage() {
                   type="button"
                   className="rounded-xl px-4 py-2 text-sm font-bold text-white transition hover:opacity-90"
                   style={{ background: '#1a7a5e' }}
-                  onClick={() => router.push(`/angles?ideaId=${encodeURIComponent(selectedIdea.id)}`)}
+                  onClick={() => {
+                    try {
+                      localStorage.setItem(
+                        'angles_idea_context',
+                        JSON.stringify({
+                          ideaId: selectedIdea.id,
+                          topic: selectedIdea.topic,
+                          tone: selectedIdea.tone,
+                          audience: selectedIdea.audience,
+                          format: selectedIdea.format,
+                          createdAtMs: selectedIdea.createdAtMs,
+                        }),
+                      );
+                    } catch {
+                      // localStorage unavailable — Firestore fallback will be used
+                    }
+                    router.push(`/angles?ideaId=${encodeURIComponent(selectedIdea.id)}`);
+                  }}
                 >
                   Generate Angles
                 </button>

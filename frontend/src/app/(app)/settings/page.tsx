@@ -5,6 +5,7 @@ import { getFirebaseAuth } from "@/lib/firebase";
 import { signOut } from "firebase/auth";
 import { trackAuthEvent } from "@/lib/analytics";
 import { type AIConfig, type AIProvider, loadAIConfig, saveAIConfig } from "@/lib/aiConfig";
+import { Spinner } from "@/components/Spinner";
 
 export default function SettingsPage() {
   const [loading, setLoading] = useState(false);
@@ -176,7 +177,7 @@ export default function SettingsPage() {
             onClick={handleLogout}
             disabled={loading}
           >
-            {loading ? "Logging out..." : "Log out"}
+            {loading ? <Spinner size="sm" label="Logging out..." /> : "Log out"}
           </button>
           {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
         </section>
