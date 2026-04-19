@@ -3,17 +3,119 @@
 @tailwind utilities;
 
 :root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
-  --background-end-rgb: 255, 255, 255;
+  --ink-strong: #10233d;
+  --ink-body: #2f3e51;
+  --ink-muted: #607086;
+  --surface-0: #f4f6f8;
+  --surface-1: #ffffff;
+  --surface-2: #eef2f6;
+  --line-soft: #dbe4ee;
+  --brand: #0f766e;
+  --brand-soft: #d8f3ef;
+  --accent: #f59e0b;
+  /* dark sidebar palette */
+  --sidebar-bg: #14302a;
+  --sidebar-active: #1d4a3e;
+  --sidebar-text: #a7c9be;
+  --sidebar-text-active: #ffffff;
+  --sidebar-border: rgba(255,255,255,0.08);
+  /* page header */
+  --page-header-bg: #1a3d34;
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background: linear-gradient(
-      to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))
-    )
-    rgb(var(--background-start-rgb));
+  color: var(--ink-body);
+  background: #f0f4f2;
+  min-height: 100vh;
+}
+
+@layer components {
+  .surface-card {
+    @apply rounded-2xl border bg-white shadow-sm;
+    border-color: var(--line-soft);
+  }
+
+  .section-title {
+    @apply text-base font-semibold;
+    color: var(--ink-strong);
+  }
+
+  .muted-copy {
+    @apply text-sm;
+    color: var(--ink-muted);
+  }
+
+  .pill {
+    @apply inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold tracking-wide;
+    border-color: #c7d6e5;
+    background: #f7fafc;
+    color: #36506e;
+  }
+
+  .hero-metric {
+    @apply rounded-xl border p-4;
+    border-color: #cfe0f1;
+    background: #f7fbff;
+  }
+
+  /* dark page-level header bar matching templates */
+  .page-header {
+    @apply mb-6 rounded-2xl px-6 py-5 text-white;
+    background: var(--page-header-bg);
+  }
+
+  .page-header h1 {
+    @apply text-2xl font-bold leading-snug;
+  }
+
+  .page-header .breadcrumb {
+    @apply mt-1 text-sm;
+    color: #7db8a8;
+  }
+
+  /* score badge pills used on Draft / Adapt */
+  .score-badge-green {
+    @apply inline-flex items-center gap-1 rounded-lg px-3 py-1 text-sm font-bold text-white;
+    background: #1a7a5e;
+  }
+
+  .score-badge-teal {
+    @apply inline-flex items-center gap-1 rounded-lg px-3 py-1 text-sm font-bold text-white;
+    background: #0f766e;
+  }
+
+  /* right-hand trends panel */
+  .trends-panel {
+    @apply rounded-2xl p-5 text-white;
+    background: var(--page-header-bg);
+  }
+
+  .trends-panel h2 {
+    @apply mb-3 text-sm font-bold uppercase tracking-wider;
+    color: #7db8a8;
+  }
+
+  .trends-panel .trend-item {
+    @apply mb-2 cursor-pointer text-sm font-medium leading-snug hover:underline;
+    color: #d4f0e8;
+  }
+
+  .trends-panel .trend-score {
+    @apply ml-1 text-xs;
+    color: #7db8a8;
+  }
+
+  .trends-panel .article-item {
+    @apply mb-3 text-sm leading-snug;
+    color: #c8e8df;
+  }
+
+  .trends-panel .article-item a {
+    @apply font-semibold text-white hover:underline;
+  }
+
+  .trends-panel .article-date {
+    @apply block text-xs;
+    color: #7db8a8;
+  }
 }

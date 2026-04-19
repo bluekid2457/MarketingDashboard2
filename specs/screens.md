@@ -8,13 +8,17 @@ This document describes the main screens required for the Marketing Dashboard, b
 **Purpose:** Secure user login, registration, and OAuth provider selection.
 **Components:**
 - Email/password fields
-- OAuth provider buttons (LinkedIn, Medium, etc.)
+- Client-side validation (email required + format, password required)
+- Inline user-safe error banner for auth failures
+- Loading state on submit with duplicate-submit prevention
+- OAuth provider buttons (currently visual placeholders)
 - Forgot password link
 - Registration link
-- Error messages
+- Firebase Email/Password sign-in integration
 **Main Actions:**
-- User authentication
-- Redirect to dashboard on success
+- Emit `login_attempt`, `login_success`, `login_failure` auth analytics events
+- Redirect authenticated users from `/login` to `/dashboard`
+- Redirect to dashboard on successful login
 
 ---
 
@@ -41,22 +45,30 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Sort/filter controls
 - Trend detection panel (shows trending topics) As well as ability to click into the articles that are relevant.
 - Competitor content panel (shows tracked competitor posts/gaps)
+- Selected-idea card with a Generate Angles button that routes to `/angles?ideaId=<ideaDocId>`
 **Main Actions:**
 - Submit/edit/delete ideas
 - Sort/filter backlog
 - View trends and competitor analysis
+- Trigger angles generation flow for the selected idea
 
 ---
 
 ## 4. AI Angle Selection & Outline Screen (AngleOutlineScreen.png)
 **Purpose:** Review AI-generated angles/outlines for an idea, select or edit before drafting.
 **Components:**
-- List of AI-generated angles/outlines (card/list view)
-- Inline editing for each angle
+- Query-based idea handoff via `ideaId`, with Firestore idea loading for signed-in user
+- Empty/guide state when no `ideaId` is provided
+- Provider-backed angle generation (`/api/angles`) using saved Settings provider/key
+- List of AI-generated angles/outlines (card/list view) with prev/next carousel controls
+- Inline section editing when "Unlock Detailed Editor" is enabled
 - Selection controls (radio/check)
-- Error/retry messages
+- Refine chat input that updates the selected angle and appends chat history
+- Error/retry messages and loading states
 **Main Actions:**
 - Select or edit an angle
+- Refine selected angle with AI
+- Retry angle generation for the same idea
 - Proceed to draft generation
 
 ---
@@ -71,23 +83,36 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Persona targeting options
 - A/B headline generator
 - Plagiarism/citation checker
-- Save, submit for review, or schedule buttons
+- Workflow breadcrumb that includes the next Multi-Channel Adaptation step
+- Save, **Adapt for Platforms**, submit for review, or schedule buttons
 **Main Actions:**
 - Edit content
 - Tune tone/sentiment
 - Check SEO/readability
 - Save/submit/schedule
+- Store draft handoff context and route to `/adapt/<ideaId>?angleId=<angleId>` when Adapt for Platforms is clicked
 
 ---
 
 ## 6. Multi-Channel Adaptation Screen (AdaptationScreen.jpg)
 **Purpose:** Adapt content for different platforms/formats.
 **Components:**
-- Platform selector (LinkedIn, Medium, Blog, Twitter, etc.)
-- Preview for each format
-- AI chat for editing/adapting content per platform
+- Route/context validation against draft handoff data in `localStorage['adapt_draft_context']`
+- Firestore-backed per-platform adaptation document at `users/{uid}/adaptations/{ideaId}_{angleId}`
+- Platform selector for LinkedIn, X/Twitter, Medium, Newsletter, and Blog
+- Explicit Generate action for the active platform (calls AI adaptation endpoint)
+- Platform-specific editor where only the active tab's copy is edited
+- Prompt-template resolver under `src/lib/prompts/platforms` with concise per-platform rules (LinkedIn, X/Twitter, Medium, Newsletter, Blog)
+- Visible autosave/manual-save status for adaptation persistence
+- AI chat for editing/adapting the currently active platform version
+- Optimization tools for SEO Optimizer, AI Check, and Source Check with on-screen results; each tool analyzes the currently active platform copy, uses the configured AI provider when a valid key exists, and falls back to deterministic per-tool results when a non-Ollama key is missing
+- Live preview of the active platform copy plus per-platform word counts
+- Live trends and relevant articles panel sourced from `/api/trends`
 **Main Actions:**
 - Adapt content per platform
+- Generate platform-specific copy from the source draft using AI prompt rules
+- Save/revisit retained platform adaptations
+- Run analysis tools on the active platform copy
 - Preview and approve
 
 ---
@@ -111,7 +136,7 @@ This document describes the main screens required for the Marketing Dashboard, b
 ## 8. Review & Approval Workflow Screen
 **Purpose:** Manage draft approvals, version history, and comments.
 **Components:**
-- Draft queue/list
+- Draft queue/list sourced from the signed-in user's Firestore drafts (`users/{uid}/drafts`)
 - Inline editor for review
 - Version history panel
 - Approval chain controls
@@ -121,6 +146,7 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Approve/reject drafts
 - Edit/comment
 - View/restore versions
+- Open any queue item to its corresponding draft detail route (`/drafts/<ideaId>?angleId=<angleId>`)
 
 ---
 
