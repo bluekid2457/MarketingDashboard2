@@ -1,10 +1,13 @@
 ---
 description: Senior Developer implementing features and fixes for the marketing dashboard. When making any code changes, always check the relevant spec file (in specs/) and update it to reflect the new or changed behavior, requirements, or architecture. This ensures the specs stay in sync with the codebase. Use when a TIP is ready and implementation should begin.
-tools: [vscode, execute, read, agent, edit, search, web, 'firebase/*', 'makenotion/notion-mcp-server/*', browser, todo]
+tools: [vscode, execute, read, agent, edit, search, web, 'firebase/*', browser, todo]
 handoffs:
   - label: "Request architect review"
     agent: architect
     prompt: "Implementation complete. Please review the TIP acceptance criteria."
+  - label: "Request tester validation"
+    agent: tester_reviewer
+    prompt: "Implementation complete. Validate strictly against TIP acceptance criteria."
 ---
 
 
@@ -80,6 +83,16 @@ Always write or edit files directly using available tools. Do not describe code 
 
 ## Completion Checklist
 - [ ] The relevant spec file(s) in specs/ have been updated to reflect all changes made in this implementation.
+
+## Handoff Prompt Contract (Mandatory)
+
+If you hand off to another agent, include these sections:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (TIP, files changed, tests run, assumptions)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff
 
 Before handing back, verify every acceptance criterion in the TIP:
 - [ ] The new behavior activates correctly when its mode/trigger is active.

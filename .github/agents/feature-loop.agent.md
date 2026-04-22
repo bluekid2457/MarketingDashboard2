@@ -3,6 +3,16 @@ name: "Feature Loop Manager"
 description: "Autonomous feature loop manager for the marketing dashboard. Takes a basic prompt or TIP, then iteratively runs architect, developer, and tester_reviewer until completion. Use when you want fire-and-forget implementation with no approval checkpoints."
 tools: [vscode/getProjectSetupInfo, vscode/installExtension, vscode/memory, vscode/newWorkspace, vscode/resolveMemoryFileUri, vscode/runCommand, vscode/vscodeAPI, vscode/extensions, vscode/askQuestions, execute/runNotebookCell, execute/testFailure, execute/getTerminalOutput, execute/awaitTerminal, execute/killTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, read/getNotebookSummary, read/problems, read/readFile, read/viewImage, read/readNotebookCellOutput, read/terminalSelection, read/terminalLastCommand, agent/runSubagent, edit/createDirectory, edit/createFile, edit/createJupyterNotebook, edit/editFiles, edit/editNotebook, edit/rename, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/searchResults, search/textSearch, search/usages, web/fetch, web/githubRepo, supabase/apply_migration, supabase/create_branch, supabase/delete_branch, supabase/deploy_edge_function, supabase/execute_sql, supabase/generate_typescript_types, supabase/get_advisors, supabase/get_edge_function, supabase/get_logs, supabase/get_project_url, supabase/get_publishable_keys, supabase/list_branches, supabase/list_edge_functions, supabase/list_extensions, supabase/list_migrations, supabase/list_tables, supabase/merge_branch, supabase/rebase_branch, supabase/reset_branch, supabase/search_docs, browser/openBrowserPage, todo, agent]
 agents: [architect, developer, tester_reviewer]
+handoffs:
+  - label: "Create TIP with Architect"
+    agent: architect
+    prompt: "Create an implementation-ready TIP from the provided request/issue."
+  - label: "Implement with Developer"
+    agent: developer
+    prompt: "Implement the provided TIP and keep specs in sync."
+  - label: "Validate with Tester Reviewer"
+    agent: tester_reviewer
+    prompt: "Validate implementation strictly against TIP acceptance criteria."
 argument-hint: "Provide either a short feature request or a TIP."
 ---
 
@@ -58,6 +68,16 @@ Final output must include:
 - Final verdict: `APPROVED` or `BLOCKED`
 - Short completion summary
 - Any remaining TODOs
+
+## Handoff Prompt Contract (Mandatory)
+
+Every handoff prompt must include:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (TIP, findings, files/areas, assumptions)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff
 
 ## Do Not
 - Skip the tester stage.

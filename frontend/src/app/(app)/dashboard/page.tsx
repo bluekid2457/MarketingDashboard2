@@ -76,9 +76,9 @@ export default function DashboardPage() {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <section className="surface-card p-6">
-          <h2 className="section-title">Drafts and Review Queue</h2>
+          <h2 className="section-title">Storyboards and Review Queue</h2>
           <ul className="mt-4 space-y-3 text-sm">
-            {['Draft-119 - Needs legal pass', 'Draft-120 - Waiting for client comment', 'Draft-121 - Ready for publish'].map((item) => (
+            {['Storyboard-119 - Needs legal pass', 'Storyboard-120 - Waiting for client comment', 'Storyboard-121 - Ready for publish'].map((item) => (
               <li key={item} className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2">
                 <span className="font-medium text-slate-700">{item}</span>
                 <button className="text-xs font-semibold text-teal-700">Open</button>

@@ -8,7 +8,7 @@ import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { Spinner } from '@/components/Spinner';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 
-type ReviewDraft = {
+type ReviewStoryboard = {
   id: string;
   ideaId: string;
   angleId: string;
@@ -31,15 +31,15 @@ function formatTimestampLabel(value: unknown): string {
 export default function ReviewPage() {
   const router = useRouter();
   const [currentUid, setCurrentUid] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<ReviewDraft[]>([]);
-  const [isLoadingDrafts, setIsLoadingDrafts] = useState(true);
-  const [draftsError, setDraftsError] = useState<string | null>(null);
+  const [storyboards, setStoryboards] = useState<ReviewStoryboard[]>([]);
+  const [isLoadingStoryboards, setIsLoadingStoryboards] = useState(true);
+  const [storyboardsError, setStoryboardsError] = useState<string | null>(null);
 
   useEffect(() => {
     const auth = getFirebaseAuth();
     if (!auth) {
-      setDraftsError('Review queue is unavailable until Firebase is configured.');
-      setIsLoadingDrafts(false);
+      setStoryboardsError('Review queue is unavailable until Firebase is configured.');
+      setIsLoadingStoryboards(false);
       return;
     }
 
@@ -52,26 +52,26 @@ export default function ReviewPage() {
 
   useEffect(() => {
     if (!currentUid) {
-      setDrafts([]);
-      setIsLoadingDrafts(false);
+      setStoryboards([]);
+      setIsLoadingStoryboards(false);
       return;
     }
 
     const db = getFirebaseDb();
     if (!db) {
-      setDraftsError('Review queue is unavailable until Firebase is configured.');
-      setIsLoadingDrafts(false);
+      setStoryboardsError('Review queue is unavailable until Firebase is configured.');
+      setIsLoadingStoryboards(false);
       return;
     }
 
-    setIsLoadingDrafts(true);
-    setDraftsError(null);
+    setIsLoadingStoryboards(true);
+    setStoryboardsError(null);
 
-    const draftsQuery = query(collection(db, 'users', currentUid, 'drafts'), orderBy('updatedAt', 'desc'));
+    const storyboardsQuery = query(collection(db, 'users', currentUid, 'drafts'), orderBy('updatedAt', 'desc'));
     const unsubscribe = onSnapshot(
-      draftsQuery,
+      storyboardsQuery,
       (snapshot) => {
-        const nextDrafts = snapshot.docs.map((documentSnapshot) => {
+        const nextStoryboards = snapshot.docs.map((documentSnapshot) => {
           const data = documentSnapshot.data();
 
           return {
@@ -83,28 +83,28 @@ export default function ReviewPage() {
             status: typeof data.status === 'string' ? data.status : 'draft',
             updatedAtLabel: formatTimestampLabel(data.updatedAt),
             contentLength: typeof data.content === 'string' ? data.content.trim().length : 0,
-          } satisfies ReviewDraft;
+          } satisfies ReviewStoryboard;
         });
 
-        setDrafts(nextDrafts);
-        setIsLoadingDrafts(false);
+        setStoryboards(nextStoryboards);
+        setIsLoadingStoryboards(false);
       },
       () => {
-        setDraftsError('Unable to load your review queue right now.');
-        setDrafts([]);
-        setIsLoadingDrafts(false);
+        setStoryboardsError('Unable to load your review queue right now.');
+        setStoryboards([]);
+        setIsLoadingStoryboards(false);
       },
     );
 
     return unsubscribe;
   }, [currentUid]);
 
-  const hasReviewableDrafts = useMemo(
-    () => drafts.some((draft) => draft.ideaId && draft.angleId),
-    [drafts],
+  const hasReviewableStoryboards = useMemo(
+    () => storyboards.some((storyboard) => storyboard.ideaId && storyboard.angleId),
+    [storyboards],
   );
 
-  function openDraft(record: ReviewDraft): void {
+  function openStoryboard(record: ReviewStoryboard): void {
     if (!record.ideaId || !record.angleId) {
       return;
     }
@@ -128,7 +128,7 @@ export default function ReviewPage() {
     };
 
     localStorage.setItem('draft_generation_context', JSON.stringify(draftContext));
-    router.push(`/drafts/${record.ideaId}?angleId=${record.angleId}`);
+    router.push(`/storyboard/${record.ideaId}?angleId=${record.angleId}`);
   }
 
   return (
@@ -139,38 +139,38 @@ export default function ReviewPage() {
 
       <div className="grid gap-6 xl:grid-cols-[1.25fr_1fr]">
         <section className="surface-card p-6">
-          <h2 className="section-title">Draft Queue</h2>
+          <h2 className="section-title">Storyboard Queue</h2>
 
-          {isLoadingDrafts ? (
+          {isLoadingStoryboards ? (
             <div className="mt-4 text-sm text-slate-600">
               <Spinner size="sm" label="Loading review queue..." />
             </div>
           ) : null}
 
-          {draftsError ? <p className="mt-4 text-sm text-red-700">{draftsError}</p> : null}
+          {storyboardsError ? <p className="mt-4 text-sm text-red-700">{storyboardsError}</p> : null}
 
-          {!isLoadingDrafts && !draftsError && !hasReviewableDrafts ? (
+          {!isLoadingStoryboards && !storyboardsError && !hasReviewableStoryboards ? (
             <p className="mt-4 text-sm text-slate-600">
-              No drafts are currently available for review.
+              No storyboard documents are currently available for review.
             </p>
           ) : null}
 
-          {!isLoadingDrafts && !draftsError && hasReviewableDrafts ? (
+          {!isLoadingStoryboards && !storyboardsError && hasReviewableStoryboards ? (
             <ul className="mt-4 space-y-2 text-sm text-slate-700">
-              {drafts
-                .filter((draft) => draft.ideaId && draft.angleId)
-                .map((draft) => (
-                  <li key={draft.id}>
+              {storyboards
+                .filter((storyboard) => storyboard.ideaId && storyboard.angleId)
+                .map((storyboard) => (
+                  <li key={storyboard.id}>
                     <button
                       type="button"
                       className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-left transition hover:border-teal-300 hover:bg-teal-50"
-                      onClick={() => openDraft(draft)}
+                      onClick={() => openStoryboard(storyboard)}
                     >
-                      <p className="font-semibold text-slate-900">{draft.ideaTopic}</p>
-                      <p className="mt-1 text-xs text-slate-600">{draft.angleTitle}</p>
+                      <p className="font-semibold text-slate-900">{storyboard.ideaTopic}</p>
+                      <p className="mt-1 text-xs text-slate-600">{storyboard.angleTitle}</p>
                       <p className="mt-2 text-[11px] uppercase tracking-wide text-slate-500">
-                        Status: {draft.status} · Updated: {draft.updatedAtLabel} · Characters:{' '}
-                        {draft.contentLength}
+                        Status: {storyboard.status} · Updated: {storyboard.updatedAtLabel} · Characters:{' '}
+                        {storyboard.contentLength}
                       </p>
                     </button>
                   </li>
@@ -180,14 +180,14 @@ export default function ReviewPage() {
 
           <h3 className="mt-5 text-sm font-semibold text-slate-800">Inline Editor</h3>
           <div className="mt-2 min-h-[180px] rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-500">
-            Open a draft from the queue to edit and review the full content.
+            Open a storyboard item from the queue to edit and review the full content.
           </div>
         </section>
 
         <div className="space-y-6">
           <section className="surface-card p-6">
             <h2 className="section-title">Version History</h2>
-            <p className="mt-2 muted-copy">Version snapshots are available in each draft&apos;s editor flow.</p>
+            <p className="mt-2 muted-copy">Version snapshots are available in each storyboard&apos;s editor flow.</p>
           </section>
 
           <section className="surface-card p-6">

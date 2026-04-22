@@ -6,13 +6,13 @@ import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 
 import { Spinner } from '@/components/Spinner';
+import { InlineEditPanel } from '@/components/InlineEditPanel';
+import { DraftChatPanel, type DraftChatMessage } from '@/components/DraftChatPanel';
 import { getActiveAIKey } from '@/lib/aiConfig';
-import {
-  ADAPT_CLIENT_TIMEOUT_MS,
-  buildAdaptGenerationTimeoutMessage,
-  isAbortLikeError,
-} from '@/lib/adaptTimeout';
+import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { useInlineEdit, type InlineSelection } from '@/lib/useInlineEdit';
+import WorkflowStepper from '@/components/WorkflowStepper';
 
 type IdeaRecord = {
   id: string;
@@ -39,17 +39,29 @@ type AdaptDraftContext = {
 
 type PlatformKey = 'linkedin' | 'twitter' | 'medium' | 'newsletter' | 'blog';
 type PlatformContent = Record<PlatformKey, string>;
+type PlatformStateMap = Record<PlatformKey, PlatformState>;
+type SeoStateMap = Record<PlatformKey, SeoState>;
+type PlatformVersionMap = Record<PlatformKey, number>;
 
-type ChatMessage = {
-  role: 'user' | 'assistant';
-  content: string;
+type PlatformState = {
+  status: 'idle' | 'queued' | 'running' | 'success' | 'failed';
+  error: string | null;
+  generatedAt: string | null;
 };
 
-type ChatApiResponse = {
-  reply?: string;
-  updatedDraft?: string | null;
-  provider?: string;
-  error?: string;
+type SeoResult = {
+  primaryKeyword: string;
+  keywordDensity: number;
+  readabilityScore: number;
+  readabilityGrade: string;
+  optimizationTips: string[];
+};
+
+type SeoState = {
+  status: 'idle' | 'pending' | 'success' | 'failed';
+  error: string | null;
+  result: SeoResult | null;
+  requestVersion: number;
 };
 
 type AdaptGenerateApiResponse = {
@@ -58,74 +70,34 @@ type AdaptGenerateApiResponse = {
   error?: string;
 };
 
-type SeoResult = {
-  primaryKeyword: string;
-  secondaryKeywords: string[];
-  keywordDensity: number;
-  readabilityScore: number;
-  readabilityGrade: string;
-  metaDescription: string;
-  titleSuggestions: string[];
-  optimizationTips: string[];
-  similarArticleTopics: string[];
-  wordCount: number;
-};
-
-type AiCheckResult = {
-  aiLikelihoodScore: number;
-  aiLikelihoodLabel: string;
-  flaggedPhrases: Array<{ phrase: string; reason: string }>;
-  humanizationTips: string[];
-  originality: string;
-  verdict: string;
-};
-
-type SourcesResult = {
-  claims: Array<{ claim: string; needsCitation: boolean; suggestedSearchQuery: string }>;
-  relevanceScore: number;
-  relevanceSummary: string;
-  urlsFound: string[];
-  recommendations: string[];
-};
-
-type AnalyzeType = 'seo' | 'plagiarism' | 'sources';
-
 type AnalyzeApiResponse = {
-  type?: AnalyzeType;
-  result?: SeoResult | AiCheckResult | SourcesResult;
+  result?: SeoResult;
+  error?: string;
+};
+
+type DraftChatApiResponse = {
+  reply?: string;
+  updatedDraft?: string | null;
   provider?: string;
   error?: string;
 };
 
-type PlatformAnalysis = {
-  seo?: SeoResult;
-  plagiarism?: AiCheckResult;
-  sources?: SourcesResult;
+type FloatingAnchor = {
+  top: number;
+  left: number;
 };
 
-type TrendsApiResponse = {
-  topics?: Array<{ label: string; count: number }>;
-  articles?: Array<{ title: string; url: string; source: string; publishedAt: string }>;
-  fetchedAt?: string;
-  error?: string;
-};
+type PlatformChatDiffMap = Record<PlatformKey, ChatSentenceDiff[]>;
 
 const ADAPT_CONTEXT_STORAGE_KEY = 'adapt_draft_context';
 const SAVE_DEBOUNCE_MS = 1500;
-const ADAPT_GENERATION_TIMEOUT_MS = ADAPT_CLIENT_TIMEOUT_MS;
-const ADAPT_GENERATION_TIMEOUT_MESSAGE = buildAdaptGenerationTimeoutMessage();
-const PLATFORM_CONFIG: Array<{
-  key: PlatformKey;
-  label: string;
-  shortLabel: string;
-  accentClass: string;
-  icon: string;
-}> = [
-  { key: 'linkedin', label: 'LinkedIn', shortLabel: 'in', accentClass: 'bg-blue-700', icon: 'in' },
-  { key: 'twitter', label: 'X / Twitter', shortLabel: 'X', accentClass: 'bg-slate-900', icon: 'X' },
-  { key: 'medium', label: 'Medium', shortLabel: 'M', accentClass: 'bg-emerald-700', icon: 'M' },
-  { key: 'newsletter', label: 'Newsletter', shortLabel: 'NL', accentClass: 'bg-amber-600', icon: '✉' },
-  { key: 'blog', label: 'Blog', shortLabel: 'Blog', accentClass: 'bg-violet-700', icon: '✎' },
+
+const PLATFORM_CONFIG: Array<{ key: PlatformKey; label: string; accentClass: string }> = [
+  { key: 'linkedin', label: 'LinkedIn', accentClass: 'bg-blue-700' },
+  { key: 'twitter', label: 'X / Twitter', accentClass: 'bg-slate-900' },
+  { key: 'medium', label: 'Medium', accentClass: 'bg-emerald-700' },
+  { key: 'newsletter', label: 'Newsletter', accentClass: 'bg-amber-600' },
+  { key: 'blog', label: 'Blog', accentClass: 'bg-violet-700' },
 ];
 
 function createSeededPlatforms(seedText: string): PlatformContent {
@@ -138,7 +110,37 @@ function createSeededPlatforms(seedText: string): PlatformContent {
   };
 }
 
-function createEmptyChatRecord(): Record<PlatformKey, ChatMessage[]> {
+function createEmptyPlatformState(): PlatformStateMap {
+  return {
+    linkedin: { status: 'idle', error: null, generatedAt: null },
+    twitter: { status: 'idle', error: null, generatedAt: null },
+    medium: { status: 'idle', error: null, generatedAt: null },
+    newsletter: { status: 'idle', error: null, generatedAt: null },
+    blog: { status: 'idle', error: null, generatedAt: null },
+  };
+}
+
+function createEmptySeoState(): SeoStateMap {
+  return {
+    linkedin: { status: 'idle', error: null, result: null, requestVersion: 0 },
+    twitter: { status: 'idle', error: null, result: null, requestVersion: 0 },
+    medium: { status: 'idle', error: null, result: null, requestVersion: 0 },
+    newsletter: { status: 'idle', error: null, result: null, requestVersion: 0 },
+    blog: { status: 'idle', error: null, result: null, requestVersion: 0 },
+  };
+}
+
+function createEmptyVersionState(): PlatformVersionMap {
+  return {
+    linkedin: 0,
+    twitter: 0,
+    medium: 0,
+    newsletter: 0,
+    blog: 0,
+  };
+}
+
+function createEmptyChatDiffState(): PlatformChatDiffMap {
   return {
     linkedin: [],
     twitter: [],
@@ -148,52 +150,61 @@ function createEmptyChatRecord(): Record<PlatformKey, ChatMessage[]> {
   };
 }
 
-function createEmptyPendingRecord(): Record<PlatformKey, string | null> {
-  return {
-    linkedin: null,
-    twitter: null,
-    medium: null,
-    newsletter: null,
-    blog: null,
-  };
+function serializeAdaptation(platforms: PlatformContent, activePlatform: PlatformKey, selectedPlatforms: PlatformKey[]): string {
+  return JSON.stringify({ platforms, activePlatform, selectedPlatforms: [...selectedPlatforms].sort() });
 }
 
-function createEmptyAnalysisRecord(): Record<PlatformKey, PlatformAnalysis> {
-  return {
-    linkedin: {},
-    twitter: {},
-    medium: {},
-    newsletter: {},
-    blog: {},
-  };
+function toPlatformArray(value: unknown): PlatformKey[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const keys = value
+    .map((item) => (typeof item === 'string' ? item : ''))
+    .filter((item): item is PlatformKey => PLATFORM_CONFIG.some((platform) => platform.key === item));
+
+  return [...new Set(keys)];
 }
 
-function createEmptyActiveAnalysisRecord(): Record<PlatformKey, AnalyzeType | null> {
-  return {
-    linkedin: null,
-    twitter: null,
-    medium: null,
-    newsletter: null,
-    blog: null,
-  };
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
 }
 
-function createEmptyStatusRecord(): Record<PlatformKey, string | null> {
-  return {
-    linkedin: null,
-    twitter: null,
-    medium: null,
-    newsletter: null,
-    blog: null,
-  };
+function normalizeSections(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((section) => (typeof section === 'string' ? section.trim() : ''))
+    .filter(Boolean);
 }
 
-function isPlatformKey(value: string): value is PlatformKey {
-  return PLATFORM_CONFIG.some((platform) => platform.key === value);
-}
+function buildDraftScaffold(idea: IdeaRecord, angle: Angle): string {
+  const title = angle.title || idea.topic || 'Adaptation Draft';
+  const sectionList = angle.sections.length > 0 ? angle.sections : ['Key Insight', 'Execution Plan', 'Expected Outcome'];
 
-function serializeAdaptation(platforms: PlatformContent, activePlatform: PlatformKey): string {
-  return JSON.stringify({ platforms, activePlatform });
+  const lines: string[] = [];
+  lines.push(`# ${title}`);
+  lines.push('');
+  lines.push('## Introduction');
+  lines.push(`${angle.summary || 'Use this draft scaffold to continue platform adaptation while source content is being recovered.'}`);
+  lines.push('');
+
+  for (const section of sectionList) {
+    lines.push(`## ${section}`);
+    lines.push(`Expand this section for ${idea.audience || 'the target audience'} with a ${idea.tone || 'clear'} tone.`);
+    lines.push('');
+  }
+
+  lines.push('## Conclusion');
+  lines.push('Summarize the strongest next steps and define a practical call to action.');
+  lines.push('');
+  lines.push('## Sources');
+  lines.push('- [1] https://example.com/reference-1');
+  lines.push('- [2] https://example.com/reference-2');
+
+  return lines.join('\n');
 }
 
 export default function AdaptPage() {
@@ -206,110 +217,234 @@ export default function AdaptPage() {
   const [currentUid, setCurrentUid] = useState<string | null>(null);
   const [adaptContext, setAdaptContext] = useState<AdaptDraftContext | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
+  const [isLoadingContextFromFirebase, setIsLoadingContextFromFirebase] = useState(false);
+
+  const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformKey[]>([]);
+  const [activePlatform, setActivePlatform] = useState<PlatformKey>('linkedin');
+  const [hasStarted, setHasStarted] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
 
   const [platforms, setPlatforms] = useState<PlatformContent>(() => createSeededPlatforms(''));
-  const [activePlatform, setActivePlatform] = useState<PlatformKey>('linkedin');
+  const [platformStates, setPlatformStates] = useState<PlatformStateMap>(createEmptyPlatformState);
+  const [seoByPlatform, setSeoByPlatform] = useState<SeoStateMap>(createEmptySeoState);
+  const [contentVersion, setContentVersion] = useState<PlatformVersionMap>(createEmptyVersionState);
+  const contentVersionRef = useRef<PlatformVersionMap>(createEmptyVersionState());
 
-  const [isAdaptationLoading, setIsAdaptationLoading] = useState(false);
-  const [isGeneratingPlatform, setIsGeneratingPlatform] = useState<PlatformKey | null>(null);
-  const [generateErrorByPlatform, setGenerateErrorByPlatform] =
-    useState<Record<PlatformKey, string | null>>(createEmptyStatusRecord);
-  const [generateSuccessByPlatform, setGenerateSuccessByPlatform] =
-    useState<Record<PlatformKey, string | null>>(createEmptyStatusRecord);
+  const [isSequenceRunning, setIsSequenceRunning] = useState(false);
+  const [generatedPlatforms, setGeneratedPlatforms] = useState<Set<PlatformKey>>(new Set());
+
   const [firebaseLoaded, setFirebaseLoaded] = useState(false);
-  const [hasExistingAdaptation, setHasExistingAdaptation] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
-
-  const [chatHistoryByPlatform, setChatHistoryByPlatform] =
-    useState<Record<PlatformKey, ChatMessage[]>>(createEmptyChatRecord);
-  const [pendingDraftUpdateByPlatform, setPendingDraftUpdateByPlatform] =
-    useState<Record<PlatformKey, string | null>>(createEmptyPendingRecord);
-  const [chatInput, setChatInput] = useState('');
-  const [isChatLoading, setIsChatLoading] = useState(false);
-  const [chatError, setChatError] = useState<string | null>(null);
-
-  const [analysisByPlatform, setAnalysisByPlatform] =
-    useState<Record<PlatformKey, PlatformAnalysis>>(createEmptyAnalysisRecord);
-  const [activeAnalysisByPlatform, setActiveAnalysisByPlatform] =
-    useState<Record<PlatformKey, AnalyzeType | null>>(createEmptyActiveAnalysisRecord);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
-
-  const [trendTopics, setTrendTopics] = useState<Array<{ label: string; count: number }>>([]);
-  const [trendArticles, setTrendArticles] = useState<
-    Array<{ title: string; url: string; source: string; publishedAt: string }>
-  >([]);
-  const [isTrendsLoading, setIsTrendsLoading] = useState(true);
-  const [trendsError, setTrendsError] = useState<string | null>(null);
-
+  const [hasExistingAdaptation, setHasExistingAdaptation] = useState(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedSignatureRef = useRef<string | null>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  const [selection, setSelection] = useState<InlineSelection>({ start: 0, end: 0, text: '' });
+  const [floatingAnchor, setFloatingAnchor] = useState<FloatingAnchor>({ top: 12, left: 12 });
+  const [instruction, setInstruction] = useState('');
+  const [chatHistoryByPlatform, setChatHistoryByPlatform] = useState<Record<PlatformKey, DraftChatMessage[]>>({
+    linkedin: [],
+    twitter: [],
+    medium: [],
+    newsletter: [],
+    blog: [],
+  });
+  const [chatInputByPlatform, setChatInputByPlatform] = useState<Record<PlatformKey, string>>({
+    linkedin: '',
+    twitter: '',
+    medium: '',
+    newsletter: '',
+    blog: '',
+  });
+  const [chatDiffsByPlatform, setChatDiffsByPlatform] = useState<PlatformChatDiffMap>(createEmptyChatDiffState);
+  const [chatProviderByPlatform, setChatProviderByPlatform] = useState<Record<PlatformKey, string | null>>({
+    linkedin: null,
+    twitter: null,
+    medium: null,
+    newsletter: null,
+    blog: null,
+  });
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [isChatSending, setIsChatSending] = useState(false);
+
+  const applyAdaptContext = useCallback((context: AdaptDraftContext) => {
+    setAdaptContext(context);
+    setPlatforms(createSeededPlatforms(context.draftContent));
+    setPlatformStates(createEmptyPlatformState());
+    setSeoByPlatform(createEmptySeoState());
+    setContentVersion(createEmptyVersionState());
+    setSelectedPlatforms([]);
+    setActivePlatform('linkedin');
+    setHasStarted(false);
+    setGeneratedPlatforms(new Set());
+    setFirebaseLoaded(false);
+    setHasExistingAdaptation(false);
+    setSavedAt(null);
+    lastSavedSignatureRef.current = null;
+    setContextError(null);
+  }, []);
+
+  useEffect(() => {
+    contentVersionRef.current = contentVersion;
+  }, [contentVersion]);
 
   useEffect(() => {
     const auth = getFirebaseAuth();
     if (!auth) return;
-
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUid(user?.uid ?? null);
     });
-
     return unsubscribe;
   }, []);
 
   useEffect(() => {
     if (!ideaId) {
-      setAdaptContext(null);
       setContextError('No idea was provided for this adaptation workflow.');
+      setAdaptContext(null);
       return;
     }
 
     if (!angleIdFromQuery) {
+      setContextError('No angle was provided. Return to Storyboard and reopen adaptation.');
       setAdaptContext(null);
-      setContextError('No angle was provided. Return to the Draft Editor and reopen adaptation.');
       return;
     }
 
     const rawContext = localStorage.getItem(ADAPT_CONTEXT_STORAGE_KEY);
     if (!rawContext) {
       setAdaptContext(null);
-      setContextError('No draft adaptation context was found. Return to the Draft Editor first.');
+      setContextError(null);
       return;
     }
 
     try {
       const parsed = JSON.parse(rawContext) as AdaptDraftContext;
-      const draftContent = typeof parsed.draftContent === 'string' ? parsed.draftContent : '';
+      const normalizedContext: AdaptDraftContext = {
+        ideaId: asString(parsed.ideaId),
+        angleId: asString(parsed.angleId),
+        idea: {
+          id: asString(parsed.idea?.id),
+          topic: asString(parsed.idea?.topic),
+          tone: asString(parsed.idea?.tone),
+          audience: asString(parsed.idea?.audience),
+          format: asString(parsed.idea?.format),
+        },
+        selectedAngle: {
+          id: asString(parsed.selectedAngle?.id),
+          title: asString(parsed.selectedAngle?.title),
+          summary: asString(parsed.selectedAngle?.summary),
+          sections: normalizeSections(parsed.selectedAngle?.sections),
+        },
+        draftContent: asString(parsed.draftContent),
+      };
 
-      if (!parsed.ideaId || !parsed.angleId || !parsed.idea || !parsed.selectedAngle || !draftContent.trim()) {
-        setAdaptContext(null);
-        setContextError('Adaptation context is incomplete. Return to the Draft Editor and try again.');
+      const isComplete =
+        normalizedContext.ideaId.length > 0 &&
+        normalizedContext.angleId.length > 0 &&
+        normalizedContext.idea.id.length > 0 &&
+        normalizedContext.selectedAngle.id.length > 0 &&
+        normalizedContext.selectedAngle.title.length > 0 &&
+        normalizedContext.draftContent.length > 0;
+
+      const matchesRoute = normalizedContext.ideaId === ideaId && normalizedContext.angleId === angleIdFromQuery;
+
+      if (isComplete && matchesRoute) {
+        applyAdaptContext(normalizedContext);
         return;
       }
 
-      if (parsed.ideaId !== ideaId || parsed.angleId !== angleIdFromQuery) {
-        setAdaptContext(null);
-        setContextError('Adaptation context does not match this route. Reopen adaptation from the Draft Editor.');
-        return;
-      }
-
-      setAdaptContext(parsed);
-      setPlatforms(createSeededPlatforms(draftContent));
-      setActivePlatform('linkedin');
-      setAnalysisByPlatform(createEmptyAnalysisRecord());
-      setActiveAnalysisByPlatform(createEmptyActiveAnalysisRecord());
+      setAdaptContext(null);
       setContextError(null);
-      setFirebaseLoaded(false);
-      setHasExistingAdaptation(false);
-      setSavedAt(null);
-      lastSavedSignatureRef.current = null;
     } catch {
       setAdaptContext(null);
-      setContextError('Adaptation context is invalid. Return to the Draft Editor and try again.');
+      setContextError(null);
     }
-  }, [angleIdFromQuery, ideaId]);
+  }, [angleIdFromQuery, applyAdaptContext, ideaId]);
+
+  useEffect(() => {
+    if (!currentUid || adaptContext || !ideaId || !angleIdFromQuery) return;
+
+    const db = getFirebaseDb();
+    if (!db) {
+      setContextError('Unable to load adaptation context because Firebase is unavailable.');
+      return;
+    }
+
+    setIsLoadingContextFromFirebase(true);
+
+    void (async () => {
+      try {
+        const [ideaSnapshot, anglesSnapshot, draftSnapshot] = await Promise.all([
+          getDoc(doc(db, 'users', currentUid, 'ideas', ideaId)),
+          getDoc(doc(db, 'users', currentUid, 'ideas', ideaId, 'workflow', 'angles')),
+          getDoc(doc(db, 'users', currentUid, 'drafts', `${ideaId}_${angleIdFromQuery}`)),
+        ]);
+
+        if (!ideaSnapshot.exists()) {
+          setContextError('Unable to find the requested idea. It may have been deleted.');
+          setAdaptContext(null);
+          return;
+        }
+
+        const ideaData = ideaSnapshot.data() as Record<string, unknown>;
+        const loadedIdea: IdeaRecord = {
+          id: ideaSnapshot.id,
+          topic: asString(ideaData.topic),
+          tone: asString(ideaData.tone),
+          audience: asString(ideaData.audience),
+          format: asString(ideaData.format),
+        };
+
+        const anglesData = anglesSnapshot.exists() ? (anglesSnapshot.data() as Record<string, unknown>) : null;
+        const angleCandidates = Array.isArray(anglesData?.angles) ? (anglesData?.angles as unknown[]) : [];
+        const matchedAngleRaw = angleCandidates.find(
+          (candidate) =>
+            typeof candidate === 'object' &&
+            candidate !== null &&
+            asString((candidate as Record<string, unknown>).id) === angleIdFromQuery,
+        );
+
+        if (!matchedAngleRaw || typeof matchedAngleRaw !== 'object') {
+          setContextError('Unable to find the selected angle for this route. Reopen Adapt from Storyboard.');
+          setAdaptContext(null);
+          return;
+        }
+
+        const matchedAngle = matchedAngleRaw as Record<string, unknown>;
+        const selectedAngle: Angle = {
+          id: asString(matchedAngle.id),
+          title: asString(matchedAngle.title),
+          summary: asString(matchedAngle.summary),
+          sections: normalizeSections(matchedAngle.sections),
+        };
+
+        if (!selectedAngle.id || !selectedAngle.title) {
+          setContextError('Selected angle data is incomplete. Reopen Adapt from Storyboard.');
+          setAdaptContext(null);
+          return;
+        }
+
+        const draftData = draftSnapshot.exists() ? (draftSnapshot.data() as Record<string, unknown>) : null;
+        const savedDraftContent = asString(draftData?.content);
+        const draftContent = savedDraftContent || buildDraftScaffold(loadedIdea, selectedAngle);
+
+        applyAdaptContext({
+          ideaId,
+          angleId: angleIdFromQuery,
+          idea: loadedIdea,
+          selectedAngle,
+          draftContent,
+        });
+      } catch {
+        setContextError('Unable to load adaptation context from Firebase. Please try again.');
+        setAdaptContext(null);
+      } finally {
+        setIsLoadingContextFromFirebase(false);
+      }
+    })();
+  }, [adaptContext, angleIdFromQuery, applyAdaptContext, currentUid, ideaId]);
 
   useEffect(() => {
     if (!currentUid || !adaptContext || firebaseLoaded) return;
@@ -322,99 +457,49 @@ export default function AdaptPage() {
 
     const docId = `${adaptContext.ideaId}_${adaptContext.angleId}`;
     const docRef = doc(db, 'users', currentUid, 'adaptations', docId);
-    const seededPlatforms = createSeededPlatforms(adaptContext.draftContent);
-    setIsAdaptationLoading(true);
 
     void (async () => {
       try {
         const snapshot = await getDoc(docRef);
-
         if (snapshot.exists()) {
           const data = snapshot.data();
-          const mergedPlatforms = { ...seededPlatforms };
-          const savedPlatforms = data.platforms;
 
+          const seeded = createSeededPlatforms(adaptContext.draftContent);
+          const savedPlatforms = data.platforms;
           if (savedPlatforms && typeof savedPlatforms === 'object') {
             for (const platform of PLATFORM_CONFIG) {
               const value = (savedPlatforms as Record<string, unknown>)[platform.key];
               if (typeof value === 'string') {
-                mergedPlatforms[platform.key] = value;
+                seeded[platform.key] = value;
               }
             }
           }
 
-          const savedPlatformValue =
-            typeof data.activePlatform === 'string' && isPlatformKey(data.activePlatform)
-              ? data.activePlatform
-              : 'linkedin';
+          const savedSelected = toPlatformArray((data as Record<string, unknown>).selectedPlatforms);
+          const savedActive =
+            typeof data.activePlatform === 'string' && PLATFORM_CONFIG.some((entry) => entry.key === data.activePlatform)
+              ? (data.activePlatform as PlatformKey)
+              : savedSelected[0] ?? 'linkedin';
 
-          setPlatforms(mergedPlatforms);
-          setActivePlatform(savedPlatformValue);
+          setPlatforms(seeded);
+          setSelectedPlatforms(savedSelected);
+          setHasStarted(savedSelected.length > 0);
+          setActivePlatform(savedActive);
+          setGeneratedPlatforms(new Set(savedSelected));
           setHasExistingAdaptation(true);
+
           const timestamp = data.updatedAt as { toDate?: () => Date } | null;
           setSavedAt(timestamp?.toDate?.() ?? null);
-          lastSavedSignatureRef.current = serializeAdaptation(mergedPlatforms, savedPlatformValue);
+          lastSavedSignatureRef.current = serializeAdaptation(seeded, savedActive, savedSelected);
         }
-      } catch (error) {
-        console.warn('[Adapt Page] Failed to load adaptation from Firestore:', error);
       } finally {
-        setIsAdaptationLoading(false);
         setFirebaseLoaded(true);
       }
     })();
   }, [adaptContext, currentUid, firebaseLoaded]);
 
-  useEffect(() => {
-    setChatInput('');
-    setChatError(null);
-    setAnalyzeError(null);
-  }, [activePlatform]);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activePlatform, chatHistoryByPlatform]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadTrends = async (): Promise<void> => {
-      setIsTrendsLoading(true);
-      setTrendsError(null);
-
-      try {
-        const response = await fetch('/api/trends');
-        const payload = (await response.json()) as TrendsApiResponse;
-
-        if (!response.ok) {
-          throw new Error(payload.error ?? 'Unable to load trend data.');
-        }
-
-        if (!cancelled) {
-          setTrendTopics(payload.topics ?? []);
-          setTrendArticles(payload.articles ?? []);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setTrendTopics([]);
-          setTrendArticles([]);
-          setTrendsError(error instanceof Error ? error.message : 'Unable to load trend data.');
-        }
-      } finally {
-        if (!cancelled) {
-          setIsTrendsLoading(false);
-        }
-      }
-    };
-
-    void loadTrends();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const saveAdaptation = useCallback(
-    async (nextPlatforms: PlatformContent, nextActivePlatform: PlatformKey): Promise<void> => {
+    async (nextPlatforms: PlatformContent, nextActivePlatform: PlatformKey, nextSelected: PlatformKey[]): Promise<void> => {
       if (!currentUid || !adaptContext) return;
 
       const db = getFirebaseDb();
@@ -436,6 +521,7 @@ export default function AdaptPage() {
           angleTitle: adaptContext.selectedAngle.title,
           platforms: nextPlatforms,
           activePlatform: nextActivePlatform,
+          selectedPlatforms: nextSelected,
           updatedAt: serverTimestamp(),
         };
 
@@ -446,7 +532,7 @@ export default function AdaptPage() {
         await setDoc(docRef, payload, { merge: true });
         setHasExistingAdaptation(true);
         setSavedAt(new Date());
-        lastSavedSignatureRef.current = serializeAdaptation(nextPlatforms, nextActivePlatform);
+        lastSavedSignatureRef.current = serializeAdaptation(nextPlatforms, nextActivePlatform, nextSelected);
       } catch (error) {
         setSaveError(error instanceof Error ? error.message : 'Unable to save adaptation.');
       } finally {
@@ -457,12 +543,12 @@ export default function AdaptPage() {
   );
 
   const adaptationSignature = useMemo(
-    () => serializeAdaptation(platforms, activePlatform),
-    [activePlatform, platforms],
+    () => serializeAdaptation(platforms, activePlatform, selectedPlatforms),
+    [activePlatform, platforms, selectedPlatforms],
   );
 
   useEffect(() => {
-    if (!firebaseLoaded || !adaptContext || !currentUid) return;
+    if (!firebaseLoaded || !adaptContext || !currentUid || !hasStarted) return;
     if (adaptationSignature === lastSavedSignatureRef.current) return;
 
     if (saveTimerRef.current) {
@@ -470,7 +556,7 @@ export default function AdaptPage() {
     }
 
     saveTimerRef.current = setTimeout(() => {
-      void saveAdaptation(platforms, activePlatform);
+      void saveAdaptation(platforms, activePlatform, selectedPlatforms);
     }, SAVE_DEBOUNCE_MS);
 
     return () => {
@@ -478,263 +564,84 @@ export default function AdaptPage() {
         clearTimeout(saveTimerRef.current);
       }
     };
-  }, [activePlatform, adaptationSignature, adaptContext, currentUid, firebaseLoaded, platforms, saveAdaptation]);
+  }, [activePlatform, adaptationSignature, adaptContext, currentUid, firebaseLoaded, hasStarted, platforms, saveAdaptation, selectedPlatforms]);
 
-  const currentPlatformText = platforms[activePlatform] ?? '';
-  const currentChatHistory = useMemo(
-    () => chatHistoryByPlatform[activePlatform] ?? [],
-    [activePlatform, chatHistoryByPlatform],
-  );
-  const pendingDraftUpdate = pendingDraftUpdateByPlatform[activePlatform];
-  const activeGenerateError = generateErrorByPlatform[activePlatform];
-  const activeGenerateSuccess = generateSuccessByPlatform[activePlatform];
-  const currentAnalysis = analysisByPlatform[activePlatform] ?? {};
-  const activeAnalysis = activeAnalysisByPlatform[activePlatform];
-  const savedAtText = useMemo(
-    () => savedAt?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? null,
-    [savedAt],
-  );
-  const activePlatformConfig =
-    PLATFORM_CONFIG.find((platform) => platform.key === activePlatform) ?? PLATFORM_CONFIG[0];
-  const currentWordCount = useMemo(
-    () => (currentPlatformText.trim() ? currentPlatformText.trim().split(/\s+/).length : 0),
-    [currentPlatformText],
-  );
+  const setActivePlatformText = useCallback(
+    (nextValue: string | ((previous: string) => string)) => {
+      setPlatforms((previous) => {
+        const currentValue = previous[activePlatform] ?? '';
+        const resolvedValue =
+          typeof nextValue === 'function'
+            ? (nextValue as (previous: string) => string)(currentValue)
+            : nextValue;
 
-  const updateActivePlatformText = useCallback(
-    (value: string) => {
-      setPlatforms((previous) => ({
-        ...previous,
-        [activePlatform]: value,
-      }));
+        if (resolvedValue === currentValue) {
+          return previous;
+        }
+
+        setContentVersion((previousVersion) => ({
+          ...previousVersion,
+          [activePlatform]: previousVersion[activePlatform] + 1,
+        }));
+
+        return {
+          ...previous,
+          [activePlatform]: resolvedValue,
+        };
+      });
     },
     [activePlatform],
   );
 
-  const sendChatMessage = useCallback(async (): Promise<void> => {
-    const userMessage = chatInput.trim();
-    if (!userMessage || isChatLoading) return;
+  const inlineEditor = useInlineEdit({
+    text: platforms[activePlatform] ?? '',
+    setText: setActivePlatformText,
+  });
+  const activePendingInlineChange = useMemo(
+    () => inlineEditor.changes.find((change) => change.status === 'pending') ?? null,
+    [inlineEditor.changes],
+  );
+  const activePlatformChatDiffs = useMemo(
+    () => (chatDiffsByPlatform[activePlatform] ?? []).filter((diff) => diff.status === 'pending' || diff.status === 'conflict'),
+    [activePlatform, chatDiffsByPlatform],
+  );
+  const activePlatformPendingDiffCount = useMemo(
+    () => (chatDiffsByPlatform[activePlatform] ?? []).filter((diff) => diff.status === 'pending').length,
+    [activePlatform, chatDiffsByPlatform],
+  );
 
-    if (!currentPlatformText.trim()) {
-      setChatError('Add platform copy before asking the adaptation assistant for edits.');
-      return;
-    }
+  const captureSelection = useCallback(
+    (platform: PlatformKey, target: HTMLTextAreaElement) => {
+      const start = target.selectionStart ?? 0;
+      const end = target.selectionEnd ?? 0;
+      setActivePlatform(platform);
+      const sourceText = platforms[platform] ?? '';
+      setSelection({ start, end, text: sourceText.slice(start, end) });
 
-    const activeConfig = getActiveAIKey();
-    if (activeConfig.provider !== 'ollama' && !activeConfig.apiKey) {
-      setChatError('No AI API key found. Add one in Settings before using AI chat.');
-      return;
-    }
+      const selectionEnd = end >= start ? end : start;
+      const textBeforeCaret = sourceText.slice(0, selectionEnd);
+      const lines = textBeforeCaret.split('\n');
+      const currentLine = lines[lines.length - 1] ?? '';
+      const approximateLeft = Math.min(Math.max(12, 12 + currentLine.length * 7), Math.max(12, target.clientWidth - 280));
+      const approximateTop = Math.min(Math.max(12, 14 + (lines.length - 1) * 22), Math.max(12, target.clientHeight - 160));
+      setFloatingAnchor({ top: approximateTop, left: approximateLeft });
+    },
+    [platforms],
+  );
 
-    if (activeConfig.provider === 'ollama' && !activeConfig.ollamaModel.trim()) {
-      setChatError('No Ollama model is configured. Update Settings before using AI chat.');
-      return;
-    }
-
-    setChatError(null);
-    setChatInput('');
-    const historySnapshot = [...currentChatHistory];
-
-    setChatHistoryByPlatform((previous) => ({
-      ...previous,
-      [activePlatform]: [...previous[activePlatform], { role: 'user', content: userMessage }],
-    }));
-    setIsChatLoading(true);
-
-    try {
-      const response = await fetch('/api/drafts/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: activeConfig.provider,
-          apiKey: activeConfig.apiKey,
-          ollamaBaseUrl: activeConfig.ollamaBaseUrl,
-          ollamaModel: activeConfig.ollamaModel,
-          draft: currentPlatformText,
-          messages: historySnapshot,
-          userMessage,
-        }),
-      });
-
-      const payload = (await response.json()) as ChatApiResponse;
-      if (!response.ok || !payload.reply) {
-        throw new Error(payload.error ?? 'Adaptation chat failed.');
-      }
-
-      setChatHistoryByPlatform((previous) => ({
-        ...previous,
-        [activePlatform]: [...previous[activePlatform], { role: 'assistant', content: payload.reply ?? '' }],
-      }));
-
-      if (payload.updatedDraft) {
-        setPendingDraftUpdateByPlatform((previous) => ({
-          ...previous,
-          [activePlatform]: payload.updatedDraft ?? null,
-        }));
-      }
-    } catch (error) {
-      setChatError(error instanceof Error ? error.message : 'Adaptation chat failed.');
-    } finally {
-      setIsChatLoading(false);
-    }
-  }, [activePlatform, chatInput, currentChatHistory, currentPlatformText, isChatLoading]);
-
-  const generatePlatformContent = useCallback(async (): Promise<void> => {
-    if (!adaptContext?.draftContent.trim()) {
-      setGenerateErrorByPlatform((previous) => ({
-        ...previous,
-        [activePlatform]: 'Draft source context is missing. Return to Draft Editor and reopen adaptation.',
-      }));
-      return;
-    }
-
-    if (isGeneratingPlatform) return;
-
-    const activeConfig = getActiveAIKey();
-    if (activeConfig.provider !== 'ollama' && !activeConfig.apiKey) {
-      setGenerateErrorByPlatform((previous) => ({
-        ...previous,
-        [activePlatform]: 'No AI API key found. Add one in Settings before generating.',
-      }));
-      return;
-    }
-
-    if (activeConfig.provider === 'ollama' && !activeConfig.ollamaModel.trim()) {
-      setGenerateErrorByPlatform((previous) => ({
-        ...previous,
-        [activePlatform]: 'No Ollama model is configured. Update Settings before generating.',
-      }));
-      return;
-    }
-
-    setGenerateErrorByPlatform((previous) => ({ ...previous, [activePlatform]: null }));
-    setGenerateSuccessByPlatform((previous) => ({ ...previous, [activePlatform]: null }));
-    setIsGeneratingPlatform(activePlatform);
-
-    const requestedPlatform = activePlatform;
-    const requestedPlatformLabel = activePlatformConfig.label;
-    const requestController = new AbortController();
-    let requestSettled = false;
-    let timeoutGuardId: number | null = null;
-    const uiResetTimeoutId = window.setTimeout(() => {
-      if (requestSettled) return;
-
-      requestController.abort();
-      setGenerateSuccessByPlatform((previous) => ({
-        ...previous,
-        [requestedPlatform]: null,
-      }));
-      setGenerateErrorByPlatform((previous) => ({
-        ...previous,
-        [requestedPlatform]: ADAPT_GENERATION_TIMEOUT_MESSAGE,
-      }));
-      setIsGeneratingPlatform((current) => (current === requestedPlatform ? null : current));
-    }, ADAPT_GENERATION_TIMEOUT_MS + 500);
-
-    try {
-      const generationRequest = (async () => {
-        const response = await fetch('/api/drafts/adapt', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: requestController.signal,
-          body: JSON.stringify({
-            provider: activeConfig.provider,
-            apiKey: activeConfig.apiKey,
-            ollamaBaseUrl: activeConfig.ollamaBaseUrl,
-            ollamaModel: activeConfig.ollamaModel,
-            platform: requestedPlatform,
-            sourceDraft: adaptContext.draftContent,
-            currentPlatformDraft: currentPlatformText,
-          }),
-        });
-
-        const payload = (await response.json().catch(() => ({}))) as AdaptGenerateApiResponse;
-        return { response, payload };
-      })();
-
-      const timeoutGuard = new Promise<never>((_, reject) => {
-        timeoutGuardId = window.setTimeout(() => {
-          requestController.abort();
-          reject(new Error(ADAPT_GENERATION_TIMEOUT_MESSAGE));
-        }, ADAPT_GENERATION_TIMEOUT_MS);
-      });
-
-      const { response, payload } = await Promise.race([generationRequest, timeoutGuard]);
-
-      const nextContent = payload.generatedContent?.trim();
-      if (!response.ok || !nextContent) {
-        throw new Error(
-          payload.error ??
-            (response.status === 504 ? ADAPT_GENERATION_TIMEOUT_MESSAGE : 'Platform generation failed.'),
-        );
-      }
-
-      setPlatforms((previous) => ({
-        ...previous,
-        [requestedPlatform]: nextContent,
-      }));
-      setPendingDraftUpdateByPlatform((previous) => ({
-        ...previous,
-        [requestedPlatform]: null,
-      }));
-      setGenerateSuccessByPlatform((previous) => ({
-        ...previous,
-        [requestedPlatform]: `Generated for ${requestedPlatformLabel} at ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`,
-      }));
-    } catch (error) {
-      const message = isAbortLikeError(error)
-        ? ADAPT_GENERATION_TIMEOUT_MESSAGE
-        : error instanceof Error
-          ? error.message
-          : 'Platform generation failed.';
-
-      setGenerateSuccessByPlatform((previous) => ({
-        ...previous,
-        [requestedPlatform]: null,
-      }));
-      setGenerateErrorByPlatform((previous) => ({
-        ...previous,
-        [requestedPlatform]: message,
-      }));
-    } finally {
-      requestSettled = true;
-      window.clearTimeout(uiResetTimeoutId);
-      if (timeoutGuardId) {
-        window.clearTimeout(timeoutGuardId);
-      }
-      setIsGeneratingPlatform((current) => (current === requestedPlatform ? null : current));
-    }
-  }, [activePlatform, activePlatformConfig.label, adaptContext, currentPlatformText, isGeneratingPlatform]);
-
-  const applyPendingUpdate = useCallback(() => {
-    if (!pendingDraftUpdate) return;
-
-    updateActivePlatformText(pendingDraftUpdate);
-    setPendingDraftUpdateByPlatform((previous) => ({
-      ...previous,
-      [activePlatform]: null,
-    }));
-  }, [activePlatform, pendingDraftUpdate, updateActivePlatformText]);
-
-  const runAnalysis = useCallback(
-    async (type: AnalyzeType): Promise<void> => {
-      if (!currentPlatformText.trim()) {
-        setAnalyzeError('Write platform copy before running optimization tools.');
-        return;
-      }
-
+  const runSeoForPlatform = useCallback(
+    async (platform: PlatformKey, draft: string, versionAtRequest: number): Promise<void> => {
       const activeConfig = getActiveAIKey();
-      if (activeConfig.provider === 'ollama' && !activeConfig.ollamaModel.trim()) {
-        setAnalyzeError('No Ollama model is configured. Update Settings before running analysis.');
-        return;
-      }
 
-      setActiveAnalysisByPlatform((previous) => ({
+      setSeoByPlatform((previous) => ({
         ...previous,
-        [activePlatform]: type,
+        [platform]: {
+          ...previous[platform],
+          status: 'pending',
+          error: null,
+          requestVersion: versionAtRequest,
+        },
       }));
-      setIsAnalyzing(true);
-      setAnalyzeError(null);
 
       try {
         const response = await fetch('/api/drafts/analyze', {
@@ -745,599 +652,833 @@ export default function AdaptPage() {
             apiKey: activeConfig.apiKey,
             ollamaBaseUrl: activeConfig.ollamaBaseUrl,
             ollamaModel: activeConfig.ollamaModel,
-            draft: currentPlatformText,
-            type,
+            draft,
+            type: 'seo',
+            platform,
           }),
         });
 
         const payload = (await response.json()) as AnalyzeApiResponse;
         if (!response.ok || !payload.result) {
-          throw new Error(payload.error ?? 'Analysis failed.');
+          throw new Error(payload.error ?? 'SEO analysis failed.');
         }
 
-        setAnalysisByPlatform((previous) => {
-          const nextPlatformAnalysis = { ...previous[activePlatform] };
+        if (contentVersionRef.current[platform] !== versionAtRequest) {
+          return;
+        }
 
-          if (type === 'seo') {
-            nextPlatformAnalysis.seo = payload.result as SeoResult;
-          } else if (type === 'plagiarism') {
-            nextPlatformAnalysis.plagiarism = payload.result as AiCheckResult;
-          } else {
-            nextPlatformAnalysis.sources = payload.result as SourcesResult;
-          }
-
-          return {
-            ...previous,
-            [activePlatform]: nextPlatformAnalysis,
-          };
-        });
+        setSeoByPlatform((previous) => ({
+          ...previous,
+          [platform]: {
+            status: 'success',
+            error: null,
+            result: payload.result ?? null,
+            requestVersion: versionAtRequest,
+          },
+        }));
       } catch (error) {
-        setAnalyzeError(error instanceof Error ? error.message : 'Analysis failed.');
-      } finally {
-        setIsAnalyzing(false);
+        if (contentVersionRef.current[platform] !== versionAtRequest) {
+          return;
+        }
+
+        setSeoByPlatform((previous) => ({
+          ...previous,
+          [platform]: {
+            ...previous[platform],
+            status: 'failed',
+            error: error instanceof Error ? error.message : 'SEO analysis failed.',
+            requestVersion: versionAtRequest,
+          },
+        }));
       }
     },
-    [activePlatform, currentPlatformText],
+    [],
   );
 
-  const backToDraftPath = useMemo(() => {
-    if (!ideaId) return '/drafts';
-    return angleIdFromQuery ? `/drafts/${ideaId}?angleId=${angleIdFromQuery}` : `/drafts/${ideaId}`;
+  const generatePlatform = useCallback(
+    async (platform: PlatformKey): Promise<void> => {
+      if (!adaptContext?.draftContent.trim()) {
+        setPlatformStates((previous) => ({
+          ...previous,
+          [platform]: {
+            ...previous[platform],
+            status: 'failed',
+            error: 'Storyboard source is missing. Return to Storyboard and reopen Adapt.',
+          },
+        }));
+        return;
+      }
+
+      const activeConfig = getActiveAIKey();
+      if (activeConfig.provider !== 'ollama' && !activeConfig.apiKey) {
+        setPlatformStates((previous) => ({
+          ...previous,
+          [platform]: {
+            ...previous[platform],
+            status: 'failed',
+            error: 'No AI API key found. Add one in Settings before generating.',
+          },
+        }));
+        return;
+      }
+
+      if (activeConfig.provider === 'ollama' && !activeConfig.ollamaModel.trim()) {
+        setPlatformStates((previous) => ({
+          ...previous,
+          [platform]: {
+            ...previous[platform],
+            status: 'failed',
+            error: 'No Ollama model is configured. Update Settings before generating.',
+          },
+        }));
+        return;
+      }
+
+      setPlatformStates((previous) => ({
+        ...previous,
+        [platform]: {
+          ...previous[platform],
+          status: 'running',
+          error: null,
+        },
+      }));
+
+      try {
+        const response = await fetch('/api/drafts/adapt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: activeConfig.provider,
+            apiKey: activeConfig.apiKey,
+            ollamaBaseUrl: activeConfig.ollamaBaseUrl,
+            ollamaModel: activeConfig.ollamaModel,
+            platform,
+            sourceDraft: adaptContext.draftContent,
+            currentPlatformDraft: platforms[platform] ?? '',
+          }),
+        });
+
+        const payload = (await response.json()) as AdaptGenerateApiResponse;
+        const generated = payload.generatedContent?.trim();
+        if (!response.ok || !generated) {
+          throw new Error(payload.error ?? 'Platform generation failed.');
+        }
+
+        let nextVersion = 0;
+        setPlatforms((previous) => ({
+          ...previous,
+          [platform]: generated,
+        }));
+        setContentVersion((previous) => {
+          nextVersion = previous[platform] + 1;
+          return {
+            ...previous,
+            [platform]: nextVersion,
+          };
+        });
+
+        setPlatformStates((previous) => ({
+          ...previous,
+          [platform]: {
+            status: 'success',
+            error: null,
+            generatedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        }));
+        setGeneratedPlatforms((previous) => {
+          const next = new Set(previous);
+          next.add(platform);
+          return next;
+        });
+        setActivePlatform(platform);
+
+        const nextSelected = selectedPlatforms.length > 0 ? selectedPlatforms : [platform];
+        const nextPlatforms = {
+          ...platforms,
+          [platform]: generated,
+        };
+        void saveAdaptation(nextPlatforms, platform, nextSelected);
+
+        await runSeoForPlatform(platform, generated, nextVersion);
+      } catch (error) {
+        setPlatformStates((previous) => ({
+          ...previous,
+          [platform]: {
+            ...previous[platform],
+            status: 'failed',
+            error: error instanceof Error ? error.message : 'Platform generation failed.',
+          },
+        }));
+      }
+    },
+    [adaptContext, platforms, runSeoForPlatform, saveAdaptation, selectedPlatforms],
+  );
+
+  const startSequentialGeneration = useCallback(async (): Promise<void> => {
+    const platformsToGenerate = selectedPlatforms.filter((p) => !generatedPlatforms.has(p));
+
+    if (platformsToGenerate.length === 0) {
+      setGateError('Select at least one platform before continuing.');
+      return;
+    }
+
+    setGateError(null);
+    setHasStarted(true);
+    setIsSequenceRunning(true);
+
+    setPlatformStates((previous) => {
+      const next = { ...previous };
+      for (const platform of platformsToGenerate) {
+        if (next[platform].status === 'idle' || next[platform].status === 'failed') {
+          next[platform] = { ...next[platform], status: 'queued', error: null };
+        }
+      }
+      return next;
+    });
+
+    for (const platform of platformsToGenerate) {
+      await generatePlatform(platform);
+    }
+
+    setIsSequenceRunning(false);
+  }, [generatePlatform, generatedPlatforms, selectedPlatforms]);
+
+  const retryPlatform = useCallback(
+    async (platform: PlatformKey): Promise<void> => {
+      await generatePlatform(platform);
+    },
+    [generatePlatform],
+  );
+
+  const retrySeo = useCallback(
+    async (platform: PlatformKey): Promise<void> => {
+      const draft = platforms[platform] ?? '';
+      if (!draft.trim()) {
+        setSeoByPlatform((previous) => ({
+          ...previous,
+          [platform]: {
+            ...previous[platform],
+            status: 'failed',
+            error: 'Generate or add content before retrying SEO analysis.',
+          },
+        }));
+        return;
+      }
+
+      const version = contentVersionRef.current[platform];
+      await runSeoForPlatform(platform, draft, version);
+    },
+    [platforms, runSeoForPlatform],
+  );
+
+  const togglePlatformSelection = useCallback((platform: PlatformKey) => {
+    setSelectedPlatforms((previous) => {
+      if (previous.includes(platform)) {
+        const next = previous.filter((entry) => entry !== platform);
+        if (next.length > 0 && !next.includes(activePlatform)) {
+          setActivePlatform(next[0]);
+        }
+        return next;
+      }
+
+      const next = [...previous, platform];
+      if (next.length === 1) {
+        setActivePlatform(platform);
+      }
+      return next;
+    });
+  }, [activePlatform]);
+
+  const backToStoryboardPath = useMemo(() => {
+    if (!ideaId) return '/storyboard';
+    return angleIdFromQuery
+      ? `/storyboard/${encodeURIComponent(ideaId)}?angleId=${encodeURIComponent(angleIdFromQuery)}`
+      : `/storyboard/${encodeURIComponent(ideaId)}`;
   }, [angleIdFromQuery, ideaId]);
 
+  const savedAtText = useMemo(
+    () => savedAt?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? null,
+    [savedAt],
+  );
+
+  const tabVisiblePlatforms = useMemo(
+    () =>
+      PLATFORM_CONFIG.filter(
+        (p) =>
+          generatedPlatforms.has(p.key) ||
+          platformStates[p.key].status === 'running' ||
+          platformStates[p.key].status === 'queued',
+      ),
+    [generatedPlatforms, platformStates],
+  );
+
+  const ungeneratedSelectablePlatforms = useMemo(
+    () =>
+      PLATFORM_CONFIG.filter(
+        (p) =>
+          !generatedPlatforms.has(p.key) &&
+          platformStates[p.key].status !== 'running' &&
+          platformStates[p.key].status !== 'queued',
+      ),
+    [generatedPlatforms, platformStates],
+  );
+
+  const handleSendPlatformChat = useCallback(async (): Promise<void> => {
+    const activeConfig = getActiveAIKey();
+    const platform = activePlatform;
+    const nextMessage = (chatInputByPlatform[platform] ?? '').trim();
+    const activeDraft = platforms[platform] ?? '';
+    const historyForPlatform = chatHistoryByPlatform[platform] ?? [];
+
+    if (!nextMessage) return;
+
+    if (activeConfig.provider !== 'ollama' && !activeConfig.apiKey) {
+      setChatError('No AI API key found. Add a key in Settings before using AI chat.');
+      return;
+    }
+
+    if (activeConfig.provider === 'ollama' && !activeConfig.ollamaModel.trim()) {
+      setChatError('No Ollama model is configured. Update Settings before using AI chat.');
+      return;
+    }
+
+    setChatError(null);
+    setIsChatSending(true);
+    setChatInputByPlatform((previous) => ({
+      ...previous,
+      [platform]: '',
+    }));
+    setChatHistoryByPlatform((previous) => ({
+      ...previous,
+      [platform]: [...historyForPlatform, { role: 'user', content: nextMessage }],
+    }));
+
+    try {
+      const response = await fetch('/api/drafts/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: activeConfig.provider,
+          apiKey: activeConfig.apiKey,
+          ollamaBaseUrl: activeConfig.ollamaBaseUrl,
+          ollamaModel: activeConfig.ollamaModel,
+          draft: activeDraft,
+          messages: historyForPlatform,
+          userMessage: nextMessage,
+        }),
+      });
+
+      const payload = (await response.json()) as DraftChatApiResponse;
+      if (!response.ok || !payload.reply) {
+        throw new Error(payload.error ?? 'AI chat failed.');
+      }
+
+      setChatHistoryByPlatform((previous) => ({
+        ...previous,
+        [platform]: [...(previous[platform] ?? []), { role: 'assistant', content: payload.reply ?? '' }],
+      }));
+      setChatProviderByPlatform((previous) => ({
+        ...previous,
+        [platform]: payload.provider ?? activeConfig.provider,
+      }));
+
+      const updatedDraft = payload.updatedDraft?.trim();
+      if (updatedDraft && updatedDraft !== activeDraft) {
+        const proposedDiffs = buildSentenceSpanDiffs(activeDraft, updatedDraft);
+        if (proposedDiffs.length === 0) {
+          setChatError('AI responded, but no sentence-level diff could be mapped. Try a more specific instruction.');
+          return;
+        }
+
+        setChatDiffsByPlatform((previous) => ({
+          ...previous,
+          [platform]: [...proposedDiffs, ...(previous[platform] ?? [])],
+        }));
+      }
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : 'AI chat failed.');
+    } finally {
+      setIsChatSending(false);
+    }
+  }, [activePlatform, chatHistoryByPlatform, chatInputByPlatform, platforms]);
+
+  const handleKeepPlatformChatDiff = useCallback(
+    (diffId: string): void => {
+      const platform = activePlatform;
+      const target = (chatDiffsByPlatform[platform] ?? []).find((entry) => entry.id === diffId);
+      if (!target || target.status !== 'pending') {
+        return;
+      }
+
+      setPlatforms((previous) => {
+        const currentText = previous[platform] ?? '';
+        const applied = applyChatSentenceDiff(currentText, target);
+
+        if (!applied) {
+          setChatDiffsByPlatform((diffState) => ({
+            ...diffState,
+            [platform]: (diffState[platform] ?? []).map((entry) =>
+              entry.id === diffId
+                ? {
+                    ...entry,
+                    status: 'conflict',
+                    message: 'Source sentence moved. Undo this diff and request another chat revision.',
+                  }
+                : entry,
+            ),
+          }));
+          return previous;
+        }
+
+        const delta = target.afterText.length - applied.replacedLength;
+        const replacedStart = applied.appliedStart;
+        const replacedEndBeforeWrite = replacedStart + applied.replacedLength;
+
+        setChatDiffsByPlatform((diffState) => ({
+          ...diffState,
+          [platform]: (diffState[platform] ?? [])
+            .map((entry): ChatSentenceDiff | null => {
+              if (entry.id === diffId) {
+                return null;
+              }
+
+              if (entry.status !== 'pending' && entry.status !== 'conflict') {
+                return entry;
+              }
+
+              if (rangesOverlap(entry.start, entry.end, replacedStart, replacedEndBeforeWrite)) {
+                return {
+                  ...entry,
+                  status: 'conflict',
+                  message: 'Overlaps a kept sentence change. Undo and regenerate to refresh this diff.',
+                };
+              }
+
+              if (entry.start >= replacedEndBeforeWrite) {
+                return {
+                  ...entry,
+                  start: entry.start + delta,
+                  end: entry.end + delta,
+                };
+              }
+
+              return entry;
+            })
+            .filter((entry): entry is ChatSentenceDiff => Boolean(entry)),
+        }));
+
+        setContentVersion((versions) => ({
+          ...versions,
+          [platform]: versions[platform] + 1,
+        }));
+        setChatError(null);
+
+        return {
+          ...previous,
+          [platform]: applied.nextText,
+        };
+      });
+    },
+    [activePlatform, chatDiffsByPlatform],
+  );
+
+  const handleUndoPlatformChatDiff = useCallback(
+    (diffId: string): void => {
+      const platform = activePlatform;
+      setChatDiffsByPlatform((previous) => ({
+        ...previous,
+        [platform]: (previous[platform] ?? []).filter((entry) => entry.id !== diffId),
+      }));
+      setChatError(null);
+    },
+    [activePlatform],
+  );
+
   return (
-    <div className="flex gap-6">
-      <div className="min-w-0 flex-1 space-y-5">
-        <div className="page-header">
-          <h1>Multi-Channel Adaptation</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Adapt your saved draft for LinkedIn, X, Medium, Newsletter, and Blog publishing.
-          </p>
-          <p className="breadcrumb mt-1">
-            1. Drafting → Editing → SEO/Readability → Multi-Channel Adaptation (Active) → Review → Schedule
-          </p>
+    <div className="space-y-5">
+      <div className="page-header">
+        <h1>Platform Adaptation</h1>
+        <p className="breadcrumb mt-1">Angles {'->'} Storyboard {'->'} Adapt (Active) {'->'} Review {'->'} Schedule</p>
 
-          {adaptContext ? (
-            <div className="mt-2 flex flex-wrap items-center gap-4 text-sm" style={{ color: '#a7c9be' }}>
-              <span>
-                Idea: <span className="font-semibold text-white">{adaptContext.idea.topic}</span>
+        {adaptContext ? (
+          <div className="mt-2 flex flex-wrap items-center gap-4 text-sm" style={{ color: '#a7c9be' }}>
+            <span>
+              Idea: <span className="font-semibold text-white">{adaptContext.idea.topic}</span>
+            </span>
+            <span>
+              Angle: <span className="font-semibold text-white">{adaptContext.selectedAngle.title}</span>
+            </span>
+            <span>
+              Active platform: <span className="font-semibold text-white">{PLATFORM_CONFIG.find((p) => p.key === activePlatform)?.label}</span>
+            </span>
+            {isSaving ? (
+              <span className="text-yellow-300">
+                <Spinner size="sm" label="Saving..." />
               </span>
-              <span>
-                Angle: <span className="font-semibold text-white">{adaptContext.selectedAngle.title}</span>
-              </span>
-              <span>
-                Platform: <span className="font-semibold text-white">{activePlatformConfig.label}</span>
-              </span>
-              {isSaving ? (
-                <span className="text-yellow-300">
-                  <Spinner size="sm" label="Saving..." />
-                </span>
-              ) : savedAtText ? (
-                <span className="text-green-300">✓ Saved at {savedAtText}</span>
-              ) : null}
-              {saveError ? <span className="text-red-400">{saveError}</span> : null}
-            </div>
-          ) : null}
-        </div>
+            ) : savedAtText ? (
+              <span className="text-green-300">Saved at {savedAtText}</span>
+            ) : null}
+            {saveError ? <span className="text-red-400">{saveError}</span> : null}
+          </div>
+        ) : null}
+      </div>
+      <WorkflowStepper />
 
-        {contextError ? (
-          <section className="surface-card p-5">
-            <p className="text-sm text-red-700">{contextError}</p>
-            <button
-              type="button"
-              className="mt-4 rounded-xl px-5 py-2 text-sm font-bold text-white"
-              style={{ background: '#1a7a5e' }}
-              onClick={() => router.push(backToDraftPath)}
-            >
-              Back to Draft Editor
-            </button>
-          </section>
-        ) : (
-          <>
-            <div className="grid gap-5 xl:grid-cols-[280px_1fr_320px]">
-              <section className="surface-card flex flex-col p-4">
-                <h2 className="section-title mb-2">AI Chat with Adaptation Assistant</h2>
-                <p className="mb-3 text-xs text-slate-500">
-                  Ask for channel-specific rewrites. Any AI rewrite applies only to the active platform.
-                </p>
+      {contextError ? (
+        <section className="surface-card p-5">
+          <p className="text-sm text-red-700">{contextError}</p>
+          <button
+            type="button"
+            className="mt-4 rounded-xl px-5 py-2 text-sm font-bold text-white"
+            style={{ background: '#1a7a5e' }}
+            onClick={() => router.push(backToStoryboardPath)}
+          >
+            Back to Storyboard
+          </button>
+        </section>
+      ) : null}
 
-                <div className="flex-1 space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm min-h-[320px] max-h-[460px]">
-                  {currentChatHistory.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-slate-300 bg-white p-3 text-xs text-slate-500">
-                      <p className="mb-1 font-semibold text-slate-700">Try prompts like:</p>
-                      <ul className="list-inside list-disc space-y-1">
-                        <li>Turn this into a concise LinkedIn post with a stronger hook.</li>
-                        <li>Rewrite this for an email newsletter with a CTA.</li>
-                        <li>Shorten this for X while keeping the main insight.</li>
-                      </ul>
-                    </div>
-                  ) : null}
+      {!contextError && !adaptContext ? (
+        <section className="surface-card p-5">
+          <Spinner
+            size="sm"
+            label={
+              !currentUid
+                ? 'Checking session...'
+                : isLoadingContextFromFirebase
+                  ? 'Loading adaptation context from Firebase...'
+                  : 'Resolving adaptation context...'
+            }
+          />
+        </section>
+      ) : null}
 
-                  {currentChatHistory.map((message, index) => (
-                    <div
-                      key={`${activePlatform}-${index}`}
-                      className={`rounded-xl p-3 text-sm ${
-                        message.role === 'user'
-                          ? 'ml-4 bg-emerald-50 text-emerald-900'
-                          : 'mr-4 border border-slate-200 bg-white text-slate-800'
-                      }`}
-                    >
-                      <span className="mb-1 block text-xs font-bold uppercase tracking-wide opacity-50">
-                        {message.role === 'user' ? 'You' : 'AI'}
-                      </span>
-                      <p className="whitespace-pre-wrap">{message.content}</p>
-                    </div>
-                  ))}
+      {!contextError && adaptContext ? (
+        <>
+          {ungeneratedSelectablePlatforms.length > 0 ? (
+            <section className="surface-card p-5">
+              <h2 className="section-title mb-2">Generate Platforms</h2>
+              <p className="mb-3 text-xs text-slate-500">
+                Choose platforms to generate. Already-generated platforms appear as tabs below.
+              </p>
 
-                  {isChatLoading ? (
-                    <div className="mr-4 rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-400">
-                      <Spinner size="sm" label="AI is adapting copy…" />
-                    </div>
-                  ) : null}
-
-                  <div ref={chatEndRef} />
-                </div>
-
-                {pendingDraftUpdate ? (
-                  <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs">
-                    <p className="mb-2 font-semibold text-emerald-700">
-                      AI suggested an updated {activePlatformConfig.label} version.
-                    </p>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        className="rounded-lg px-3 py-1.5 text-xs font-bold text-white"
-                        style={{ background: '#1a7a5e' }}
-                        onClick={applyPendingUpdate}
-                      >
-                        Apply Changes
-                      </button>
-                      <button
-                        type="button"
-                        className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600"
-                        onClick={() =>
-                          setPendingDraftUpdateByPlatform((previous) => ({
-                            ...previous,
-                            [activePlatform]: null,
-                          }))
-                        }
-                      >
-                        Discard
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-
-                {chatError ? (
-                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                    {chatError}
-                  </div>
-                ) : null}
-
-                <div className="mt-3 flex gap-2">
-                  <input
-                    type="text"
-                    className="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                    placeholder={`Ask AI to improve the ${activePlatformConfig.label} version...`}
-                    value={chatInput}
-                    onChange={(event) => setChatInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' && !event.shiftKey) {
-                        event.preventDefault();
-                        void sendChatMessage();
-                      }
-                    }}
-                    disabled={isChatLoading}
-                  />
-                  <button
-                    type="button"
-                    className="rounded-xl px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
-                    style={{ background: '#1a7a5e' }}
-                    disabled={isChatLoading || !chatInput.trim()}
-                    onClick={() => void sendChatMessage()}
-                  >
-                    Send
-                  </button>
-                </div>
-              </section>
-
-              <section className="surface-card flex flex-col p-4">
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h2 className="section-title">Platform Adaptations</h2>
-                    <p className="mt-0.5 text-xs text-slate-500">
-                      Switch tabs to edit each platform independently. Unsaved changes auto-sync to Firestore.
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="rounded-xl px-3 py-1.5 text-xs font-bold text-white disabled:opacity-60"
-                      style={{ background: '#0f766e' }}
-                      disabled={Boolean(isGeneratingPlatform) || isAdaptationLoading}
-                      onClick={() => void generatePlatformContent()}
-                    >
-                      {isGeneratingPlatform === activePlatform ? <Spinner size="sm" label="Generating..." /> : `Generate ${activePlatformConfig.label}`}
-                    </button>
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-                      {currentWordCount} words
-                    </span>
-                  </div>
-                </div>
-
-                <div className="mb-4 flex flex-wrap gap-2">
-                  {PLATFORM_CONFIG.map((platform) => (
+              <div className="flex flex-wrap gap-2">
+                {ungeneratedSelectablePlatforms.map((platform) => {
+                  const selected = selectedPlatforms.includes(platform.key);
+                  return (
                     <button
                       key={platform.key}
                       type="button"
-                      className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${
-                        activePlatform === platform.key
+                      className={`rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${
+                        selected
                           ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
                           : 'border-slate-300 text-slate-700 hover:bg-slate-50'
                       }`}
-                      onClick={() => setActivePlatform(platform.key)}
+                      onClick={() => togglePlatformSelection(platform.key)}
                     >
-                      <span
-                        className={`flex h-5 min-w-5 items-center justify-center rounded text-[9px] font-bold text-white ${platform.accentClass}`}
-                      >
-                        {platform.shortLabel}
-                      </span>
                       {platform.label}
                     </button>
-                  ))}
-                </div>
-
-                {isAdaptationLoading ? (
-                  <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
-                    <Spinner size="sm" />
-                    <span>Loading saved platform adaptations...</span>
-                  </div>
-                ) : null}
-
-                {activeGenerateSuccess ? (
-                  <div className="mb-3 rounded-xl border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-700">
-                    {activeGenerateSuccess}
-                  </div>
-                ) : null}
-
-                {activeGenerateError ? (
-                  <div
-                    className="mb-3 rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800"
-                    role="alert"
-                    aria-live="assertive"
-                  >
-                    <p className="font-semibold">Generation failed for {activePlatformConfig.label}</p>
-                    <p className="mt-1">{activeGenerateError}</p>
-                  </div>
-                ) : null}
-
-                <textarea
-                  className="min-h-[520px] w-full resize-y rounded-xl border border-slate-300 p-4 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
-                  value={currentPlatformText}
-                  onChange={(event) => updateActivePlatformText(event.target.value)}
-                  placeholder={`Your ${activePlatformConfig.label} adaptation will appear here.`}
-                  disabled={isAdaptationLoading}
-                />
-              </section>
-
-              <div className="space-y-4">
-                <section className="surface-card p-4">
-                  <div className="mb-3 flex items-center gap-2">
-                    <span
-                      className={`flex h-7 min-w-7 items-center justify-center rounded text-xs font-bold text-white ${activePlatformConfig.accentClass}`}
-                    >
-                      {activePlatformConfig.icon}
-                    </span>
-                    <div>
-                      <h2 className="section-title">Adaptation Preview</h2>
-                      <p className="text-xs text-slate-500">{activePlatformConfig.label}</p>
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700 shadow-sm">
-                    {currentPlatformText.trim() ? (
-                      <div className="space-y-3">
-                        <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-                          {currentPlatformText}
-                        </p>
-                      </div>
-                    ) : (
-                      <p className="text-sm text-slate-400">
-                        This platform does not have any adapted copy yet.
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                    {PLATFORM_CONFIG.map((platform) => {
-                      const text = platforms[platform.key] ?? '';
-                      const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
-                      return (
-                        <div key={platform.key} className="rounded-xl bg-slate-50 p-2">
-                          <p className="font-semibold text-slate-700">{platform.label}</p>
-                          <p className="text-slate-500">{wordCount} words</p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-
-                <section className="surface-card p-4">
-                  <div className="mb-3 flex items-center justify-between gap-2">
-                    <div>
-                      <h2 className="section-title">Optimization Tools</h2>
-                      <p className="text-xs text-slate-500">
-                        Run analysis against the active platform version only.
-                      </p>
-                    </div>
-                    <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white">
-                      Live
-                    </span>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {(
-                      [
-                        { type: 'seo' as AnalyzeType, label: '📈 SEO Optimizer' },
-                        { type: 'plagiarism' as AnalyzeType, label: '🔍 AI Check' },
-                        { type: 'sources' as AnalyzeType, label: '🔗 Source Check' },
-                      ] as const
-                    ).map(({ type, label }) => (
-                      <button
-                        key={type}
-                        type="button"
-                        className={`rounded-xl border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-60 ${
-                          activeAnalysis === type
-                            ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                            : 'border-slate-300 text-slate-700 hover:bg-slate-50'
-                        }`}
-                        disabled={isAnalyzing}
-                        onClick={() => void runAnalysis(type)}
-                      >
-                        {isAnalyzing && activeAnalysis === type ? <Spinner size="sm" label="Analyzing…" /> : label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {analyzeError ? (
-                    <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                      {analyzeError}
-                    </div>
-                  ) : null}
-
-                  {!isAnalyzing && !activeAnalysis ? (
-                    <p className="mt-3 text-sm text-slate-400">
-                      Select a tool to inspect the current {activePlatformConfig.label} adaptation.
-                    </p>
-                  ) : null}
-
-                  {isAnalyzing ? (
-                    <div className="mt-3 flex items-center gap-2 text-sm text-slate-500">
-                      <Spinner size="sm" />
-                      <span>Analyzing the active platform copy...</span>
-                    </div>
-                  ) : null}
-
-                  {!isAnalyzing && activeAnalysis === 'seo' && currentAnalysis.seo ? (
-                    <div className="mt-4 space-y-4 text-sm">
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="rounded-xl bg-emerald-50 p-3 text-center">
-                          <p className="text-2xl font-bold text-emerald-700">{currentAnalysis.seo.readabilityScore}</p>
-                          <p className="text-xs text-slate-600">Readability</p>
-                          <p className="text-xs font-semibold text-slate-500">{currentAnalysis.seo.readabilityGrade}</p>
-                        </div>
-                        <div className="rounded-xl bg-blue-50 p-3 text-center">
-                          <p className="text-2xl font-bold text-blue-700">{currentAnalysis.seo.keywordDensity}%</p>
-                          <p className="text-xs text-slate-600">Keyword Density</p>
-                        </div>
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Primary Keyword</p>
-                        <p className="rounded-xl bg-slate-50 p-2 text-slate-700">
-                          {currentAnalysis.seo.primaryKeyword}
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Meta Description</p>
-                        <p className="rounded-xl bg-slate-50 p-2 text-slate-700">
-                          {currentAnalysis.seo.metaDescription}
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Title Suggestions</p>
-                        <ul className="space-y-1 text-slate-600">
-                          {(currentAnalysis.seo.titleSuggestions ?? []).map((title, index) => (
-                            <li key={index}>• {title}</li>
-                          ))}
-                        </ul>
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Optimization Tips</p>
-                        <ul className="space-y-1 text-slate-600">
-                          {(currentAnalysis.seo.optimizationTips ?? []).map((tip, index) => (
-                            <li key={index}>• {tip}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {!isAnalyzing && activeAnalysis === 'plagiarism' && currentAnalysis.plagiarism ? (
-                    <div className="mt-4 space-y-4 text-sm">
-                      <div className="rounded-xl bg-amber-50 p-3">
-                        <p className="text-lg font-bold text-amber-700">
-                          {currentAnalysis.plagiarism.aiLikelihoodScore}% AI likelihood
-                        </p>
-                        <p className="text-xs font-semibold text-slate-600">
-                          {currentAnalysis.plagiarism.aiLikelihoodLabel}
-                        </p>
-                        <p className="mt-2 text-sm text-slate-700">{currentAnalysis.plagiarism.verdict}</p>
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Originality Summary</p>
-                        <p className="rounded-xl bg-slate-50 p-2 text-slate-700">
-                          {currentAnalysis.plagiarism.originality}
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Flagged Phrases</p>
-                        {(currentAnalysis.plagiarism.flaggedPhrases ?? []).length > 0 ? (
-                          <ul className="space-y-1 text-slate-600">
-                            {(currentAnalysis.plagiarism.flaggedPhrases ?? []).map((item, index) => (
-                              <li key={index}>
-                                • <span className="font-semibold">{item.phrase}</span>: {item.reason}
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <p className="text-slate-500">No high-risk phrasing flagged.</p>
-                        )}
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Humanization Tips</p>
-                        <ul className="space-y-1 text-slate-600">
-                          {(currentAnalysis.plagiarism.humanizationTips ?? []).map((tip, index) => (
-                            <li key={index}>• {tip}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {!isAnalyzing && activeAnalysis === 'sources' && currentAnalysis.sources ? (
-                    <div className="mt-4 space-y-4 text-sm">
-                      <div className="rounded-xl bg-cyan-50 p-3">
-                        <p className="text-lg font-bold text-cyan-700">
-                          {currentAnalysis.sources.relevanceScore}/100 relevance
-                        </p>
-                        <p className="mt-1 text-sm text-slate-700">{currentAnalysis.sources.relevanceSummary}</p>
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Claims to Verify</p>
-                        {(currentAnalysis.sources.claims ?? []).length > 0 ? (
-                          <ul className="space-y-2 text-slate-600">
-                            {(currentAnalysis.sources.claims ?? []).map((claim, index) => (
-                              <li key={index} className="rounded-xl bg-slate-50 p-2">
-                                <p className="font-medium text-slate-700">{claim.claim}</p>
-                                <p className="text-xs">
-                                  {claim.needsCitation ? 'Needs citation' : 'Citation optional'} · Search:{' '}
-                                  {claim.suggestedSearchQuery}
-                                </p>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <p className="text-slate-500">No claims were identified for citation review.</p>
-                        )}
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">URLs Found</p>
-                        {(currentAnalysis.sources.urlsFound ?? []).length > 0 ? (
-                          <ul className="space-y-1 text-slate-600">
-                            {(currentAnalysis.sources.urlsFound ?? []).map((url, index) => (
-                              <li key={index} className="break-all">
-                                • {url}
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <p className="text-slate-500">No URLs were found in this platform version.</p>
-                        )}
-                      </div>
-
-                      <div>
-                        <p className="mb-1 text-xs font-semibold text-slate-700">Recommendations</p>
-                        <ul className="space-y-1 text-slate-600">
-                          {(currentAnalysis.sources.recommendations ?? []).map((item, index) => (
-                            <li key={index}>• {item}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    </div>
-                  ) : null}
-                </section>
+                  );
+                })}
               </div>
-            </div>
 
+              {gateError ? <p className="mt-3 text-sm text-red-700">{gateError}</p> : null}
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                  style={{ background: '#1a7a5e' }}
+                  onClick={() => {
+                    void startSequentialGeneration();
+                  }}
+                  disabled={isSequenceRunning || selectedPlatforms.filter((p) => !generatedPlatforms.has(p)).length === 0}
+                >
+                  {isSequenceRunning ? <Spinner size="sm" label="Generating..." /> : 'Continue and Generate'}
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          {tabVisiblePlatforms.length > 0 ? (
+            <section className="surface-card p-5">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <h2 className="section-title">Platform Content</h2>
+                {isSequenceRunning ? (
+                  <span className="text-xs text-slate-500">Generating sequence...</span>
+                ) : null}
+              </div>
+
+              <div className="mb-4 flex flex-wrap gap-1 border-b border-slate-200 pb-3">
+                {tabVisiblePlatforms.map((platformMeta) => {
+                  const state = platformStates[platformMeta.key];
+                  const isActive = activePlatform === platformMeta.key;
+                  const isInProgress = state.status === 'running' || state.status === 'queued';
+                  return (
+                    <button
+                      key={platformMeta.key}
+                      type="button"
+                      onClick={() => setActivePlatform(platformMeta.key)}
+                      className={`flex items-center gap-1.5 rounded-t-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                        isActive
+                          ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span
+                        className={`inline-flex h-4 min-w-4 items-center justify-center rounded text-[9px] font-bold text-white ${platformMeta.accentClass}`}
+                      >
+                        {platformMeta.label.slice(0, 1)}
+                      </span>
+                      {platformMeta.label}
+                      {isInProgress ? <Spinner size="sm" /> : null}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {(() => {
+                const platformMeta = PLATFORM_CONFIG.find((p) => p.key === activePlatform) ?? PLATFORM_CONFIG[0];
+                const state = platformStates[activePlatform];
+                const seo = seoByPlatform[activePlatform];
+                const text = platforms[activePlatform] ?? '';
+                const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+                const hasInlineOverlay = Boolean(
+                  selection.text.trim() || instruction.trim() || activePendingInlineChange || inlineEditor.isLoading || inlineEditor.error,
+                );
+
+                if (!tabVisiblePlatforms.some((p) => p.key === activePlatform)) {
+                  return null;
+                }
+
+                return (
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-flex h-5 min-w-5 items-center justify-center rounded text-[10px] font-bold text-white ${platformMeta.accentClass}`}
+                        >
+                          {platformMeta.label.slice(0, 1)}
+                        </span>
+                        <span className="font-semibold text-slate-800">{platformMeta.label}</span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">{words} words</span>
+                        <span
+                          className={`rounded-full px-2 py-0.5 font-semibold ${
+                            state.status === 'success'
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : state.status === 'failed'
+                                ? 'bg-red-100 text-red-700'
+                                : state.status === 'running'
+                                  ? 'bg-blue-100 text-blue-700'
+                                  : state.status === 'queued'
+                                    ? 'bg-amber-100 text-amber-700'
+                                    : 'bg-slate-100 text-slate-600'
+                          }`}
+                        >
+                          {state.status}
+                        </span>
+                        <span
+                          className={`rounded-full px-2 py-0.5 font-semibold ${
+                            seo.status === 'success'
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : seo.status === 'failed'
+                                ? 'bg-red-100 text-red-700'
+                                : seo.status === 'pending'
+                                  ? 'bg-blue-100 text-blue-700'
+                                  : 'bg-slate-100 text-slate-600'
+                          }`}
+                        >
+                          SEO: {seo.status}
+                        </span>
+                      </div>
+                    </div>
+
+                    {state.error ? <p className="mb-2 text-xs text-red-700">{state.error}</p> : null}
+                    {seo.error ? <p className="mb-2 text-xs text-red-700">SEO: {seo.error}</p> : null}
+
+                    <div className="relative">
+                      <textarea
+                        className="min-h-[180px] w-full resize-y rounded-xl border border-slate-300 p-3 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
+                        value={text}
+                        onChange={(event) => {
+                          setPlatforms((previous) => ({
+                            ...previous,
+                            [activePlatform]: event.target.value,
+                          }));
+                          setContentVersion((previous) => ({
+                            ...previous,
+                            [activePlatform]: previous[activePlatform] + 1,
+                          }));
+                        }}
+                        onSelect={(event) => captureSelection(activePlatform, event.currentTarget)}
+                        onKeyUp={(event) => captureSelection(activePlatform, event.currentTarget)}
+                        onMouseUp={(event) => captureSelection(activePlatform, event.currentTarget)}
+                        placeholder={`Adapted ${platformMeta.label} copy appears here.`}
+                      />
+
+                      {activePlatformChatDiffs.length > 0 ? (
+                        <div className="pointer-events-none absolute inset-x-3 bottom-3 max-h-52 overflow-auto rounded-xl border border-slate-300 bg-white/95 p-2 shadow-sm">
+                          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                            Pending AI sentence diffs in editor
+                          </p>
+                          <div className="space-y-2">
+                            {activePlatformChatDiffs.map((diff) => (
+                              <div key={diff.id} className="pointer-events-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+                                <p className="mb-1 text-[11px] font-semibold text-slate-600">Sentence change</p>
+                                <p className="rounded bg-red-50 px-2 py-1 text-xs text-red-800 line-through">{diff.beforeText || '(insert)'}</p>
+                                <p className="mt-1 rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-800">{diff.afterText || '(remove)'}</p>
+                                {diff.message ? <p className="mt-1 text-[11px] text-amber-700">{diff.message}</p> : null}
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    className="rounded-md bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
+                                    onClick={() => handleKeepPlatformChatDiff(diff.id)}
+                                    disabled={diff.status !== 'pending'}
+                                    aria-label="Keep this sentence diff"
+                                  >
+                                    Keep
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="rounded-md border border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                                    onClick={() => handleUndoPlatformChatDiff(diff.id)}
+                                    aria-label="Undo this sentence diff"
+                                  >
+                                    Undo
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <InlineEditPanel
+                        isVisible={hasInlineOverlay}
+                        anchorTop={floatingAnchor.top}
+                        anchorLeft={floatingAnchor.left}
+                        selectedText={selection.text}
+                        instruction={instruction}
+                        onInstructionChange={setInstruction}
+                        onPropose={() => {
+                          void inlineEditor.proposeChange({ selection, instruction }).then(() => {
+                            setInstruction('');
+                          });
+                        }}
+                        isLoading={inlineEditor.isLoading}
+                        error={inlineEditor.error}
+                        pendingChange={activePendingInlineChange}
+                        onAcceptPending={() => {
+                          if (activePendingInlineChange) {
+                            inlineEditor.acceptChange(activePendingInlineChange.id);
+                          }
+                        }}
+                        onDenyPending={() => {
+                          if (activePendingInlineChange) {
+                            inlineEditor.denyChange(activePendingInlineChange.id);
+                          }
+                        }}
+                      />
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                        onClick={() => {
+                          void retryPlatform(activePlatform);
+                        }}
+                        disabled={state.status === 'running'}
+                      >
+                        {state.status === 'running' ? 'Generating...' : 'Retry Platform'}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                        onClick={() => {
+                          void retrySeo(activePlatform);
+                        }}
+                        disabled={seo.status === 'pending'}
+                      >
+                        {seo.status === 'pending' ? 'SEO Pending...' : 'Retry SEO'}
+                      </button>
+                    </div>
+
+                    <div className="mt-4">
+                      <DraftChatPanel
+                        title="AI Chat Assistant"
+                        helperText="Chat returns sentence-level diffs in this editor. Keep or Undo each diff independently."
+                        providerLabel={
+                          chatProviderByPlatform[activePlatform]
+                            ? `Chat provider: ${chatProviderByPlatform[activePlatform]}`
+                            : null
+                        }
+                        messages={chatHistoryByPlatform[activePlatform] ?? []}
+                        inputValue={chatInputByPlatform[activePlatform] ?? ''}
+                        onInputChange={(next) => {
+                          setChatInputByPlatform((previous) => ({
+                            ...previous,
+                            [activePlatform]: next,
+                          }));
+                        }}
+                        onSend={() => {
+                          void handleSendPlatformChat();
+                        }}
+                        isSending={isChatSending}
+                        error={chatError}
+                        pendingDiffCount={activePlatformPendingDiffCount}
+                      />
+                    </div>
+
+                    {seo.result ? (
+                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                        <div className="rounded-lg bg-slate-50 p-2 text-xs">
+                          <p className="font-semibold text-slate-700">Readability</p>
+                          <p className="text-slate-600">
+                            {seo.result.readabilityScore} ({seo.result.readabilityGrade})
+                          </p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-2 text-xs">
+                          <p className="font-semibold text-slate-700">Primary keyword</p>
+                          <p className="text-slate-600">{seo.result.primaryKeyword}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-2 text-xs">
+                          <p className="font-semibold text-slate-700">Density</p>
+                          <p className="text-slate-600">{seo.result.keywordDensity}%</p>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })()}
+            </section>
+          ) : null}
+
+          {hasStarted ? (
             <div className="flex flex-wrap gap-3">
               <button
                 type="button"
                 className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
                 disabled={isSaving || !firebaseLoaded}
-                onClick={() => void saveAdaptation(platforms, activePlatform)}
+                onClick={() => void saveAdaptation(platforms, activePlatform, selectedPlatforms)}
               >
-                {isSaving ? <Spinner size="sm" label="Saving..." /> : 'Save as Draft'}
+                {isSaving ? <Spinner size="sm" label="Saving..." /> : 'Save Adaptation'}
               </button>
-              <button className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+              <button
+                type="button"
+                className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                onClick={() => router.push('/review')}
+              >
                 Submit for Review
               </button>
-              <button
-                className="rounded-xl px-5 py-2.5 text-sm font-bold text-white"
-                style={{ background: '#1a7a5e' }}
-              >
-                📅 Schedule Post
-              </button>
-              <button
-                className="rounded-xl px-5 py-2.5 text-sm font-bold text-white"
-                style={{ background: '#0f766e' }}
-              >
-                Review &amp; Approve Adapted Content
-              </button>
             </div>
-          </>
-        )}
-      </div>
-
-      <aside className="trends-panel hidden w-64 shrink-0 xl:block">
-        <h2>Real-Time AI &amp; SEO Trends</h2>
-
-        {isTrendsLoading ? (
-          <div className="mt-3 text-sm text-slate-500">
-            <Spinner size="sm" label="Loading trend signals..." />
-          </div>
-        ) : trendsError ? (
-          <p className="mt-3 text-sm text-red-600">{trendsError}</p>
-        ) : trendTopics.length > 0 ? (
-          <div className="mt-3 space-y-2">
-            {trendTopics.map((topic) => (
-              <p key={topic.label} className="trend-item">
-                {topic.label} <span className="trend-score">Mentions: {topic.count}</span>
-              </p>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-3 text-sm text-slate-400">No live trend topics are available right now.</p>
-        )}
-
-        <h2 className="mt-5">Relevant Articles</h2>
-
-        {isTrendsLoading ? null : trendsError ? null : trendArticles.length > 0 ? (
-          <div className="mt-3 space-y-3">
-            {trendArticles.map((article) => (
-              <div key={article.url} className="article-item">
-                <a href={article.url} target="_blank" rel="noreferrer">
-                  {article.title}
-                </a>
-                <span className="article-date">
-                  {article.source ? `${article.source} · ` : ''}
-                  {article.publishedAt}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-3 text-sm text-slate-400">No related articles are available right now.</p>
-        )}
-      </aside>
+          ) : null}
+        </>
+      ) : null}
     </div>
   );
 }

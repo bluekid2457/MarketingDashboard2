@@ -99,6 +99,16 @@ Bullet list of observable, testable outcomes the Developer must verify before ha
 3. Produce the TIP using only the sections above that apply.
 4. End with: `TIP complete. Hand off to Developer.`
 
+## Handoff Prompt Contract (Mandatory)
+
+If you hand off to another agent, include all of the following sections:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (issue, TIP assumptions, affected areas)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff
+
 ---
 
 ## DO NOT

@@ -160,6 +160,16 @@ Format:
 5. Write the **General Improvement Plan** grouped by theme.
 6. Hand off to the Planner with the full plan text.
 
+## Handoff Prompt Contract (Mandatory)
+
+If handing off to another agent, include these sections:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (review report and plan)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff
+
 ---
 
 ## DO NOT

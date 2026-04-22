@@ -2,6 +2,10 @@
 name: Playwright Tester
 description: Browser E2E tester that uses the current chat context and user query to identify the latest implemented feature, navigate to the relevant UI route, and validate behavior with Playwright-based checks.
 tools: [execute, read, search, browser, 'playwright/*', todo]
+handoffs:
+	- label: "Escalate failures to Orchestrator"
+		agent: orchestrator
+		prompt: "Playwright validation found concrete failures. Convert these into implementation actions and run execution loop."
 ---
 ## Creds
  - Username: "qa@example.com"
@@ -114,3 +118,13 @@ If the recent conversation says an AI chat window was added to draft editing:
 - The tested feature is explicitly tied back to the latest chat/user request.
 - At least one happy-path scenario and one edge scenario were executed.
 - A final PASS/FAIL verdict is provided with actionable evidence.
+
+## Handoff Prompt Contract (Mandatory)
+
+If handing off to another agent, include:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (failing scenarios, repro steps, expected vs observed, likely file areas)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff

@@ -18,9 +18,11 @@ This table centralizes the current frontend `(TODO)` items for quick planning an
 | Multi-Channel Adaptation | Generate by Platform (AI) | DONE |
 | Multi-Channel Adaptation | Preview Per Format | DONE |
 | Multi-Channel Adaptation | AI Chat for Editing | DONE |
-| Publishing & Scheduling | Platform Connection Status | TODO |
+| Publishing & Scheduling | Publish Context Loading (workflow/local/Firebase) | DONE |
+| Publishing & Scheduling | One-click LinkedIn Handoff (clipboard + open compose) | DONE |
+| Publishing & Scheduling | One-click X/Twitter Intent Prefill | DONE |
+| Publishing & Scheduling | Missing Content / Error / Status Hints | DONE |
 | Publishing & Scheduling | Schedule Picker / Calendar | TODO |
-| Publishing & Scheduling | Draft Mode Toggle | TODO |
 | Publishing & Scheduling | Visual Content Calendar | TODO |
 | Publishing & Scheduling | Gap Detection Alerts | TODO |
 | Publishing & Scheduling | Submit to Search Engines | TODO |
@@ -79,6 +81,10 @@ frontend/
       api/
         angles/
           route.ts          # Provider-agnostic AI angle generation/refinement endpoint (OpenAI/Gemini/Claude/Ollama)
+          persist/
+            route.ts        # Server-side angle persistence endpoint (retained for optional server workflows; Angles UI persists directly from the authenticated client)
+          select/
+            route.ts        # Server-side angle selection finalization endpoint (retained for optional server workflows; Angles UI persists selection directly from the authenticated client)
         drafts/
           route.ts          # Provider-agnostic robust draft generation endpoint from selected idea + angle
           adapt/
@@ -117,11 +123,14 @@ frontend/
         notifications/
           page.tsx          # Screen 12 — Error & Notifications
     components/
+      DraftChatPanel.tsx      # Reusable AI chat panel with pending sentence-diff status for in-editor Keep/Undo
       Nav.tsx               # Sidebar navigation component (all 11 nav links)
     lib/                    # Utility helpers
       aiConfig.ts           # LocalStorage-backed AI provider config + active provider/key resolver used by angles generation
       analytics.ts          # Safe auth analytics event emitter (no-op when analytics SDK is absent)
+      chatSpanDiff.ts       # Sentence/span diff extraction + rebased span-apply helpers for AI chat previews
       firebase.ts           # Browser-only Firebase Web SDK initialization + lazy auth and Firestore getters
+      firebaseServer.ts     # Server-safe Firebase app/Firestore initializer for Next.js route handlers
       prompts/
         platforms/
           index.ts          # Platform prompt resolver + platform key guard
@@ -172,8 +181,28 @@ frontend/
 - Client-side auth guard with `onAuthStateChanged`.
 - While auth state is resolving, shows a spinner + label loading state (`Checking your session...`).
 - If unauthenticated, redirects to `/login`.
-- If authenticated, renders `<Nav />` + responsive `<main>` (`pt-20` mobile for fixed header; `lg:ml-72` for desktop sidebar offset).
-- Wraps all 11 authenticated screens.
+- If authenticated, renders `<Nav />`, `<WorkflowStepper />`, and a responsive content column (`lg:ml-56`).
+  - Mobile: top padding of `68px` to clear the fixed mobile header before the stepper.
+  - Desktop: stepper sits at `top-0` (no extra padding), main content uses `pt-4 lg:px-8`.
+- Wraps all authenticated screens.
+
+### `src/components/WorkflowStepper.tsx`
+- `'use client'` directive (uses `usePathname`).
+- Sticky horizontal progress bar rendered below the mobile nav and at the top of the desktop content column.
+- Displays 6 labelled steps: **Ideas → AI Angles → Storyboard → Adapt → Review → Publish**.
+- Active step detected via `pathname.startsWith(path)` against each step's `paths` array.
+- Past steps show a checkmark badge and emerald text; active step uses filled emerald background; future steps are muted.
+- The stepper resolves an active workflow idea from route/query/workflow context and uses that idea for dynamic hrefs (Angles/Storyboard/Adapt).
+- Storyboard and Adapt hrefs only attach `angleId` when it belongs to the same active `ideaId`; stale `draft_generation_context` / `adapt_draft_context` from other ideas is ignored.
+- When no matching same-idea angle context exists, Storyboard and Adapt links fall back to `/angles?ideaId={ideaId}` (when `ideaId` is known) or `/angles` (when no idea context exists) — never to bare `/storyboard/{id}` or `/adapt/{id}` routes without `angleId`, which would cause those pages to fail.
+- Responsive: step labels hidden on mobile (xs screens), shown from `sm` breakpoint up.
+
+### `src/lib/workflowContext.ts` — Workflow Context Persistence
+- Provides typed helpers for storing/retrieving the active workflow context in `localStorage` under the key `workflow_context`.
+- `WorkflowContext` type: `{ ideaId: string; angleId?: string; ideaTopic?: string }`.
+- Exports: `getWorkflowContext()`, `setWorkflowContext(ctx)`, `clearWorkflowContext()`.
+- All storage operations are wrapped in try/catch to silently absorb storage errors.
+- Used by `WorkflowStepper` to preserve same-idea navigation context (`ideaId` + optional `angleId`), by Ideas when opening an idea workflow, and by Angles as selection changes.
 
 ### `src/app/globals.css`
 - Defines non-purple design tokens and atmospheric background layers (`radial-gradient` + `linear-gradient`).
@@ -258,39 +287,70 @@ Note: `(TODO)` marks features that are currently not functional and still need i
 **Route:** `src/app/(app)/ideas/page.tsx`
 **Layout Notes:** Header summary + Firestore-backed form and backlog table on the left, live trends/articles sidebar on the right.
 **Sections:**
-1. New Idea form with textarea + tone/audience/format selectors
+1. New Idea form with textarea + tone/audience selectors (no format selector at idea-entry time)
 2. Client-side validation, submit loading state, and inline save success/error states
 3. Firestore list-load and add-doc save waits render spinner indicators
 4. Firestore-backed ideas table scoped to the signed-in user
-5. Functional sort and filter controls (sort by newest/oldest/topic, filter by tone and format)
-6. Selected-idea summary card derived from persisted Firestore data
-7. "Generate Angles" CTA in Selected Idea card routes to `/angles?ideaId=<ideaDocId>`
-8. Live trend snapshot and right-hand articles panel sourced from `/api/trends`
+5. Functional sort and filter controls (sort by newest/oldest/topic/rating, filter by tone only); default sort is rating high-to-low
+6. User-selected sort preference is persisted in browser session storage and restored when returning to `/ideas` within the same session
+7. On sign-out, Ideas sort preference is cleared from session storage and the sort resets to the rating default
+8. New ideas persist relevance metadata (`score`, `label`, `reason`, `scoredAtMs`) so rating sort is deterministic for equal scores
+9. Rating column shows an explicit `Unscored` status when relevance metadata is missing; unscored entries are sorted last in rating sort
+10. Backlog table intentionally omits a `Format` column; content format selection is deferred to later workflow steps
+11. New ideas persist `format: 'Unspecified'` for backward-compatible data shape while format input is removed from the UI
+12. Live trend snapshot and right-hand articles panel sourced from `/api/trends`
 
 ---
 
 ### Screen 4 — AI Angle Selection & Outline (`/angles`)
 **Route:** `src/app/(app)/angles/page.tsx`
-**Layout Notes:** Query-driven selected-idea header + AI-generated angle carousel + refinement chat + action bar + live trends panel.
+**Layout Notes:** Query-driven selected-idea header + AI-generated angle carousel + action bar + live trends panel.
 **Sections:**
 1. Resolves `ideaId` from query string; fast-path: reads `localStorage['angles_idea_context']` (written by Ideas page on navigation) and hydrates idea state immediately if `ideaId` matches, avoiding Firestore-blocked loading states. Firestore `users/{uid}/ideas/{ideaId}` is still fetched in the background to keep data fresh.
 2. Guide/empty state when no `ideaId` is present, with CTA back to `/ideas`
-3. Auto-generates multiple real angles through `POST /api/angles` using `getActiveAIKey()` (provider + key/config from settings)
+3. Auto-generates angles through `POST /api/angles` as soon as valid idea context resolves (including the Ideas-page localStorage handoff), requesting exactly 2 cards using `getActiveAIKey()` (provider + key/config from settings), with a single in-flight run allowed per trigger to prevent overlapping requests. The page does **not** hard-block generation for a missing API key or missing Ollama model — the request is sent regardless and the API provides a deterministic fallback if provider config is incomplete.
 4. Functional card carousel with previous/next navigation and radio-based angle selection
-5. Unlockable detailed editor per angle with inline editing for title, summary, and section points (including add/remove point actions)
-6. "Refine with AI Chat" sends prompt for selected angle, updates angle content, and appends local chat history
-7. "Retry AI Generation" regenerates angles for current idea
-8. "Proceed to Draft Generation" routes to `/drafts/<ideaId>?angleId=<selectedAngleId>` and stores draft handoff context (idea + selected angle) in `localStorage['draft_generation_context']`
-9. Live trend snapshot + right panel backed by `/api/trends` with loading/error states
-10. Selected-idea Firebase load state displays a spinner + label while Firestore refresh is pending
+5. Angle selection is single-source-of-truth by `selectedAngleId`; generated/restored angle sets are normalized to unique IDs so only one card can ever render as selected at a time
+6. Always-visible detailed editor per angle with inline editing for title, summary, and section points (including add/remove point actions); editor fields are immediately editable for all angles
+7. "Regenerate" triggers a bounded regenerate flow for the current idea using a synchronous ref-based single-flight click guard (prevents rapid double-click duplicate requests before disabled paint) and, on success, appends exactly 2 newly generated cards to the existing angle set instead of replacing previous results.
+7. Generation quality guard validates exactly 2 non-empty, distinct cards per generation run; invalid/duplicate/null payloads are retried up to a capped attempt count inside a strict run-level deadline, and if retries are exhausted or deadline is hit the previous valid angle set remains visible while the UI surfaces an actionable terminal error with next steps.
+8. `/api/angles` now applies bounded provider retry attempts per request and accepts an optional generation seed/nonce and returns a seed-influenced fallback set (capped to requested count; default request count is 2) of distinct non-empty angles (derived from idea topic/tone/audience/format) when provider retries/timeouts are exhausted; fallback responses remain schema-compatible and are marked with `source: 'fallback'`. The API also returns a deterministic fallback (HTTP 200, `source: 'fallback'`) when provider configuration is incomplete — specifically when the provider is invalid/missing, when no API key is provided for a non-Ollama provider, or when no Ollama model is set — including a `fallbackReason` field describing the missing config; the idea content missing check still returns HTTP 400.
+9. In-flight generation is single-flight (manual rapid clicks and auto/manual overlaps cannot create parallel generation requests), tracked in localStorage for refresh recovery, and stale pending state is auto-cleared on reload/navigation so generation always reaches a deterministic success/failure terminal state (no indefinite loading)
+10. "Proceed to Draft Generation" routes to `/drafts/<ideaId>?angleId=<selectedAngleId>` and stores draft handoff context (idea + selected angle) in `localStorage['draft_generation_context']`
+11. Live trend snapshot + right panel backed by `/api/trends` with loading/error states
+12. Selected-idea Firebase load state displays a spinner + label while Firestore refresh is pending
+13. On mount (and whenever `ideaId` changes), if `ideaId` is present in the URL it is persisted to `workflowContext`; if `ideaId` is absent from the URL, `getWorkflowContext()` is used to restore `?ideaId=<stored>` automatically.
+14. As the selected angle changes, Angles writes fresh workflow context `{ ideaId, angleId }` so Storyboard/Adapt navigation always uses the current idea session.
+15. After angle generation succeeds (initial 2-card generation and subsequent append-on-regenerate runs), the page immediately writes a sanitized payload directly via the authenticated Firebase client SDK to Firestore at `users/{uid}/ideas/{ideaId}/workflow/angles` with merge semantics and `{ ideaId, angles, selectedAngleId, updatedAt, updatedAtMs, cleanup }`.
+16. On every revisit to `/angles?ideaId=...`, once the authenticated user's idea document resolves, the page attempts to restore `workflow/angles`; if persisted data contains valid angle cards, it hydrates `angles` + `selectedAngleId` from Firestore before auto-generation is allowed to run.
+17. The persistence effect writes directly with `setDoc(..., { merge: true })` whenever `angles` or `selectedAngleId` changes while `currentUser` and `idea` are available, so inline edits to title/summary/sections are persisted under the signed-in user context without requiring server-route authentication.
+18. Persistence failures surface as a visible warning banner on Angles (instead of silent console-only failures), while preserving current editable state in the UI.
+19. On angle radio selection changes, the page updates local selection immediately and persists selection through the same direct Firestore write path; if this write fails, the UI keeps the local selection and surfaces an inline error so users can retry.
+20. Generated angle cards use a wider presentation (desktop-first min width) to reduce cramped text areas and improve readability while preserving horizontal carousel navigation.
 
 Ideas page (Screen 3) handoff:
 - When "Generate Angles" is clicked, the selected idea's full data (`{ ideaId, topic, tone, audience, format, createdAtMs }`) is written to `localStorage['angles_idea_context']` before `router.push('/angles?ideaId=...')` so the Angles page can render instantly without waiting for Firestore.
+- The same click also updates `workflowContext` with the selected `ideaId` (+ `ideaTopic`) before navigation to keep stepper context aligned across Ideas, Angles, Storyboard, and Adapt.
 
 Implementation note:
-- `src/lib/aiConfig.ts` exposes `getActiveAIKey()` and returns `{ provider, apiKey, ollamaBaseUrl, ollamaModel }` from persisted user settings; this utility is required by `/angles` generation/refinement flows and includes debug logging for provider/key presence.
+- `src/lib/aiConfig.ts` exposes `getActiveAIKey()` and returns `{ provider, apiKey, ollamaBaseUrl, ollamaModel }` from persisted user settings; this utility is required by `/angles` generation flows and includes debug logging for provider/key presence.
+- `src/app/api/angles/route.ts` enforces bounded provider retries, per-attempt timeout/request-abort handling, and deterministic fallback generation for generation requests so angle regeneration can still succeed when upstream providers repeatedly fail or time out.
+- Angles page persistence correctness does not depend on `/api/angles/persist` or `/api/angles/select`; client-side authenticated Firestore writes now provide the primary persistence path for generation, edits, and selection.
+- `src/app/(app)/angles/page.tsx` keeps the existing Ideas-page localStorage handoff (`angles_idea_context`) for instant rendering, restores persisted workflow state from Firestore, and persists generation/edits/selection via direct authenticated Firestore `setDoc(..., { merge: true })` writes.
+- Route files must contain a single top-level module with exactly one `'use client';` directive (when needed) before imports; duplicated appended modules are invalid and break Turbopack parsing.
 
 ---
+
+### Screen 5a — Drafts Index (`/drafts`)
+**Route:** `src/app/(app)/drafts/page.tsx`
+**Pattern:** Client component; reads auth state then streams all drafts via Firestore `onSnapshot`.
+**Sections:**
+1. Reads `uid` from `onAuthStateChanged`; queries `users/{uid}/drafts` ordered by `updatedAt` descending via realtime snapshot.
+2. Displays a list of draft cards; each card shows `ideaTopic`, `angleTitle`, status badge (emerald = approved, blue = published, slate = draft), and formatted `updatedAt` timestamp.
+3. Each card links to `/drafts/{ideaId}?angleId={angleId}`.
+4. "**+ New Draft**" button reads `workflowContext` from `localStorage`; if `ideaId` is set, links to `/angles?ideaId={ideaId}`; otherwise falls back to `/ideas`.
+5. Empty-state renders a dashed bordered panel with CTA back to `/ideas` (or angles if context present).
+6. Loading state shows `<Spinner size="sm" />`; Firestore errors show inline red message.
 
 ### Screen 5 — Draft Editor (`/drafts/[id]`)
 **Route:** `src/app/(app)/drafts/[id]/page.tsx`
@@ -313,43 +373,76 @@ Implementation note:
 11. Breadcrumb sequence includes the next workflow step, `Multi-Channel Adaptation`, between SEO/Readability and Review.
 12. AI chat sample prompts and analysis quote callouts render escaped quotation entities in JSX so the visible helper copy stays unchanged while frontend linting remains clean.
 
+### Screen 5b — Storyboard Editor (`/storyboard/[id]`)
+**Route:** `src/app/(app)/storyboard/[id]/page.tsx`
+**Pattern:** Client component using `useParams()` and query `angleId`; keeps storyboard generation/save flow while supporting both inline-edit and chat-driven revision flows.
+**Layout Notes:** Single editor workspace with one source-of-truth textarea, a floating in-place inline AI editor, and an in-editor sentence-diff stack for AI chat proposals.
+**Sections:**
+1. Storyboard content is edited in a textarea (`ref={editorRef}`); generation, debounced autosave (2 s), manual save, source extraction, and adaptation handoff behavior remain intact.
+2. Selection capture uses textarea selection offsets (`selectionStart`/`selectionEnd`) and also computes an approximate in-editor anchor point so prompt/diff controls float at the current edit location.
+3. Inline AI editing keeps the textarea editable at all times; users can continue manual edits while a pending AI proposal is visible.
+4. A floating `InlineEditPanel` renders over the editor near the active selection, containing instruction input + propose action and contextual `Keep`/`Undo` controls for pending proposals.
+5. Pending proposals render in-place diff snippets with red strike-through (`bg-rose-100 text-rose-700 line-through`) for original text and green highlight (`bg-emerald-100 text-emerald-800`) for suggested text; no separate revision-history/change-log section is displayed.
+6. No-op AI proposals are handled explicitly and displayed as `No changes suggested.` in the floating panel.
+7. Storyboard AI chat is available again through `DraftChatPanel`; chat requests use `POST /api/drafts/chat` with current draft context and conversation history.
+8. When chat returns `<UPDATED_DRAFT>`, the page computes sentence/span diffs between current text and AI output, without replacing the entire document.
+9. Pending chat diffs render inside the editor surface with red strike-through old text and green replacement text, each with independent `Keep` and `Undo` controls.
+10. `Keep` applies only the targeted sentence/span replacement, rebases nearby spans when possible, and marks overlapping unresolved proposals as conflicts.
+11. `Undo` removes only the targeted pending sentence/span proposal and preserves all other pending diffs and manual edits.
+12. Reference parsing supports case-insensitive `Sources` / `References` headings (ATX headings like `## Sources` and Setext-style headings), with numbered lists (`1.`/`1)`), bulleted lists (`-`/`*`/`+`), and plain URL lines. Entries support markdown links (`[label](url)`) and bare `http(s)` URLs, tolerate mixed indentation, trailing whitespace, and optional two-space markdown line breaks, deduplicate by canonical URL, and render valid links as clickable entries in the bottom References panel. If a source/reference heading exists but no valid links are extracted from section parsing, the parser falls back to scanning reference-style list lines across the draft so numbered markdown links under `## Sources` are still detected. Malformed URL-like references are surfaced as validation warnings.
+
 ---
 
 ### Screen 6 — Multi-Channel Adaptation (`/adapt/[id]`)
 **Route:** `src/app/(app)/adapt/[id]/page.tsx`
 **Pattern:** Client component using `useParams()` plus query `angleId` to resolve the draft-to-adapt handoff.
-**Layout Notes:** Three-column workspace with AI chat on the left, per-platform editor in the center, and preview + optimization tools on the right, plus a live trends sidebar.
+**Layout Notes:** Platform generation + tabbed editor workspace; each platform editor supports floating inline edit controls and an embedded AI chat panel that emits sentence-level in-editor diffs.
 **Sections:**
-1. Loads and validates `localStorage['adapt_draft_context']` written by the Draft Editor; missing, invalid, or route-mismatched context renders an error state with a CTA back to the Draft Editor route.
-2. Uses Firestore `users/{uid}/adaptations/{ideaId}_{angleId}` to load previously saved adaptation state for the signed-in user and merge saved platform copy over the draft-seeded defaults.
-3. Seeds `linkedin`, `twitter`, `medium`, `newsletter`, and `blog` platform editors from the current draft content when no adaptation doc exists yet.
-4. Platform tab buttons are fully stateful; clicking a tab changes the active platform and swaps the center editor/preview to that platform only. The optimization panel remembers the last selected analysis per platform, so revisiting a platform shows its previously generated result panel again, while platforms with no completed analysis still render the empty/instruction state.
-5. Editing updates only the currently active platform text. The textarea is disabled (`disabled={isAdaptationLoading}`) while the Firestore adaptation document is still being fetched, preventing any user input from being silently overwritten by the async load.
-6. Each active platform exposes an explicit `Generate <Platform>` button that calls `POST /api/drafts/adapt` using the original draft source (`adapt_draft_context.draftContent`) plus platform-specific prompt rules; the API route aborts provider calls after 45 seconds and returns HTTP 504 with a timeout-specific error, while the client keeps a slightly longer local `AbortController` guard (~47 seconds) so the normal slow-provider path still surfaces the server timeout response first. Hung requests still clear the generating spinner, timeout/failure feedback is shown inline near the editor controls, and healthy providers still replace the active platform copy with the returned AI output.
-7. Platform text plus `activePlatform` auto-save to Firestore with a 1.5 s debounce; visible save status appears in the page header, and the "Save as Draft" action triggers an immediate Firestore write.
-8. AI chat calls `POST /api/drafts/chat` with the active platform text as `draft`, stores conversation history per platform, and only applies `<UPDATED_DRAFT>` suggestions back into the currently active platform.
-9. Optimization tools call `POST /api/drafts/analyze` against the active platform text and render visible result panels for:
+1. Uses `localStorage['adapt_draft_context']` as a fast-path when it matches the route (`ideaId` + `angleId`). If local context is missing, invalid, or route-mismatched, the page falls back to Firebase lookups (`users/{uid}/ideas/{ideaId}`, `users/{uid}/ideas/{ideaId}/workflow/angles`, and `users/{uid}/drafts/{ideaId}_{angleId}`) to rebuild a valid adaptation context instead of hard-failing immediately.
+2. If the storyboard draft document is missing during Firebase fallback resolution, Adapt builds a deterministic scaffold draft from idea + selected angle summary/sections so platform generation remains usable.
+3. Uses Firestore `users/{uid}/adaptations/{ideaId}_{angleId}` to load previously saved adaptation state for the signed-in user and merge saved platform copy over the draft-seeded defaults.
+4. Seeds `linkedin`, `twitter`, `medium`, `newsletter`, and `blog` platform editors from the current draft content when no adaptation doc exists yet.
+5. Platform tab buttons are fully stateful; clicking a tab changes the active platform and swaps the center editor/preview to that platform only. The optimization panel remembers the last selected analysis per platform, so revisiting a platform shows its previously generated result panel again, while platforms with no completed analysis still render the empty/instruction state.
+6. Editing updates only the currently active platform text. The textarea is disabled (`disabled={isAdaptationLoading}`) while the Firestore adaptation document is still being fetched, preventing any user input from being silently overwritten by the async load.
+7. Each active platform exposes an explicit `Generate <Platform>` button that calls `POST /api/drafts/adapt` using the original draft source (`adapt_draft_context.draftContent`) plus platform-specific prompt rules; the API route aborts provider calls after 5 minutes (300 seconds) and returns HTTP 504 with a timeout-specific error, while the client keeps a slightly longer local `AbortController` guard (~302 seconds) so the normal slow-provider path still surfaces the server timeout response first. Hung requests still clear the generating spinner, timeout/failure feedback is shown inline near the editor controls, and healthy providers still replace the active platform copy with the returned AI output.
+8. Platform text plus `activePlatform` auto-save to Firestore with a 1.5 s debounce; visible save status appears in the page header, and the "Save as Draft" action triggers an immediate Firestore write.
+9. AI chat is restored in Adapt via `DraftChatPanel`; it calls `POST /api/drafts/chat` with the active platform text as `draft`, stores conversation history per platform, and tracks provider metadata per platform.
+10. Chat `<UPDATED_DRAFT>` output is converted to sentence/span diffs for the active platform instead of replacing the full textarea value.
+11. Pending chat diffs render in the active platform editor with red old text and green new text; `Keep`/`Undo` actions are scoped to a single diff entry.
+12. Keeping one diff applies only that span, preserves surrounding manual edits, and rebases or conflict-marks remaining pending diffs for that platform.
+13. Optimization tools call `POST /api/drafts/analyze` against the active platform text and render visible result panels for:
    - `📈 SEO Optimizer`
    - `🔍 AI Check` (backed by `type='plagiarism'`)
    - `🔗 Source Check`
    When a configured non-Ollama AI key exists, the route keeps using the existing AI-backed prompt/call/parse flow. When the active provider is non-Ollama and no key is configured, the route returns deterministic, schema-compatible fallback outputs per tool based on the currently active platform copy instead of surfacing a shared missing-key failure.
-10. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content.
-11. Right-hand trends sidebar consumes live `/api/trends` data and shows truthful loading, error, or empty states instead of placeholder topics/articles.
-12. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; review/schedule action placeholders remain present but unchanged.
-13. The per-platform chat history slice used by the chat send callback is memoized from `chatHistoryByPlatform[activePlatform]` so hook dependency tracking stays stable without changing chat behavior.
+14. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content.
+15. Right-hand trends sidebar consumes live `/api/trends` data and shows truthful loading, error, or empty states instead of placeholder topics/articles.
+16. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; review/schedule action placeholders remain present but unchanged.
+17. The Adapt editor shares Storyboard inline editing UX: floating in-place prompt/diff controls anchored near current selection, red/green inline diff preview in the floating panel, and direct textarea editability while AI proposals are pending.
+18. Adapt inline editing and chat preview avoid duplicate revised-text surfaces by using the same active textarea as the only authoritative editing surface.
 
 ---
 
 ### Screen 7 — Publishing & Scheduling (`/publish`)
 **Route:** `src/app/(app)/publish/page.tsx`
-**Layout Notes:** Platform status cards + schedule/calendar pane + control pane for mode/gaps/submit.
+**Layout Notes:** Two-card one-click handoff workspace (LinkedIn + X/Twitter) with context/status banner and prefilled content previews.
 **Sections:**
-1. Platform Connection Status (TODO)
-2. Schedule Picker / Calendar (TODO)
-3. Draft Mode Toggle (TODO)
-4. Visual Content Calendar (TODO)
-5. Gap Detection Alerts (TODO)
-6. Submit to Search Engines (TODO)
+1. Resolves publish context from the signed-in user session and picks the best available adaptation source in this order:
+  - workflow/local route context candidate doc IDs (`workflow_context`, `adapt_draft_context`) -> `users/{uid}/adaptations/{ideaId}_{angleId}`
+  - latest adaptation fallback (`users/{uid}/adaptations` ordered by `updatedAt desc`, limit 1)
+  - local draft fallback (`adapt_draft_context.draftContent`) when no adaptation document exists
+2. Renders idea/angle labels from adaptation data when available; otherwise falls back to local adaptation context labels when present.
+3. LinkedIn one-click action:
+  - attempts `navigator.clipboard.writeText(linkedinText)`
+  - opens `https://www.linkedin.com/feed/?shareActive=true` in a new tab
+  - shows explicit status message for copied-success or clipboard-blocked fallback guidance
+4. X/Twitter one-click action opens `https://twitter.com/intent/tweet?text=...` with URL-encoded prefilled text.
+5. Both platform cards include read-only content preview textareas plus explicit secondary `Copy` buttons.
+6. Clear UX states are present for loading, signed-out/config errors, missing adaptation content, and successful publish handoff actions.
+
+Implementation notes:
+- Publish page now runs as a client component and uses Firebase Auth + Firestore browser SDK lookups.
+- One-click publish behavior is strictly handoff-based (open compose/share surfaces) and does not attempt direct API posting/OAuth account publishing.
 
 ---
 
@@ -429,6 +522,7 @@ TEST_MARKER
 ## Dynamic Routes
 
 - `src/app/(app)/drafts/[id]/page.tsx` is a client component that resolves the route segment with `useParams()` and reads `angleId` from `useSearchParams()`.
+- `src/app/(app)/storyboard/[id]/page.tsx` is a client component that resolves `ideaId` with `useParams()` and reads `angleId` from `useSearchParams()` to validate storyboard context.
 - `src/app/(app)/adapt/[id]/page.tsx` is a client component that also resolves `ideaId` with `useParams()` and validates the paired `angleId` query string before loading adaptation context.
 
 ---
@@ -439,8 +533,9 @@ TEST_MARKER
 - `/api/angles` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, idea, count, selectedAngleId?, refinementPrompt? }`, calls OpenAI (`gpt-4o-mini`), Gemini (tries `gemini-2.0-flash`, then `gemini-2.0-flash-lite`, then `gemini-1.5-flash-latest`), Claude (`claude-3-5-haiku-latest`), or local Ollama (`/api/generate`), robustly parses JSON output (including fenced JSON fallback), validates angle schema, and returns structured `angles[]` or typed errors.
 - `/api/angles` degrades gracefully: when provider calls fail or model output cannot be parsed, the route returns deterministic fallback angles (HTTP 200) with an `error` message describing the provider failure, so the UI does not hard-fail with a 502.
 - In `src/app/api/angles/route.ts`, Ollama calls are routed through `fetchOllama(apiKey, prompt, baseUrl, model)`; both `baseUrl` and `model` are required in the helper signature to keep request logging, validation, and request construction type-safe.
-- `/api/drafts` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, idea, angle }`, builds a long-form draft prompt from selected idea + angle outline, calls the configured AI provider, and returns `{ draft, provider, promptUsed?, modelText? }` where optional debug fields mirror the final prompt and model output for client-side visibility.
-- `/api/drafts/adapt` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, platform, sourceDraft, currentPlatformDraft? }`, resolves platform-specific prompt rules from `src/lib/prompts/platforms/*`, calls the configured AI provider, aborts the provider request after 45 seconds, and normalizes abort-like runtime error shapes back into the timeout response path so client-visible timeouts consistently return a JSON error with HTTP 504 instead of a generic HTTP 502 provider failure. Successful calls still return `{ platform, generatedContent, provider }`, and the route does not emit fallback/dummy adaptation text when AI generation fails.
+- `/api/drafts` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, idea, angle }`, builds a long-form draft prompt from selected idea + angle outline, calls the configured AI provider, and returns `{ draft, provider, promptUsed?, modelText?, citationValidation }` on success. If the provider call fails, the route now returns HTTP 200 with a deterministic fallback markdown draft (intro + section scaffold + conclusion + sources) and observability metadata `{ source: 'fallback', fallbackReason }` while preserving the same client-facing `draft` and `provider` fields.
+- `/api/drafts/adapt` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, platform, sourceDraft, currentPlatformDraft? }`, resolves platform-specific prompt rules from `src/lib/prompts/platforms/*`, calls the configured AI provider, aborts the provider request after 5 minutes (300 seconds), and normalizes abort-like runtime error shapes back into the timeout response path so client-visible timeouts consistently return a JSON error with HTTP 504 instead of a generic HTTP 502 provider failure. Successful calls still return `{ platform, generatedContent, provider }`, and the route does not emit fallback/dummy adaptation text when AI generation fails.
+- `/api/drafts/inline-edit` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, selectedText?, instruction }` and supports two response modes from a single endpoint: selected-text mode returns `{ updatedText, changeSummary, provider }`, while no-selection mode returns `{ suggestions: [{ beforeText, afterText, changeSummary }], provider }` with up to three validated suggestions.
 - `/api/drafts/chat` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, messages[], userMessage }`, sends the full draft + chat history as context to the AI, logs the assembled prompt plus raw provider response to the server console, and returns `{ reply, updatedDraft | null, provider }`. The AI wraps full draft rewrites in `<UPDATED_DRAFT>…</UPDATED_DRAFT>` tags which the route parses and returns separately from the conversational reply.
 - `/api/drafts/analyze` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, type: 'seo' | 'plagiarism' | 'sources' }`, runs type-specific analysis prompts, logs the prompt and raw provider response to the server console, robustly parses the AI's JSON response (code-fence fallback included), and returns `{ type, result, provider }`. For non-Ollama providers without an API key, the route returns deterministic per-tool fallback analysis derived from the submitted draft text while preserving the same response schema expected by the Adapt page UI.
 - `/api/v1/*` proxy to FastAPI backend (to be implemented) (TODO)
@@ -489,4 +584,62 @@ All debug logs use a `[Module Name]` prefix for easy filtering in browser DevToo
 - The ideas page reads and writes only the authenticated user's Firestore documents under `users/{uid}/ideas`; Firestore security rules must enforce the same user-to-UID match.
 - Secrets kept in server-side env vars or private Next.js env vars
 - `(auth)` route group is public (no middleware guard)
+
+---
+
+## Ticket 10-17 Implementation Update (2026-04-20)
+
+### Ticket 10: FE-ROUTES-STORYBOARD-001
+- `/storyboard` now exists as the primary index route for storyboard records.
+- Legacy routes are preserved through redirects:
+  - `/drafts` -> `/storyboard`
+  - `/drafts/new` -> `/storyboard`
+  - `/drafts/[id]?angleId=...` -> `/storyboard/[id]?angleId=...`
+- Navigation and stepper now label stage 3 as **Storyboard** and point to `/storyboard`.
+- Angles handoff now routes directly to `/storyboard/<ideaId>?angleId=<angleId>`.
+
+### Ticket 11: FE-STORYBOARD-002
+- Storyboard UI contains no SEO or AI Check toolbar actions.
+- Storyboard focuses on editor + inline edit + citation/reference validation and adaptation handoff.
+
+### Ticket 12 and 13: FE-BE-INLINE-EDIT-001, FE-STORYBOARD-003
+- Shared inline edit logic is implemented via:
+  - `src/lib/useInlineEdit.ts`
+  - `src/components/InlineEditPanel.tsx`
+- Shared behavior in both Storyboard and Adapt:
+  - Requires an instruction before proposing. Selected text is optional.
+  - When no text is selected, inline-edit API chooses a best-fit passage from the draft based on the user instruction and returns a standard proposal.
+  - When no text is selected and the instruction indicates a larger rewrite/overhaul or a multi-target request (for example, intro + ending), the inline-edit API returns 2 to 3 distinct passage-level proposals so users can review each targeted change separately.
+  - Inline-edit proposal text is sanitized before rendering so user-facing suggestions do not expose internal metadata strings such as "Edited intent:".
+  - Surfaces the latest pending proposal inline in the active editor card with old/new snippet preview and **Keep** / **Undo** controls near the editable textarea.
+  - The **Keep** / **Undo** controls render as a floating top-right pill overlay inside the editor surface to mirror in-editor suggestion UX.
+  - Keeps the Inline AI panel focused on selection + instruction + propose actions while the decision UI is shown in-editor.
+  - Produces proposal queue with per-change resolution status handling behind the inline decision controls.
+  - Handles overlap conflicts by flagging conflicting proposals after accepted edits.
+  - Rebase fallback attempts snippet relocation; unresolved range drift is flagged as conflict.
+  - Storyboard exposes the proposal queue directly in the Inline AI panel so multi-suggestion overhaul requests remain reviewable and actionable.
+
+### Ticket 14: FE-BE-STORYBOARD-004
+- Storyboard submission enforces citation requirements before navigating to review.
+- Validation blocks submit when:
+  - factual claims are missing citation markers,
+  - no references list is detected,
+  - citation markers do not resolve to reference entries.
+- References are rendered as clickable links in the Storyboard references panel.
+
+### Ticket 15, 16, and 17: FE-ADAPT-001, FE-BE-ADAPT-002, FE-BE-ADAPT-003
+- Adapt now starts with a required platform multi-select gate (must select >= 1 platform).
+- Generation runs sequentially over selected platforms and keeps progressing after failures.
+- Each selected platform renders as a progressive editable card with:
+  - generation status (`idle|queued|running|success|failed`),
+  - explicit per-platform retry action,
+  - editable textarea regardless of generation outcome.
+- SEO analysis auto-runs after each successful platform generation.
+- SEO status lifecycle per platform: `idle|pending|success|failed` with explicit retry action.
+- Late SEO responses are ignored when content version has changed, preventing stale overwrite of newer edits.
+- Shared inline edit panel is available in Adapt and operates against the currently active platform card.
+
+### Data Flow Notes
+- Storyboard remains persisted under `users/{uid}/drafts/{ideaId}_{angleId}` with status `storyboard`.
+- Adaptation save payload now includes selected platform list and active platform alongside per-platform content.
 

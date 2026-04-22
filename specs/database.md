@@ -16,6 +16,7 @@ This document defines the schema, relationships, and data requirements for the M
 ## Entity Relationship Summary
 - `users/{uid}` is the logical user root keyed by Firebase Auth UID.
 - `users/{uid}/ideas/{ideaId}` stores one persisted idea record for that authenticated user.
+- `users/{uid}/ideas/{ideaId}/workflow/angles` stores the persisted angle-generation workflow state for that idea.
 - `users/{uid}/drafts/{draftId}` stores one persisted draft record for that authenticated user.
 - `users/{uid}/adaptations/{adaptationId}` stores one persisted multi-platform adaptation record for a draft/angle pair for that authenticated user.
 - The idea document also stores `userId` so the document contents mirror the parent path and can be validated in security rules.
@@ -62,11 +63,42 @@ This document defines the schema, relationships, and data requirements for the M
 - `angleTitle: string`
   Display/context snapshot for quick rendering.
 - `status: string`
-  Current draft status (currently `'draft'`).
+  Current storyboard status (currently `'storyboard'`, with downstream review/publish statuses still allowed).
 - `createdAt: timestamp`
   Server timestamp on first save.
 - `updatedAt: timestamp`
   Server timestamp on each save.
+
+### `users/{uid}/ideas/{ideaId}/workflow/angles`
+**Purpose:** Persist generated/refined angles for a single idea so `/angles?ideaId=...` can restore state on revisit.
+
+**Document ID:**
+- `angles` (fixed deterministic ID under the `workflow` subcollection)
+
+**Required fields:**
+- `ideaId: string`
+  Parent idea identifier; must match `{ideaId}` path segment.
+- `angles: array<object>`
+  Sanitized angle candidates where each item includes:
+  - `id: string`
+  - `title: string`
+  - `summary: string`
+  - `sections: string[]` (non-empty)
+  - `status: 'active' | 'selected' | 'archived'`
+  - `createdAt: number` (client timestamp ms)
+  - `selectedAt?: number` (client timestamp ms when the candidate is finalized)
+- `selectedAngleId: string | null`
+  Current selected angle ID; when non-null it must reference an entry in `angles`.
+- `updatedAt: timestamp`
+  Server timestamp on each workflow persistence update.
+- `updatedAtMs: number`
+  Client milliseconds timestamp used for deterministic last-write ordering/debug visibility and optimistic concurrency checks during persistence.
+- `cleanup: map`
+  Cleanup metadata for selection finalization reliability:
+  - `pending: boolean` (true when hard cleanup failed and retry is required)
+  - `failedIds: string[]` (candidate IDs that were not hard-deleted)
+  - `lastAttemptedAtMs: number`
+  - `reason?: string`
 
 ### `users/{uid}/adaptations/{adaptationId}`
 **Purpose:** Persist per-platform adaptation content and active-tab state for the signed-in user.
@@ -87,6 +119,8 @@ This document defines the schema, relationships, and data requirements for the M
   Platform-to-copy map. Current keys are `linkedin`, `twitter`, `medium`, `newsletter`, and `blog`.
 - `activePlatform: string`
   The platform tab last active in the adaptation editor.
+- `selectedPlatforms: string[]`
+  Ordered list of platforms selected at Adapt entry gate. Used to restore sequential-generation scope on revisit.
 - `createdAt: timestamp`
   Server timestamp on first save.
 - `updatedAt: timestamp`
@@ -126,6 +160,13 @@ service cloud.firestore {
 - The ideas list only renders documents from the current authenticated user's path.
 - Realtime listeners surface newly added ideas without a manual page refresh.
 - Saving a draft while authenticated writes to the current user's `users/{uid}/drafts` subcollection.
+- Generating angles (initial 3-card run) while authenticated writes the sanitized payload to `users/{uid}/ideas/{ideaId}/workflow/angles` immediately.
+- Refining a selected angle while authenticated writes the updated sanitized payload to the same workflow document immediately.
+- Revisiting `/angles?ideaId=<ideaId>` restores `angles` + `selectedAngleId` from `users/{uid}/ideas/{ideaId}/workflow/angles` when valid persisted data exists.
+- Calling `POST /api/angles/select` for a valid candidate finalizes the selected candidate (`status: 'selected'`, `selectedAt`) and hard-cleans unselected candidates from the canonical `angles` array when possible.
+- If hard cleanup fails during selection finalization, unselected candidates are soft-flagged as `status: 'archived'` and `cleanup.pending` is set to `true` for retry workflows.
+- Repeating `POST /api/angles/select` with the already-finalized `selectedAngleId` is idempotent and does not create duplicate cleanup side effects.
 - Saving or autosaving an adaptation while authenticated writes to the current user's `users/{uid}/adaptations` subcollection.
+- Adaptation persistence includes `selectedPlatforms` so the selected gate scope is restored on revisit.
 - Revisiting `/adapt/<ideaId>?angleId=<angleId>` reloads the saved platform texts and `activePlatform` from the corresponding adaptation document for the authenticated user.
 - Security rules must reject cross-user reads and writes.

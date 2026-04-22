@@ -3,6 +3,13 @@ name: Auto_Loop
 description: Autonomous loop manager that uses Playwright Tester to discover missing or broken feature workflow behavior, then invokes Orchestrator to implement those gaps, and re-tests until stable.
 tools: [read, search, agent, todo]
 agents: [Playwright Tester, orchestrator]
+handoffs:
+  - label: "Run baseline/retest with Playwright Tester"
+    agent: Playwright Tester
+    prompt: "Test scoped workflow behavior and return defect-oriented findings with evidence."
+  - label: "Implement extracted issues with Orchestrator"
+    agent: orchestrator
+    prompt: "Implement these test-derived issues in order and keep specs synced through developer." 
 argument-hint: "Provide a product workflow scope or feature area to validate and complete (for example: full dashboard content pipeline)."
 ---
 
@@ -92,6 +99,16 @@ Return:
 - Total cycles used
 - Final passing scenarios
 - Remaining failures (if any) with owner recommendation
+
+## Handoff Prompt Contract (Mandatory)
+
+Every handoff prompt must include:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (test findings/issues, assumptions)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff
 
 ## Do Not
 

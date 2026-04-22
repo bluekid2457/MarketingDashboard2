@@ -1,13 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { User, onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { getWorkflowContext, setWorkflowContext } from '@/lib/workflowContext';
 import { Spinner } from '@/components/Spinner';
+import WorkflowStepper from '@/components/WorkflowStepper';
 
 type IdeaRecord = {
   id: string;
@@ -23,6 +25,9 @@ type Angle = {
   title: string;
   summary: string;
   sections: string[];
+  status?: 'active' | 'selected' | 'archived';
+  createdAt?: number;
+  selectedAt?: number;
 };
 
 type ChatMessage = {
@@ -52,13 +57,177 @@ type TrendsResponse = {
 type AnglesApiResponse = {
   angles: Angle[];
   provider?: string;
+  source?: 'provider' | 'fallback';
+  fallbackReason?: string;
   promptUsed?: string;
   modelText?: string;
   error?: string;
 };
 
 const DRAFT_CONTEXT_STORAGE_KEY = 'draft_generation_context';
-const CARDS_PER_VIEW = 3;
+const CARDS_PER_VIEW = 2;
+const ANGLES_GENERATION_STATE_STORAGE_KEY = 'angles_generation_state';
+const REQUIRED_ANGLES = 2;
+const MAX_GENERATION_ATTEMPTS = 3;
+const PER_ATTEMPT_REQUEST_TIMEOUT_MS = 12_000;
+const GENERATION_RUN_DEADLINE_MS = 35_000;
+const GENERATION_STATE_TTL_MS = 3 * 60 * 1000;
+
+type GenerationState = {
+  ideaId: string;
+  status: 'pending' | 'failed';
+  startedAt: number;
+  errorMessage?: string;
+  ownerId?: string;
+  runId?: string;
+};
+
+const ANGLES_GENERATION_OWNER_ID = crypto.randomUUID();
+
+function isNonEmpty(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function areAnglesDistinct(entries: Angle[]): boolean {
+  const dedupe = new Set<string>();
+  for (const entry of entries) {
+    const key = `${entry.title.trim().toLowerCase()}|${entry.summary.trim().toLowerCase()}`;
+    if (dedupe.has(key)) {
+      return false;
+    }
+    dedupe.add(key);
+  }
+  return true;
+}
+
+function isValidGeneratedAngles(entries: Angle[]): boolean {
+  if (entries.length !== REQUIRED_ANGLES) {
+    return false;
+  }
+
+  const everyAngleHasContent = entries.every((entry) =>
+    isNonEmpty(entry.id)
+    && isNonEmpty(entry.title)
+    && isNonEmpty(entry.summary)
+    && Array.isArray(entry.sections)
+    && entry.sections.length > 0
+    && entry.sections.every((section) => isNonEmpty(section)),
+  );
+
+  return everyAngleHasContent && areAnglesDistinct(entries);
+}
+
+function ensureUniqueAngleIds(entries: Angle[], idSeed: string): Angle[] {
+  const seen = new Set<string>();
+
+  return entries.map((entry, index) => {
+    const rawId = entry.id.trim();
+    const baseId = rawId.length > 0 ? rawId : `${idSeed}-${index + 1}`;
+    let nextId = baseId;
+    let suffix = 1;
+
+    while (seen.has(nextId)) {
+      nextId = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+
+    seen.add(nextId);
+    return nextId === entry.id ? entry : { ...entry, id: nextId };
+  });
+}
+
+function normalizePersistedAnglesPayload(value: unknown): Angle[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry): Angle | null => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+
+      const candidate = entry as {
+        id?: unknown;
+        title?: unknown;
+        summary?: unknown;
+        sections?: unknown;
+        status?: unknown;
+        createdAt?: unknown;
+        selectedAt?: unknown;
+      };
+
+      if (!isNonEmpty(candidate.id) || !isNonEmpty(candidate.title) || !isNonEmpty(candidate.summary)) {
+        return null;
+      }
+
+      if (!Array.isArray(candidate.sections)) {
+        return null;
+      }
+
+      const sanitizedSections = candidate.sections
+        .filter((section): section is string => isNonEmpty(section))
+        .map((section) => section.trim());
+
+      if (sanitizedSections.length === 0) {
+        return null;
+      }
+
+      const normalized: Angle = {
+        id: candidate.id.trim(),
+        title: candidate.title.trim(),
+        summary: candidate.summary.trim(),
+        sections: sanitizedSections,
+        status: candidate.status === 'selected' || candidate.status === 'archived' ? candidate.status : 'active',
+        createdAt: typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt)
+          ? candidate.createdAt
+          : Date.now(),
+      };
+
+      if (typeof candidate.selectedAt === 'number' && Number.isFinite(candidate.selectedAt)) {
+        normalized.selectedAt = candidate.selectedAt;
+      }
+
+      return normalized;
+    })
+    .filter((entry): entry is Angle => Boolean(entry));
+}
+
+function normalizePersistedSelectedAngleId(value: unknown, entries: Angle[]): string | null {
+  if (isNonEmpty(value) && entries.some((entry) => entry.id === value)) {
+    return value;
+  }
+
+  return entries[0]?.id ?? null;
+}
+
+function readGenerationState(): GenerationState | null {
+  try {
+    const raw = localStorage.getItem(ANGLES_GENERATION_STATE_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    return JSON.parse(raw) as GenerationState;
+  } catch {
+    return null;
+  }
+}
+
+function writeGenerationState(nextState: GenerationState): void {
+  try {
+    localStorage.setItem(ANGLES_GENERATION_STATE_STORAGE_KEY, JSON.stringify(nextState));
+  } catch {
+    // Ignore storage errors in private browsing or restricted environments.
+  }
+}
+
+function clearGenerationState(): void {
+  try {
+    localStorage.removeItem(ANGLES_GENERATION_STATE_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors in private browsing or restricted environments.
+  }
+}
 
 function formatIdeaTimestamp(value: unknown, fallbackTimestamp: number): string {
   if (value && typeof value === 'object' && 'toDate' in value) {
@@ -120,153 +289,455 @@ function TrendsPanel({
 export default function AnglesPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const ideaId = searchParams.get('ideaId')?.trim() ?? '';
+  const rawIdeaId = searchParams.get('ideaId')?.trim() ?? '';
+  const ideaId = rawIdeaId;
 
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [idea, setIdea] = useState<IdeaRecord | null>(null);
   const [ideaError, setIdeaError] = useState<string | null>(null);
   const [isIdeaLoading, setIsIdeaLoading] = useState(false);
+  const [hasResolvedAnglesRestore, setHasResolvedAnglesRestore] = useState(false);
 
   const [angles, setAngles] = useState<Angle[]>([]);
   const [selectedAngleId, setSelectedAngleId] = useState<string | null>(null);
-  const [unlockedEditors, setUnlockedEditors] = useState<Record<string, boolean>>({});
   const [carouselStartIndex, setCarouselStartIndex] = useState(0);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
-
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-  const [refinementPrompt, setRefinementPrompt] = useState('');
-  const [isRefining, setIsRefining] = useState(false);
+  const [persistenceError, setPersistenceError] = useState<string | null>(null);
 
   const [trends, setTrends] = useState<TrendsResponse | null>(null);
   const [trendsError, setTrendsError] = useState<string | null>(null);
   const [isTrendsLoading, setIsTrendsLoading] = useState(true);
+  const generationInFlightRef = useRef(false);
+  const isGeneratingRef = useRef(false);
+  const anglesRef = useRef<Angle[]>([]);
+  const selectedAngleIdRef = useRef<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+  const activeRequestControllerRef = useRef<AbortController | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoGenerationRanForIdeaRef = useRef<string | null>(null);
+  const manualRegenerateClickGuardRef = useRef(false);
+  const isSelectionFinalizationInFlightRef = useRef(false);
+  const [latestPersistedUpdatedAtMs, setLatestPersistedUpdatedAtMs] = useState<number | null>(null);
+
+  // Persist ideaId to workflow context whenever it is present in the URL.
+  useEffect(() => {
+    if (ideaId) {
+      setWorkflowContext({ ideaId });
+    }
+  }, [ideaId]);
+
+  // Restore ideaId from workflow context when URL does not include it.
+  useEffect(() => {
+    if (!ideaId) {
+      const ctx = getWorkflowContext();
+      if (ctx?.ideaId) {
+        router.replace(`/angles?ideaId=${encodeURIComponent(ctx.ideaId)}`);
+      }
+    }
+  }, [ideaId, router]);
+
+  useEffect(() => {
+    if (!ideaId) {
+      return;
+    }
+
+    setWorkflowContext({
+      ideaId,
+      ...(selectedAngleId ? { angleId: selectedAngleId } : {}),
+    });
+  }, [ideaId, selectedAngleId]);
+
+  useEffect(() => {
+    isGeneratingRef.current = isGenerating;
+  }, [isGenerating]);
+
+  useEffect(() => {
+    anglesRef.current = angles;
+  }, [angles]);
+
+  useEffect(() => {
+    selectedAngleIdRef.current = selectedAngleId;
+  }, [selectedAngleId]);
 
   const selectedAngle = useMemo(
     () => angles.find((entry) => entry.id === selectedAngleId) ?? null,
     [angles, selectedAngleId],
   );
 
+  const persistAnglesToFirestore = useCallback(
+    async (nextAngles: Angle[], nextSelectedAngleId: string | null): Promise<boolean> => {
+      if (!currentUser || !idea) {
+        return false;
+      }
+
+      const firestore = getFirebaseDb();
+      if (!firestore) {
+        setPersistenceError('Unable to persist angle edits because Firebase is not configured.');
+        return false;
+      }
+
+      const sanitizedAngles = ensureUniqueAngleIds(normalizePersistedAnglesPayload(nextAngles), `persisted-${idea.id}`);
+      const normalizedSelectedAngleId = normalizePersistedSelectedAngleId(nextSelectedAngleId, sanitizedAngles);
+      const nowMs = Date.now();
+
+      if (sanitizedAngles.length === 0) {
+        return false;
+      }
+
+      const payloadAngles = sanitizedAngles.map((angle, index) => {
+        const isSelected = normalizedSelectedAngleId !== null && angle.id === normalizedSelectedAngleId;
+        const createdAt = typeof angle.createdAt === 'number' && Number.isFinite(angle.createdAt)
+          ? angle.createdAt
+          : nowMs + index;
+
+        return {
+          id: angle.id,
+          title: angle.title,
+          summary: angle.summary,
+          sections: angle.sections,
+          status: isSelected ? 'selected' : 'active',
+          createdAt,
+          ...(isSelected ? { selectedAt: angle.selectedAt ?? nowMs } : {}),
+        };
+      });
+
+      try {
+        await setDoc(
+          doc(firestore, 'users', currentUser.uid, 'ideas', idea.id, 'workflow', 'angles'),
+          {
+            ideaId: idea.id,
+            angles: payloadAngles,
+            selectedAngleId: normalizedSelectedAngleId,
+            updatedAt: serverTimestamp(),
+            updatedAtMs: nowMs,
+            cleanup: {
+              pending: false,
+              failedIds: [],
+              lastAttemptedAtMs: nowMs,
+            },
+          },
+          { merge: true },
+        );
+
+        setLatestPersistedUpdatedAtMs(nowMs);
+        setPersistenceError(null);
+        return true;
+      } catch (error) {
+        const lastErrorMessage = error instanceof Error
+          ? error.message
+          : 'Unable to persist angle edits right now.';
+        setPersistenceError(lastErrorMessage);
+        console.warn('[Angles Page] Unable to persist angles to Firestore.', lastErrorMessage);
+        return false;
+      }
+    },
+    [currentUser, idea],
+  );
+
+  const handleAngleSelection = useCallback(async (angleId: string): Promise<void> => {
+    if (selectedAngleIdRef.current === angleId || isSelectionFinalizationInFlightRef.current) {
+      return;
+    }
+
+    setGenerationError(null);
+    isSelectionFinalizationInFlightRef.current = true;
+    setSelectedAngleId(angleId);
+
+    if (!currentUser || !idea) {
+      isSelectionFinalizationInFlightRef.current = false;
+      return;
+    }
+
+    try {
+      const didPersist = await persistAnglesToFirestore(anglesRef.current, angleId);
+      if (didPersist) {
+        setWorkflowContext({ ideaId: idea.id, angleId });
+      } else {
+        setGenerationError('Unable to finalize this angle selection. Your selection is kept locally; retry in a moment.');
+      }
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : 'Unable to finalize this angle selection.');
+    } finally {
+      isSelectionFinalizationInFlightRef.current = false;
+    }
+  }, [currentUser, idea, persistAnglesToFirestore]);
+
   const maxCarouselStart = Math.max(angles.length - CARDS_PER_VIEW, 0);
   const visibleAngles = angles.slice(carouselStartIndex, carouselStartIndex + CARDS_PER_VIEW);
 
   const generateAngles = useCallback(
-    async (options?: { refinementPrompt?: string; selectedAngleId?: string; selectedAngle?: Angle | null }): Promise<boolean> => {
+    async (
+      options?: {
+        refinementPrompt?: string;
+        selectedAngleId?: string;
+        selectedAngle?: Angle | null;
+        trigger?: 'auto' | 'manual';
+      },
+    ): Promise<boolean> => {
       if (!idea) {
         return false;
       }
 
-      const activeConfig = getActiveAIKey();
-      if (activeConfig.provider !== 'ollama' && !activeConfig.apiKey) {
-        setGenerationError('No AI API key found. Add a key in Settings before generating angles.');
-        return false;
-      }
-
-      if (activeConfig.provider === 'ollama' && !activeConfig.ollamaModel.trim()) {
-        setGenerationError('No Ollama model set. Add an Ollama model in Settings before generating angles.');
-        return false;
-      }
-
       const isRefinementRequest = Boolean(options?.refinementPrompt);
+      const generationSeed = !isRefinementRequest ? crypto.randomUUID() : undefined;
+
+      if (!isRefinementRequest && generationInFlightRef.current) {
+        return false;
+      }
+
+      if (isRefinementRequest && (generationInFlightRef.current || isGeneratingRef.current)) {
+        setGenerationError('Wait for angle generation to finish before refining.');
+        return false;
+      }
+
+      const existingState = readGenerationState();
+      if (
+        !isRefinementRequest
+        && existingState?.status === 'pending'
+        && existingState.ideaId === idea.id
+      ) {
+        const hasActiveRunInMemory = Boolean(generationInFlightRef.current && activeRunIdRef.current);
+
+        if (hasActiveRunInMemory) {
+          return false;
+        }
+
+        // Recover from stale pending state after refresh/navigation.
+        clearGenerationState();
+      }
+
+      const activeConfig = getActiveAIKey();
       setGenerationError(null);
 
-      if (isRefinementRequest) {
-        setIsRefining(true);
-      } else {
-        setIsGenerating(true);
-      }
+      const runId = crypto.randomUUID();
+      activeRunIdRef.current = runId;
+      generationInFlightRef.current = true;
+      writeGenerationState({
+        ideaId: idea.id,
+        status: 'pending',
+        startedAt: Date.now(),
+        ownerId: ANGLES_GENERATION_OWNER_ID,
+        runId,
+      });
+      setIsGenerating(true);
 
       try {
-        const requestBody = {
-          provider: activeConfig.provider,
-          apiKey: activeConfig.apiKey,
-          ollamaBaseUrl: activeConfig.ollamaBaseUrl,
-          ollamaModel: activeConfig.ollamaModel,
-          idea: {
-            topic: idea.topic,
-            tone: idea.tone,
-            audience: idea.audience,
-            format: idea.format,
-            selectedAngle: options?.selectedAngle ?? undefined,
-          },
-          count: isRefinementRequest ? 1 : 4,
-          selectedAngleId: options?.selectedAngleId,
-          refinementPrompt: options?.refinementPrompt,
-        };
+        const runDeadlineAt = Date.now() + GENERATION_RUN_DEADLINE_MS;
 
-        console.log('[Angles Page] Sending AI request', {
-          provider: requestBody.provider,
-          count: requestBody.count,
-          selectedAngleId: requestBody.selectedAngleId,
-          hasRefinementPrompt: Boolean(requestBody.refinementPrompt),
-          topic: requestBody.idea.topic,
-          tone: requestBody.idea.tone,
-          audience: requestBody.idea.audience,
-          format: requestBody.idea.format,
-        });
+        const requestOnce = async (): Promise<AnglesApiResponse> => {
+          const remainingRunMs = runDeadlineAt - Date.now();
+          if (remainingRunMs <= 0) {
+            throw new Error(
+              `Generation timed out after ${Math.floor(GENERATION_RUN_DEADLINE_MS / 1000)} seconds.`,
+            );
+          }
 
-        const response = await fetch('/api/angles', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestBody),
-        });
+          const requestBody = {
+            provider: activeConfig.provider,
+            apiKey: activeConfig.apiKey,
+            ollamaBaseUrl: activeConfig.ollamaBaseUrl,
+            ollamaModel: activeConfig.ollamaModel,
+            idea: {
+              topic: idea.topic,
+              tone: idea.tone,
+              audience: idea.audience,
+              format: idea.format,
+              selectedAngle: options?.selectedAngle ?? undefined,
+            },
+            count: isRefinementRequest ? 1 : REQUIRED_ANGLES,
+            selectedAngleId: options?.selectedAngleId,
+            refinementPrompt: options?.refinementPrompt,
+            generationSeed,
+          };
 
-        const payload = (await response.json()) as AnglesApiResponse;
-
-        if (payload.promptUsed) {
-          console.log(`[Angles Page] Prompt metadata returned in response payload (${payload.provider ?? activeConfig.provider}):\n${payload.promptUsed}`);
-        }
-        if (payload.modelText) {
-          console.log(`[Angles Page] Response returned by AI (${payload.provider ?? activeConfig.provider}):\n${payload.modelText}`);
-        }
-
-        if (!response.ok) {
-          throw new Error(payload.error || 'AI generation failed.');
-        }
-
-        if (!payload.angles || payload.angles.length === 0) {
-          throw new Error('AI returned no usable angles. Try again.');
-        }
-
-        if (isRefinementRequest) {
-          const refinedAngle = payload.angles[0];
-          const targetId = options?.selectedAngleId;
-
-          setAngles((previousAngles) => {
-            if (!targetId) {
-              return previousAngles;
-            }
-
-            return previousAngles.map((entry) => (entry.id === targetId ? { ...refinedAngle, id: targetId } : entry));
+          console.log('[Angles Page] Sending AI request', {
+            provider: requestBody.provider,
+            count: requestBody.count,
+            selectedAngleId: requestBody.selectedAngleId,
+            hasRefinementPrompt: Boolean(requestBody.refinementPrompt),
+            generationSeed: requestBody.generationSeed,
+            topic: requestBody.idea.topic,
+            tone: requestBody.idea.tone,
+            audience: requestBody.idea.audience,
+            format: requestBody.idea.format,
           });
 
-          if (targetId) {
-            setSelectedAngleId(targetId);
+          const controller = new AbortController();
+          activeRequestControllerRef.current = controller;
+          const timeoutMs = Math.max(1, Math.min(PER_ATTEMPT_REQUEST_TIMEOUT_MS, remainingRunMs));
+          const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+          try {
+            const response = await fetch('/api/angles', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(requestBody),
+              signal: controller.signal,
+            });
+
+            const payload = (await response.json()) as AnglesApiResponse;
+
+            if (payload.promptUsed) {
+              console.log(`[Angles Page] Prompt metadata returned in response payload (${payload.provider ?? activeConfig.provider}):\n${payload.promptUsed}`);
+            }
+            if (payload.modelText) {
+              console.log(`[Angles Page] Response returned by AI (${payload.provider ?? activeConfig.provider}):\n${payload.modelText}`);
+            }
+            if (payload.source === 'fallback') {
+              console.warn('[Angles Page] Using deterministic fallback angles from API route', {
+                provider: payload.provider ?? activeConfig.provider,
+                reason: payload.fallbackReason ?? 'Provider retries exhausted.',
+              });
+            }
+
+            if (!response.ok) {
+              throw new Error(payload.error || 'AI generation failed.');
+            }
+
+            return payload;
+          } catch (error) {
+            if (error instanceof DOMException && error.name === 'AbortError') {
+              throw new Error(`Generation request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+            }
+            throw error;
+          } finally {
+            clearTimeout(timeoutId);
+            if (activeRequestControllerRef.current === controller) {
+              activeRequestControllerRef.current = null;
+            }
           }
-        } else {
-          setAngles(payload.angles);
-          setSelectedAngleId(payload.angles[0]?.id ?? null);
-          setUnlockedEditors({});
-          setCarouselStartIndex(0);
+        };
+
+        const runId = activeRunIdRef.current;
+        if (!runId) {
+          return false;
         }
 
-        return true;
+        const previousValidAngles = [...anglesRef.current];
+
+        const ensureRunIsActive = (): void => {
+          if (activeRunIdRef.current !== runId) {
+            throw new Error('Generation was canceled.');
+          }
+        };
+
+        let terminalError = 'Unable to generate valid angles right now.';
+        for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
+          const remainingRunMs = runDeadlineAt - Date.now();
+          if (remainingRunMs <= 0) {
+            terminalError = `Generation timed out after ${Math.floor(GENERATION_RUN_DEADLINE_MS / 1000)} seconds.`;
+            break;
+          }
+
+          try {
+            ensureRunIsActive();
+            const payload = await requestOnce();
+            ensureRunIsActive();
+            const candidateAngles = ensureUniqueAngleIds(payload.angles ?? [], runId);
+
+            if (!isValidGeneratedAngles(candidateAngles)) {
+              terminalError = `Attempt ${attempt} returned invalid results. Angles must contain exactly 2 distinct, non-empty cards.`;
+              continue;
+            }
+
+            const isManualRegeneration = options?.trigger === 'manual' && previousValidAngles.length > 0;
+            const mergedAngles = ensureUniqueAngleIds(
+              isManualRegeneration
+              ? [...previousValidAngles, ...candidateAngles]
+              : candidateAngles,
+              `${idea.id}-angles`,
+            );
+            const nextSelectedAngleId = candidateAngles[0]?.id ?? mergedAngles[0]?.id ?? null;
+
+            setAngles(mergedAngles);
+            setSelectedAngleId(nextSelectedAngleId);
+            setCarouselStartIndex(
+              isManualRegeneration
+                ? Math.max(0, mergedAngles.length - CARDS_PER_VIEW)
+                : 0,
+            );
+            setGenerationError(null);
+            await persistAnglesToFirestore(mergedAngles, nextSelectedAngleId);
+            clearGenerationState();
+            return true;
+          } catch (error) {
+            terminalError = error instanceof Error ? error.message : 'Unable to generate angles right now.';
+          }
+
+          if (attempt < MAX_GENERATION_ATTEMPTS && Date.now() < runDeadlineAt) {
+            await new Promise<void>((resolve) => {
+              retryTimerRef.current = setTimeout(() => {
+                retryTimerRef.current = null;
+                resolve();
+              }, 250);
+            });
+          }
+        }
+
+        writeGenerationState({
+          ideaId: idea.id,
+          status: 'failed',
+          startedAt: Date.now(),
+          errorMessage: terminalError,
+          ownerId: ANGLES_GENERATION_OWNER_ID,
+          runId,
+        });
+
+        if (previousValidAngles.length > 0) {
+          setAngles(previousValidAngles);
+          if (!previousValidAngles.some((entry) => entry.id === selectedAngleIdRef.current)) {
+            setSelectedAngleId(previousValidAngles[0]?.id ?? null);
+          }
+        }
+
+        throw new Error(
+          `Regeneration failed after ${MAX_GENERATION_ATTEMPTS} attempts. ${terminalError} Previously generated angles are still shown. Check provider settings/network, then click "Regenerate" to try again.`,
+        );
       } catch (error) {
         setGenerationError(error instanceof Error ? error.message : 'Unable to generate angles right now.');
         return false;
       } finally {
-        if (isRefinementRequest) {
-          setIsRefining(false);
-        } else {
-          setIsGenerating(false);
+        if (retryTimerRef.current) {
+          clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
         }
+        activeRunIdRef.current = null;
+        generationInFlightRef.current = false;
+        setIsGenerating(false);
       }
     },
-    [idea],
+    [idea, persistAnglesToFirestore],
   );
+
+  useEffect(() => {
+    if (!ideaId) {
+      clearGenerationState();
+      return;
+    }
+
+    const state = readGenerationState();
+    if (!state || state.ideaId !== ideaId) {
+      return;
+    }
+
+    if (state.status === 'pending') {
+      clearGenerationState();
+      setGenerationError(
+        'Recovered from an unfinished previous generation run. Start a fresh run with "Regenerate".',
+      );
+      return;
+    }
+
+    if (state.status === 'failed' && state.errorMessage) {
+      setGenerationError(
+        `Previous generation failed: ${state.errorMessage}. Retry when your AI provider is ready.`,
+      );
+    }
+  }, [ideaId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -312,10 +783,10 @@ export default function AnglesPage() {
       setIdea(null);
       setIdeaError(null);
       setIsIdeaLoading(false);
+      setHasResolvedAnglesRestore(false);
       setAngles([]);
       setSelectedAngleId(null);
-      setUnlockedEditors({});
-      setChatHistory([]);
+      setLatestPersistedUpdatedAtMs(null);
       return;
     }
 
@@ -325,15 +796,16 @@ export default function AnglesPage() {
     if (!firebaseAuth || !firestore) {
       setIdeaError('Angles are unavailable until Firebase is configured for this app.');
       setIsIdeaLoading(false);
+      setHasResolvedAnglesRestore(false);
       return;
     }
 
     setIsIdeaLoading(true);
+    setHasResolvedAnglesRestore(false);
     setIdeaError(null);
     setAngles([]);
     setSelectedAngleId(null);
-    setUnlockedEditors({});
-    setChatHistory([]);
+    setLatestPersistedUpdatedAtMs(null);
 
     // Fast-path: check localStorage cache written by the Ideas page
     let loadedFromCache = false;
@@ -385,6 +857,7 @@ export default function AnglesPage() {
           setIdeaError('Sign in first, then choose an idea from the Ideas page.');
           setIsIdeaLoading(false);
         }
+        setHasResolvedAnglesRestore(true);
         return;
       }
 
@@ -398,6 +871,7 @@ export default function AnglesPage() {
             setIdeaError('That idea could not be found. Pick an idea from the Ideas page and try again.');
             setIsIdeaLoading(false);
           }
+          setHasResolvedAnglesRestore(true);
           return;
         }
 
@@ -412,6 +886,47 @@ export default function AnglesPage() {
           format: typeof data.format === 'string' ? data.format : 'Unspecified',
           createdAtLabel: formatIdeaTimestamp(data.createdAt, createdAtMs),
         });
+
+        try {
+          const persistedAnglesRef = doc(
+            firestore,
+            'users',
+            user.uid,
+            'ideas',
+            ideaId,
+            'workflow',
+            'angles',
+          );
+          const persistedAnglesSnapshot = await getDoc(persistedAnglesRef);
+
+          if (persistedAnglesSnapshot.exists()) {
+            const persistedData = persistedAnglesSnapshot.data();
+            const restoredAngles = ensureUniqueAngleIds(
+              normalizePersistedAnglesPayload(persistedData.angles),
+              `${ideaId}-restored`,
+            );
+
+            if (restoredAngles.length > 0) {
+              const restoredSelectedAngleId = normalizePersistedSelectedAngleId(
+                persistedData.selectedAngleId,
+                restoredAngles,
+              );
+
+              setAngles(restoredAngles);
+              setSelectedAngleId(restoredSelectedAngleId);
+              setCarouselStartIndex(0);
+            }
+
+            if (typeof persistedData.updatedAtMs === 'number' && Number.isFinite(persistedData.updatedAtMs)) {
+              setLatestPersistedUpdatedAtMs(persistedData.updatedAtMs);
+            }
+          }
+        } catch (error) {
+          console.warn('[Angles Page] Unable to restore persisted angles from Firestore.', error);
+        } finally {
+          setHasResolvedAnglesRestore(true);
+        }
+
         if (!loadedFromCache) {
           setIsIdeaLoading(false);
         }
@@ -421,6 +936,7 @@ export default function AnglesPage() {
           setIdeaError('Unable to load the selected idea right now.');
           setIsIdeaLoading(false);
         }
+        setHasResolvedAnglesRestore(true);
       }
     });
 
@@ -431,12 +947,90 @@ export default function AnglesPage() {
   }, [ideaId]);
 
   useEffect(() => {
-    if (!idea || !ideaId) {
+    autoGenerationRanForIdeaRef.current = null;
+    generationInFlightRef.current = false;
+
+    return () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+
+      if (activeRequestControllerRef.current) {
+        activeRequestControllerRef.current.abort();
+        activeRequestControllerRef.current = null;
+      }
+
+      const currentRunId = activeRunIdRef.current;
+      if (currentRunId) {
+        const pendingState = readGenerationState();
+        if (
+          pendingState?.status === 'pending'
+          && pendingState.ideaId === ideaId
+          && pendingState.ownerId === ANGLES_GENERATION_OWNER_ID
+          && pendingState.runId === currentRunId
+        ) {
+          clearGenerationState();
+        }
+      }
+
+      activeRunIdRef.current = null;
+      generationInFlightRef.current = false;
+      manualRegenerateClickGuardRef.current = false;
+      setIsGenerating(false);
+    };
+  }, [ideaId]);
+
+  useEffect(() => {
+    if (!idea || !ideaId || !hasResolvedAnglesRestore) {
       return;
     }
 
-    void generateAngles();
-  }, [idea, ideaId, generateAngles]);
+    if (autoGenerationRanForIdeaRef.current === idea.id) {
+      return;
+    }
+
+    if (angles.length > 0) {
+      autoGenerationRanForIdeaRef.current = idea.id;
+      clearGenerationState();
+      return;
+    }
+
+    const state = readGenerationState();
+    const hasStateForIdea = Boolean(state && state.ideaId === idea.id);
+    const isPendingState = Boolean(hasStateForIdea && state?.status === 'pending');
+    const isPendingStateFresh = Boolean(isPendingState && Date.now() - (state?.startedAt ?? 0) < GENERATION_STATE_TTL_MS);
+
+    if (hasStateForIdea && state?.status === 'failed') {
+      autoGenerationRanForIdeaRef.current = idea.id;
+      return;
+    }
+
+    if (isPendingState) {
+      clearGenerationState();
+      if (!isPendingStateFresh) {
+        setGenerationError(
+          'A previous generation session expired before finishing. Starting a fresh run now.',
+        );
+      }
+    }
+
+    autoGenerationRanForIdeaRef.current = idea.id;
+
+    if (isPendingStateFresh) {
+      setGenerationError('Recovered pending generation state from a previous session. Starting a fresh run...');
+    }
+
+    void generateAngles({ trigger: 'auto' });
+  }, [angles.length, hasResolvedAnglesRestore, idea, ideaId, generateAngles]);
+
+  useEffect(() => {
+    if (!currentUser || !idea || angles.length === 0) {
+      return;
+    }
+
+    void persistAnglesToFirestore(angles, selectedAngleId);
+  }, [angles, currentUser, idea, persistAnglesToFirestore, selectedAngleId]);
 
   useEffect(() => {
     if (!selectedAngleId || angles.length === 0) {
@@ -519,50 +1113,9 @@ export default function AnglesPage() {
     );
   }, []);
 
-  const handleRefineSubmit = useCallback(async (): Promise<void> => {
-    const prompt = refinementPrompt.trim();
-
-    if (!selectedAngleId || !selectedAngle) {
-      setGenerationError('Select an angle before sending a refinement prompt.');
-      return;
-    }
-
-    if (!prompt) {
-      setGenerationError('Enter a refinement prompt first.');
-      return;
-    }
-
-    setChatHistory((previous) => [
-      ...previous,
-      {
-        id: crypto.randomUUID(),
-        role: 'user',
-        message: prompt,
-      },
-    ]);
-
-    const success = await generateAngles({
-      selectedAngleId,
-      refinementPrompt: prompt,
-      selectedAngle,
-    });
-
-    if (success) {
-      setChatHistory((previous) => [
-        ...previous,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          message: `Updated "${selectedAngle.title}" based on your refinement request.`,
-        },
-      ]);
-      setRefinementPrompt('');
-    }
-  }, [generateAngles, refinementPrompt, selectedAngle, selectedAngleId]);
-
-  const handleProceedToDraft = useCallback((): void => {
+  const handleProceedToStoryboard = useCallback((): void => {
     if (!idea || !selectedAngle) {
-      setGenerationError('Generate and select an angle before proceeding to draft generation.');
+      setGenerationError('Generate and select an angle before proceeding to storyboard generation.');
       return;
     }
 
@@ -576,8 +1129,23 @@ export default function AnglesPage() {
       }),
     );
 
-    router.push(`/drafts/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(selectedAngle.id)}`);
+    router.push(`/storyboard/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(selectedAngle.id)}`);
   }, [idea, router, selectedAngle]);
+
+  const handleRegenerateClick = useCallback(async (): Promise<void> => {
+    if (manualRegenerateClickGuardRef.current) {
+      return;
+    }
+
+    // Immediate synchronous guard blocks rapid double-click re-entry before disabled state paints.
+    manualRegenerateClickGuardRef.current = true;
+
+    try {
+      await generateAngles({ trigger: 'manual' });
+    } finally {
+      manualRegenerateClickGuardRef.current = false;
+    }
+  }, [generateAngles]);
 
   return (
     <div className="flex gap-6">
@@ -596,6 +1164,7 @@ export default function AnglesPage() {
             ) : null}
           </div>
         </div>
+        <WorkflowStepper />
 
         {!ideaId ? (
           <section className="surface-card p-6">
@@ -638,6 +1207,10 @@ export default function AnglesPage() {
                 </div>
               </div>
 
+              <p className="mb-4 text-xs text-slate-500">
+                Angles are generated in batches of 2. Regenerate adds 2 more without removing previous results.
+              </p>
+
               {isGenerating ? (
                 <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
                   <Spinner size="sm" />
@@ -649,110 +1222,86 @@ export default function AnglesPage() {
                   {generationError}
                 </div>
               ) : null}
+              {persistenceError ? (
+                <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  {persistenceError}
+                </div>
+              ) : null}
 
               {!isGenerating && angles.length === 0 ? (
                 <p className="text-sm text-slate-500">No generated angles yet. Retry generation to request new outputs.</p>
               ) : null}
 
               {angles.length > 0 ? (
-                <div className="flex items-start gap-3 overflow-x-auto pb-2">
-                  <button
-                    type="button"
-                    className="mt-8 shrink-0 rounded-full border border-slate-300 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50 disabled:opacity-40"
-                    onClick={() => setCarouselStartIndex((value) => Math.max(0, value - 1))}
-                    disabled={carouselStartIndex === 0}
-                  >
-                    ‹
-                  </button>
-
-                  {visibleAngles.map((card) => {
+                <div
+                  className="flex items-start gap-3 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-300 hover:scrollbar-thumb-slate-400"
+                  style={{ maxWidth: 'calc(3 * 420px + 2 * 0.75rem)', maxHeight: '650px', overflowY: 'hidden' }}
+                >
+                  {angles.map((card, idx) => {
                     const isSelected = card.id === selectedAngleId;
-                    const isEditorUnlocked = Boolean(unlockedEditors[card.id]);
-
                     return (
                       <div
                         key={card.id}
-                        className={`min-w-[260px] flex-shrink-0 rounded-xl border p-4 text-sm ${
-                          isSelected ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200 bg-white'
+                        className={`min-w-[360px] lg:min-w-[420px] flex-shrink-0 rounded-2xl border p-4 text-sm shadow-sm ${
+                          isSelected ? 'border-emerald-400 bg-emerald-50/70' : 'border-slate-200 bg-white'
                         }`}
+                        style={{ maxHeight: 600, overflowY: 'auto' }}
                       >
+                        <div className="mb-2 flex items-start justify-between gap-2">
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                            Angle {idx + 1}
+                          </span>
+                          {isSelected ? <span className="text-emerald-600">Selected</span> : null}
+                        </div>
+
                         <div className="flex items-start justify-between gap-2">
-                          {isEditorUnlocked ? (
-                            <input
-                              className="w-full rounded border border-slate-300 px-2 py-1 text-sm font-semibold leading-snug text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
-                              value={card.title}
-                              onChange={(event) => handleTitleEdit(card.id, event.target.value)}
-                            />
-                          ) : (
-                            <p className="font-semibold leading-snug text-slate-800">{card.title}</p>
-                          )}
-                          {isSelected ? <span className="text-emerald-600">✓</span> : null}
+                          <input
+                            className="w-full rounded border border-slate-300 px-2 py-1 text-sm font-semibold leading-snug text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
+                            value={card.title}
+                            onChange={(event) => handleTitleEdit(card.id, event.target.value)}
+                          />
                         </div>
 
                         <div className="mt-2">
-                          {isEditorUnlocked ? (
-                            <textarea
-                              className="w-full resize-y rounded border border-slate-300 p-2 text-xs leading-relaxed text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
-                              rows={3}
-                              value={card.summary}
-                              onChange={(event) => handleSummaryEdit(card.id, event.target.value)}
-                            />
-                          ) : (
-                            <p className="text-xs leading-relaxed text-slate-600 whitespace-pre-line">{card.summary}</p>
-                          )}
+                          <textarea
+                            className="w-full resize-y rounded border border-slate-300 p-2 text-xs leading-relaxed text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
+                            rows={3}
+                            value={card.summary}
+                            onChange={(event) => handleSummaryEdit(card.id, event.target.value)}
+                          />
                         </div>
 
                         <div className="mt-3 space-y-2">
                           {card.sections.map((section, sectionIndex) => (
                             <div key={`${card.id}-section-${sectionIndex}`} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs">
-                              {isEditorUnlocked ? (
-                                <div className="space-y-2">
-                                  <textarea
-                                    className="w-full resize-y rounded border border-slate-300 p-2 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
-                                    rows={2}
-                                    value={section}
-                                    onChange={(event) => handleSectionEdit(card.id, sectionIndex, event.target.value)}
-                                  />
-                                  <div className="flex justify-end">
-                                    <button
-                                      type="button"
-                                      className="rounded border border-slate-300 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                                      onClick={() => handleRemoveSectionPoint(card.id, sectionIndex)}
-                                      disabled={card.sections.length <= 1}
-                                    >
-                                      Remove Point
-                                    </button>
-                                  </div>
+                              <div className="space-y-2">
+                                <textarea
+                                  className="w-full resize-y rounded border border-slate-300 p-2 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
+                                  rows={2}
+                                  value={section}
+                                  onChange={(event) => handleSectionEdit(card.id, sectionIndex, event.target.value)}
+                                />
+                                <div className="flex justify-end">
+                                  <button
+                                    type="button"
+                                    className="rounded border border-slate-300 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                                    onClick={() => handleRemoveSectionPoint(card.id, sectionIndex)}
+                                    disabled={card.sections.length <= 1}
+                                  >
+                                    Remove Point
+                                  </button>
                                 </div>
-                              ) : (
-                                <span className="text-slate-700">{section}</span>
-                              )}
+                              </div>
                             </div>
                           ))}
                         </div>
 
-                        {isEditorUnlocked ? (
-                          <button
-                            type="button"
-                            className="mt-2 w-full rounded border border-slate-300 px-2 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                            onClick={() => handleAddSectionPoint(card.id)}
-                          >
-                            Add Point
-                          </button>
-                        ) : null}
-
                         <button
                           type="button"
-                          className="mt-3 w-full rounded-xl py-2 text-xs font-bold text-white"
-                          style={{ background: '#1a7a5e' }}
-                          onClick={() =>
-                            setUnlockedEditors((previous) => ({
-                              ...previous,
-                              [card.id]: !previous[card.id],
-                            }))
-                          }
+                          className="mt-2 w-full rounded border border-slate-300 px-2 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                          onClick={() => handleAddSectionPoint(card.id)}
                         >
-                          {isEditorUnlocked ? 'Lock Detailed Editor' : 'Unlock Detailed Editor'}
+                          Add Point
                         </button>
 
                         <div className="mt-3 flex items-center gap-2 text-xs">
@@ -761,7 +1310,9 @@ export default function AnglesPage() {
                             type="radio"
                             name="angle"
                             checked={isSelected}
-                            onChange={() => setSelectedAngleId(card.id)}
+                            onChange={() => {
+                              void handleAngleSelection(card.id);
+                            }}
                             className="accent-emerald-600"
                           />
                           <label htmlFor={`angle-${card.id}`} className="text-slate-600">Select This Angle</label>
@@ -769,60 +1320,8 @@ export default function AnglesPage() {
                       </div>
                     );
                   })}
-
-                  <button
-                    type="button"
-                    className="mt-8 shrink-0 rounded-full border border-slate-300 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50 disabled:opacity-40"
-                    onClick={() => setCarouselStartIndex((value) => Math.min(maxCarouselStart, value + 1))}
-                    disabled={carouselStartIndex >= maxCarouselStart}
-                  >
-                    ›
-                  </button>
                 </div>
               ) : null}
-            </section>
-
-            <section className="surface-card p-5">
-              <h2 className="section-title mb-3">Refine with AI Chat</h2>
-              <div className="flex flex-col gap-4 xl:flex-row">
-                <div className="min-h-[120px] flex-1 space-y-2 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
-                  {chatHistory.length === 0 ? (
-                    <p className="text-slate-500">No chat yet. Select an angle and ask AI to refine it.</p>
-                  ) : null}
-                  {chatHistory.map((entry) => (
-                    <div key={entry.id} className="flex gap-2">
-                      <span className="shrink-0 font-bold text-slate-400">{entry.role === 'assistant' ? 'AI' : 'You'}</span>
-                      <p className="text-slate-700">{entry.message}</p>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="flex flex-1 flex-col gap-2">
-                  <textarea
-                    className="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                    rows={3}
-                    value={refinementPrompt}
-                    onChange={(event) => setRefinementPrompt(event.target.value)}
-                    placeholder='Chat with AI to refine the selected angle... e.g., "Make the tools section more tactical and add a mini case study."'
-                    disabled={isRefining}
-                  />
-                  <p className="text-xs text-slate-500">
-                    Selected Outline: {selectedAngle ? selectedAngle.title : 'None selected'}.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  className="self-start rounded-xl px-5 py-2 text-sm font-bold text-white disabled:opacity-60"
-                  style={{ background: '#1a7a5e' }}
-                  onClick={() => {
-                    void handleRefineSubmit();
-                  }}
-                  disabled={isRefining || isGenerating || !selectedAngleId}
-                >
-                  {isRefining ? <Spinner size="sm" label="Refining..." /> : 'Send Prompt'}
-                </button>
-              </div>
             </section>
 
             <div className="flex flex-wrap gap-3">
@@ -830,20 +1329,20 @@ export default function AnglesPage() {
                 type="button"
                 className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
                 onClick={() => {
-                  void generateAngles();
+                  void handleRegenerateClick();
                 }}
-                disabled={isGenerating || isRefining}
+                disabled={isGenerating}
               >
-                {isGenerating ? <Spinner size="sm" label="Regenerating..." /> : 'Retry AI Generation'}
+                {isGenerating ? <Spinner size="sm" label="Regenerating..." /> : 'Regenerate'}
               </button>
               <button
                 type="button"
                 className="rounded-xl px-5 py-2.5 text-sm font-bold text-white disabled:opacity-60"
                 style={{ background: '#1a7a5e' }}
-                onClick={handleProceedToDraft}
+                onClick={handleProceedToStoryboard}
                 disabled={!selectedAngle}
               >
-                Proceed to Draft Generation
+                Proceed to Storyboard
               </button>
             </div>
           </>

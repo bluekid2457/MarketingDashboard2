@@ -1,0 +1,2 @@
+- References not actually showing citations
+- change inline editor wording and just make it like an ai chat that has inline changing capability
