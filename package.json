@@ -1,12 +1,5 @@
 {
   "devDependencies": {
     "playwright": "^1.59.1"
-  },
-    "scripts": {
-    "dev": "node --max-old-space-size=4096 ./node_modules/next/dist/bin/next dev --webpack",
-    "dev:turbo": "next dev",
-    "build": "node --max-old-space-size=4096 ./node_modules/next/dist/bin/next build",
-    "start": "next start",
-    "lint": "eslint src"
   }
 }
