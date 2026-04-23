@@ -89,5 +89,4 @@ $RECYCLE.BIN/
 *.pem
 .cache/
 coverage/
-
 .playwright-mcp/*
