@@ -79,6 +79,9 @@ frontend/
       page.tsx              # Redirects / → /dashboard
       globals.css           # Tailwind + design tokens + shared component utility classes
       api/
+        ideas/
+          rationale/
+            route.ts        # Provider-agnostic AI rationale endpoint for idea score explanation + improvement guidance with deterministic fallback
         angles/
           route.ts          # Provider-agnostic AI angle generation/refinement endpoint (OpenAI/Gemini/Claude/Ollama)
           persist/
@@ -298,7 +301,12 @@ Note: `(TODO)` marks features that are currently not functional and still need i
 9. Rating column shows an explicit `Unscored` status when relevance metadata is missing; unscored entries are sorted last in rating sort
 10. Backlog table intentionally omits a `Format` column; content format selection is deferred to later workflow steps
 11. New ideas persist `format: 'Unspecified'` for backward-compatible data shape while format input is removed from the UI
-12. Live trend snapshot and right-hand articles panel sourced from `/api/trends`
+12. Idea save flow keeps deterministic score/label calculation, then requests AI rationale through `POST /api/ideas/rationale` and persists AI-generated explanation when available
+13. Rationale response includes both score reasoning and concrete improvement guidance; when provider config/API calls are unavailable, deterministic fallback reasoning and tips are persisted instead
+14. Personal/company context is included in rationale prompts when available from existing user-profile fields; when absent, rationale still resolves with idea-only context
+15. Backlog rows support inline title editing (`Edit Title` -> `Save`/`Cancel`) and persist renamed titles to Firestore (`title` field) without altering the underlying `topic`
+16. Legacy idea docs without `title`, `improvements`, or rationale `source` render safely via backward-compatible defaults
+17. Live trend snapshot and right-hand articles panel sourced from `/api/trends`
 
 ---
 

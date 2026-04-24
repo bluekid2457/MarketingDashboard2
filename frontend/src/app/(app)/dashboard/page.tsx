@@ -14,7 +14,7 @@ export default function DashboardPage() {
         <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-teal-700">Overview</p>
-            <h1 className="mt-2 text-3xl font-extrabold text-slate-900 sm:text-4xl">Campaign Command Center</h1>
+            <h1 className="mt-2 text-3xl font-extrabold text-slate-900 sm:text-4xl">Campaign Command Center 2</h1>
             <p className="mt-2 max-w-2xl muted-copy">Monitor momentum across your pipeline from raw ideas to live performance.</p>
           </div>
           <button className="rounded-xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-800">

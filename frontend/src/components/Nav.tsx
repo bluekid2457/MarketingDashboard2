@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { version as appVersion } from '../../package.json';
 
 const navLinks = [
   { href: '/dashboard', label: 'Overview', icon: '⊞' },
@@ -114,6 +115,9 @@ export default function Nav() {
         <div className="border-t px-4 py-4" style={{ borderColor: 'rgba(255,255,255,0.08)' }}>
           <p className="text-xs font-semibold text-white">Weekly target</p>
           <p className="mt-0.5 text-xs" style={{ color: '#7db8a8' }}>6 pieces · 12% engagement</p>
+          <p className="mt-2 text-[10px] font-medium tracking-wider" style={{ color: '#4d8a76' }}>
+            v{appVersion}
+          </p>
         </div>
       </aside>
     </>
