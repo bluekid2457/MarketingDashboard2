@@ -301,6 +301,8 @@ export default function AnglesPage() {
   const [angles, setAngles] = useState<Angle[]>([]);
   const [selectedAngleId, setSelectedAngleId] = useState<string | null>(null);
   const [carouselStartIndex, setCarouselStartIndex] = useState(0);
+  const [dragState, setDragState] = useState<{ angleId: string; sectionIndex: number } | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
@@ -1094,6 +1096,25 @@ export default function AnglesPage() {
     );
   }, []);
 
+  const handleReorderSection = useCallback((angleId: string, fromIndex: number, toIndex: number): void => {
+    if (fromIndex === toIndex) {
+      return;
+    }
+
+    setAngles((previousAngles) =>
+      previousAngles.map((entry) => {
+        if (entry.id !== angleId) {
+          return entry;
+        }
+
+        const nextSections = [...entry.sections];
+        const [moved] = nextSections.splice(fromIndex, 1);
+        nextSections.splice(toIndex, 0, moved);
+        return { ...entry, sections: nextSections };
+      }),
+    );
+  }, []);
+
   const handleRemoveSectionPoint = useCallback((angleId: string, sectionIndex: number): void => {
     setAngles((previousAngles) =>
       previousAngles.map((entry) => {
@@ -1233,90 +1254,134 @@ export default function AnglesPage() {
               ) : null}
 
               {angles.length > 0 ? (
-                <div
-                  className="flex items-start gap-3 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-300 hover:scrollbar-thumb-slate-400"
-                  style={{ maxWidth: 'calc(3 * 420px + 2 * 0.75rem)', maxHeight: '650px', overflowY: 'hidden' }}
-                >
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                   {angles.map((card, idx) => {
                     const isSelected = card.id === selectedAngleId;
                     return (
                       <div
                         key={card.id}
-                        className={`min-w-[360px] lg:min-w-[420px] flex-shrink-0 rounded-2xl border p-4 text-sm shadow-sm ${
+                        className={`flex flex-col rounded-2xl border p-4 text-sm shadow-sm ${
                           isSelected ? 'border-emerald-400 bg-emerald-50/70' : 'border-slate-200 bg-white'
                         }`}
-                        style={{ maxHeight: 600, overflowY: 'auto' }}
                       >
-                        <div className="mb-2 flex items-start justify-between gap-2">
-                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                        <div className="mb-3 flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-slate-500">
                             Angle {idx + 1}
                           </span>
-                          {isSelected ? <span className="text-emerald-600">Selected</span> : null}
+                          <div className="flex items-center gap-2">
+                            {isSelected ? (
+                              <span className="text-xs font-semibold text-emerald-700">Selected</span>
+                            ) : null}
+                            <button
+                              type="button"
+                              aria-label={isSelected ? 'Angle selected' : 'Select this angle'}
+                              className={`flex h-6 w-6 items-center justify-center rounded-full text-base leading-none transition ${
+                                isSelected
+                                  ? 'bg-emerald-600 text-white'
+                                  : 'border border-slate-300 text-slate-500 hover:bg-slate-50'
+                              }`}
+                              onClick={() => {
+                                void handleAngleSelection(card.id);
+                              }}
+                            >
+                              +
+                            </button>
+                          </div>
                         </div>
 
-                        <div className="flex items-start justify-between gap-2">
-                          <input
-                            className="w-full rounded border border-slate-300 px-2 py-1 text-sm font-semibold leading-snug text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
-                            value={card.title}
-                            onChange={(event) => handleTitleEdit(card.id, event.target.value)}
-                          />
-                        </div>
+                        <input
+                          className="w-full rounded border border-slate-300 bg-white px-2 py-2 text-sm font-semibold leading-snug text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
+                          value={card.title}
+                          onChange={(event) => handleTitleEdit(card.id, event.target.value)}
+                        />
 
-                        <div className="mt-2">
-                          <textarea
-                            className="w-full resize-y rounded border border-slate-300 p-2 text-xs leading-relaxed text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
-                            rows={3}
-                            value={card.summary}
-                            onChange={(event) => handleSummaryEdit(card.id, event.target.value)}
-                          />
-                        </div>
+                        <textarea
+                          className="mt-2 w-full resize-y rounded border border-slate-300 bg-white p-2 text-xs leading-relaxed text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
+                          rows={3}
+                          value={card.summary}
+                          onChange={(event) => handleSummaryEdit(card.id, event.target.value)}
+                        />
 
                         <div className="mt-3 space-y-2">
-                          {card.sections.map((section, sectionIndex) => (
-                            <div key={`${card.id}-section-${sectionIndex}`} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs">
-                              <div className="space-y-2">
+                          {card.sections.map((section, sectionIndex) => {
+                            const isDragging =
+                              dragState?.angleId === card.id && dragState.sectionIndex === sectionIndex;
+                            const isDropTarget =
+                              dragState?.angleId === card.id
+                              && dragOverIndex === sectionIndex
+                              && dragState.sectionIndex !== sectionIndex;
+
+                            return (
+                              <div
+                                key={`${card.id}-section-${sectionIndex}`}
+                                className={`flex items-stretch gap-2 rounded-lg border bg-white transition ${
+                                  isDropTarget ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'
+                                } ${isDragging ? 'opacity-40' : ''}`}
+                                onDragOver={(event) => {
+                                  if (dragState?.angleId !== card.id) {
+                                    return;
+                                  }
+                                  event.preventDefault();
+                                  event.dataTransfer.dropEffect = 'move';
+                                  if (dragOverIndex !== sectionIndex) {
+                                    setDragOverIndex(sectionIndex);
+                                  }
+                                }}
+                                onDrop={(event) => {
+                                  event.preventDefault();
+                                  if (dragState?.angleId !== card.id) {
+                                    return;
+                                  }
+                                  handleReorderSection(card.id, dragState.sectionIndex, sectionIndex);
+                                  setDragState(null);
+                                  setDragOverIndex(null);
+                                }}
+                              >
+                                <span
+                                  aria-hidden
+                                  draggable
+                                  className="flex cursor-grab select-none items-center px-1.5 text-slate-400 active:cursor-grabbing"
+                                  title="Drag to reorder"
+                                  onDragStart={(event) => {
+                                    event.dataTransfer.effectAllowed = 'move';
+                                    event.dataTransfer.setData('text/plain', `${card.id}:${sectionIndex}`);
+                                    setDragState({ angleId: card.id, sectionIndex });
+                                  }}
+                                  onDragEnd={() => {
+                                    setDragState(null);
+                                    setDragOverIndex(null);
+                                  }}
+                                >
+                                  ⋮⋮
+                                </span>
                                 <textarea
-                                  className="w-full resize-y rounded border border-slate-300 p-2 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
+                                  className="flex-1 resize-y rounded border border-transparent bg-transparent p-2 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
                                   rows={2}
                                   value={section}
                                   onChange={(event) => handleSectionEdit(card.id, sectionIndex, event.target.value)}
                                 />
-                                <div className="flex justify-end">
-                                  <button
-                                    type="button"
-                                    className="rounded border border-slate-300 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                                    onClick={() => handleRemoveSectionPoint(card.id, sectionIndex)}
-                                    disabled={card.sections.length <= 1}
-                                  >
-                                    Remove Point
-                                  </button>
-                                </div>
+                                <button
+                                  type="button"
+                                  aria-label="Remove content block"
+                                  className="flex items-center justify-center rounded-r-lg px-2 text-lg leading-none text-slate-400 hover:text-slate-700 disabled:opacity-30"
+                                  onClick={() => handleRemoveSectionPoint(card.id, sectionIndex)}
+                                  disabled={card.sections.length <= 1}
+                                >
+                                  −
+                                </button>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
 
                         <button
                           type="button"
-                          className="mt-2 w-full rounded border border-slate-300 px-2 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                          className="mt-3 flex items-center gap-1.5 self-start text-xs font-semibold text-slate-600 hover:text-emerald-700"
                           onClick={() => handleAddSectionPoint(card.id)}
                         >
-                          Add Point
+                          <span className="text-base leading-none">+</span>
+                          <span>Add content block</span>
                         </button>
-
-                        <div className="mt-3 flex items-center gap-2 text-xs">
-                          <input
-                            id={`angle-${card.id}`}
-                            type="radio"
-                            name="angle"
-                            checked={isSelected}
-                            onChange={() => {
-                              void handleAngleSelection(card.id);
-                            }}
-                            className="accent-emerald-600"
-                          />
-                          <label htmlFor={`angle-${card.id}`} className="text-slate-600">Select This Angle</label>
-                        </div>
                       </div>
                     );
                   })}
