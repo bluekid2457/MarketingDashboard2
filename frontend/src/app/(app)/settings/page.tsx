@@ -45,6 +45,11 @@ export default function SettingsPage() {
       trackAuthEvent("login_attempt", { action: "logout" });
       await signOut(auth);
       trackAuthEvent("login_success", { action: "logout" });
+      try {
+        sessionStorage.removeItem("ideas_sort_preference");
+      } catch {
+        // Ignore storage cleanup failures so logout can still complete.
+      }
       router.replace("/login");
     } catch (e) {
       setError("Failed to log out. Please try again.");

@@ -1,6 +1,10 @@
 ---
 description: Tester Reviewer — validates implementation against a TIP for the marketing dashboard. Returns strict verdicts: APPROVED or NEEDS WORK with concrete issue list. Use in autonomous dev-test loops.
 tools: [read, search]
+handoffs:
+	- label: "Return to Developer"
+		agent: developer
+		prompt: "Validation complete. Apply the NEEDS WORK issue list and resubmit for testing."
 ---
 
 ## 🚫 Code Change Restriction
@@ -46,6 +50,16 @@ Return:
 Current stage: Test
 Latest verdict: APPROVED | NEEDS WORK
 Next action: <what developer should do next>
+
+## Handoff Prompt Contract (Mandatory)
+
+If handing off, include all sections:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (TIP and concrete findings)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff
 
 If verdict is NEEDS WORK, append:
 Issues:

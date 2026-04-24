@@ -35,23 +35,23 @@ Orchestrator
 
 Planner      (Idea → GitHub Issues + TIPs)
 Reviewer     (Codebase audit → Improvement Plan → Planner)
-Debugger     (Interactive bug diagnosis → Notion bug log)
+Debugger     (Interactive bug diagnosis)
 Analyst      (Data analysis → marketing insights)
 Plan Modifyer (Change requests → markdown file updates)
 ```
 
 ### Agent Permissions Summary
 
-| Agent | Can Edit Code | Can Read Code | Can Create Issues | Notions | Loop Control |
+| Agent | Can Edit Code | Can Read Code | Can Create Issues | External Logging | Loop Control |
 |---|---|---|---|---|---|
-| Orchestrator | ❌ | ✅ | ❌ | ✅ | ✅ |
+| Orchestrator | ❌ | ✅ | ❌ | ❌ | ✅ |
 | Feature Loop | ❌ | ✅ | ❌ | ❌ | ✅ |
 | Architect | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Developer | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Developer | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Tester/Reviewer | ❌ | ✅ | ❌ | ❌ | ❌ |
 | Planner | ❌ | ✅ | ✅ | ❌ | ❌ |
 | Reviewer | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Debugger | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Debugger | ✅ | ✅ | ❌ | ❌ | ❌ |
 
 ---
 
@@ -103,7 +103,7 @@ User Idea / Bug Report
   - Reads full relevant files before editing
   - Implements changes: backend / frontend / DB / scripts
   - Updates matching spec file in specs/ (MANDATORY)
-  - Logs bugs to Notion (Marketing Dashboard > Bugs)
+    - Reports bug/fix summary in agent output and keeps specs in sync
       │
       ▼
   [Tester/Reviewer Agent]
@@ -122,8 +122,8 @@ User Idea / Bug Report
   - Filters by feature labels
   - Calls Feature Loop Manager per issue (sequential)
   - After each issue: syncs specs/ (removes (TODO) markers)
-  - Writes completion entry → Notion (Marketing Dashboard > Issues)
-  - After all issues: writes rollup summary → Notion
+    - Writes completion entry in orchestrator output
+    - After all issues: writes rollup summary in orchestrator output
 ```
 
 ### Phase 4 — Ongoing Quality
@@ -170,7 +170,7 @@ specs/frontend.md  ←→  architecture.md  ←→  specs/backend.md
 | Database | Firebase Firestore (NoSQL) | `backend/app/services/` |
 | AI Providers | OpenAI · Gemini · Claude · Ollama | `frontend/src/lib/aiConfig.ts` |
 | Automation | Playwright (LinkedIn, Facebook) | `backend/app/routes/` |
-| Issue Tracking | GitHub Issues + Notion | `create_issues.ps1` |
+| Issue Tracking | GitHub Issues | `create_issues.ps1` |
 
 ---
 
@@ -226,7 +226,7 @@ This gives the Orchestrator and Planner a single queryable surface for remaining
 After each Feature Loop completes, the Orchestrator should write/update a `context_snapshot.md` with:
 - Last 5 completed features
 - Current open TODO count by spec file
-- Last known Notion Issues page URL
+- Last known GitHub Issues board/filter URL
 - Active branch (if any)
 
 This allows any agent to resume mid-session without re-reading the whole repo.
@@ -287,8 +287,8 @@ if ($existing.Count -eq 0) { gh issue create ... }
 
 ### 6.4 Traceability Enhancements
 
-#### M. Notion Issue Entry Template
-Standardize the Orchestrator's Notion write format so every entry has:
+#### M. Issue Entry Template
+Standardize the Orchestrator output format so every entry has:
 - Issue # and title
 - TIP link (GitHub issue URL)
 - Agents involved and cycle count
@@ -308,7 +308,7 @@ After each approved Feature Loop, the Developer appends a one-line entry to `CHA
 - fix(auth): LinkedIn OAuth redirect loop (#14)
 ```
 
-This provides a human-readable audit trail independent of Notion.
+This provides a human-readable audit trail in-repo and in GitHub.
 
 ---
 
@@ -328,6 +328,6 @@ This provides a human-readable audit trail independent of Notion.
 | J | Planner duplicate check | Medium | Medium |
 | C | specs/README.md | Low | Low |
 | K | Reviewer trigger conditions | Medium | Medium |
-| M | Notion entry template | Low | Low |
+| M | Issue entry template | Low | Low |
 | N | user_stories ↔ issue linkage | Medium | Medium |
 | O | CHANGELOG.md by Developer | Medium | Low |

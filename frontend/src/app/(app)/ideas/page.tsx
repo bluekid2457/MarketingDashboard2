@@ -1,19 +1,14 @@
 'use client';
 
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { User, onAuthStateChanged } from 'firebase/auth';
-import {
-  addDoc,
-  collection,
-  onSnapshot,
-  orderBy,
-  query,
-  serverTimestamp,
-} from 'firebase/firestore';
+import { addDoc, collection, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, where } from 'firebase/firestore';
 
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { setWorkflowContext } from '@/lib/workflowContext';
 import { Spinner } from '@/components/Spinner';
+import WorkflowStepper from '@/components/WorkflowStepper';
 
 type IdeaRecord = {
   id: string;
@@ -24,7 +19,10 @@ type IdeaRecord = {
   userId: string;
   createdAtMs: number;
   createdAtLabel: string;
+  relevance: IdeaRelevanceMetadata | null;
 };
+
+type IdeaSort = 'newest' | 'oldest' | 'topic' | 'rating';
 
 type TrendTopic = {
   label: string;
@@ -44,9 +42,39 @@ type TrendsResponse = {
   fetchedAt: string;
 };
 
+type IdeaRating = {
+  score: number;
+  label: 'Strong' | 'Moderate' | 'Weak';
+  reason: string;
+};
+
+type IdeaRelevanceMetadata = IdeaRating & {
+  scoredAtMs: number;
+};
+
 const TONE_OPTIONS = ['Professional', 'Casual', 'Storytelling', 'Data-driven', 'Practical'];
 const AUDIENCE_OPTIONS = ['Small Business', 'Enterprise', 'B2B', 'Consumer', 'Agencies'];
-const FORMAT_OPTIONS = ['Blog Post', 'Article', 'Newsletter', 'Report', 'Case Study'];
+const DEFAULT_IDEA_FORMAT = 'Unspecified';
+const IDEAS_SORT_PREFERENCE_KEY = 'ideas_sort_preference';
+
+const RELEVANCE_KEYWORDS = [
+  'ai',
+  'automation',
+  'content',
+  'marketing',
+  'growth',
+  'pipeline',
+  'conversion',
+  'lead',
+  'seo',
+  'campaign',
+  'audience',
+  'brand',
+  'engagement',
+  'analytics',
+  'retention',
+  'strategy',
+];
 
 function formatIdeaTimestamp(value: unknown, fallbackTimestamp: number): string {
   if (value && typeof value === 'object' && 'toDate' in value) {
@@ -55,6 +83,99 @@ function formatIdeaTimestamp(value: unknown, fallbackTimestamp: number): string 
   }
 
   return new Date(fallbackTimestamp).toLocaleString();
+}
+
+function scoreIdeaTopic(topic: string): IdeaRating {
+  const cleaned = topic.trim();
+  const words = cleaned.toLowerCase().match(/[a-z0-9]+(?:['’-][a-z0-9]+)*/g) ?? [];
+  const keywordHits = words.filter((word) => RELEVANCE_KEYWORDS.includes(word)).length;
+  const lengthScore = Math.min(30, words.length * 2.5);
+  const specificityScore = Math.min(25, keywordHits * 6.5);
+  const sentenceBonus = cleaned.length >= 40 ? 10 : 0;
+  const questionBonus = cleaned.includes('?') ? 8 : 0;
+  const score = Math.max(5, Math.min(100, Math.round(22 + lengthScore + specificityScore + sentenceBonus + questionBonus)));
+
+  if (score >= 75) {
+    return {
+      score,
+      label: 'Strong',
+      reason: 'Clear and specific with high relevance for content planning.',
+    };
+  }
+
+  if (score >= 50) {
+    return {
+      score,
+      label: 'Moderate',
+      reason: 'Useful idea, but adding more specificity will improve angle quality.',
+    };
+  }
+
+  return {
+    score,
+    label: 'Weak',
+    reason: 'Too broad. Add audience, outcome, or specific context to improve relevance.',
+  };
+}
+
+function normalizeRelevanceMetadata(value: unknown): IdeaRelevanceMetadata | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as {
+    score?: unknown;
+    label?: unknown;
+    reason?: unknown;
+    scoredAtMs?: unknown;
+  };
+
+  if (typeof candidate.score !== 'number') {
+    return null;
+  }
+
+  if (candidate.label !== 'Strong' && candidate.label !== 'Moderate' && candidate.label !== 'Weak') {
+    return null;
+  }
+
+  if (typeof candidate.reason !== 'string') {
+    return null;
+  }
+
+  if (typeof candidate.scoredAtMs !== 'number') {
+    return null;
+  }
+
+  return {
+    score: candidate.score,
+    label: candidate.label,
+    reason: candidate.reason,
+    scoredAtMs: candidate.scoredAtMs,
+  };
+}
+
+function compareIdeasForRatingSort(left: IdeaRecord, right: IdeaRecord): number {
+  const leftRelevance = left.relevance;
+  const rightRelevance = right.relevance;
+
+  if (!leftRelevance && !rightRelevance) {
+    return right.createdAtMs - left.createdAtMs || left.id.localeCompare(right.id);
+  }
+
+  if (!leftRelevance) {
+    return 1;
+  }
+
+  if (!rightRelevance) {
+    return -1;
+  }
+
+  return (
+    rightRelevance.score - leftRelevance.score ||
+    rightRelevance.scoredAtMs - leftRelevance.scoredAtMs ||
+    right.createdAtMs - left.createdAtMs ||
+    left.id.localeCompare(right.id)
+  );
 }
 
 function TrendsPanel({
@@ -107,16 +228,32 @@ function TrendsPanel({
 
 export default function IdeasPage() {
   const router = useRouter();
+  const previousAuthUserRef = useRef<User | null>(null);
+
+  const getInitialSortPreference = (): IdeaSort => {
+    if (typeof window === 'undefined') {
+      return 'rating';
+    }
+
+    try {
+      const persistedSort = sessionStorage.getItem(IDEAS_SORT_PREFERENCE_KEY);
+      if (persistedSort === 'newest' || persistedSort === 'oldest' || persistedSort === 'topic' || persistedSort === 'rating') {
+        return persistedSort;
+      }
+    } catch {
+      // sessionStorage unavailable
+    }
+
+    return 'rating';
+  };
+
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [ideas, setIdeas] = useState<IdeaRecord[]>([]);
-  const [selectedIdeaId, setSelectedIdeaId] = useState<string | null>(null);
   const [ideaText, setIdeaText] = useState('');
   const [tone, setTone] = useState(TONE_OPTIONS[0]);
   const [audience, setAudience] = useState(AUDIENCE_OPTIONS[0]);
-  const [format, setFormat] = useState(FORMAT_OPTIONS[0]);
-  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'topic'>('newest');
+  const [sortBy, setSortBy] = useState<IdeaSort>(getInitialSortPreference);
   const [toneFilter, setToneFilter] = useState<string>('All');
-  const [formatFilter, setFormatFilter] = useState<string>('All');
   const [ideasError, setIdeasError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
@@ -126,40 +263,55 @@ export default function IdeasPage() {
   const [trendsError, setTrendsError] = useState<string | null>(null);
   const [isTrendsLoading, setIsTrendsLoading] = useState(true);
 
+  function updateSortPreference(nextSort: IdeaSort): void {
+    try {
+      sessionStorage.setItem(IDEAS_SORT_PREFERENCE_KEY, nextSort);
+    } catch {
+      // sessionStorage unavailable
+    }
+
+    setSortBy(nextSort);
+  }
+
   useEffect(() => {
     const firebaseAuth = getFirebaseAuth();
     const firestore = getFirebaseDb();
 
     if (!firebaseAuth || !firestore) {
-      console.error('[Ideas Page] Firebase not configured - Auth or Firestore unavailable');
       setIdeasError('Ideas are unavailable until Firebase is configured for this app.');
       setIsIdeasLoading(false);
       return;
     }
 
-    console.debug('[Ideas Page] Firebase is configured, setting up auth listener');
     let unsubscribeIdeas: (() => void) | undefined;
 
     const unsubscribeAuth = onAuthStateChanged(firebaseAuth, (user) => {
       unsubscribeIdeas?.();
-      console.debug('[Ideas Page] Auth state changed', { userId: user?.uid, email: user?.email });
+      const previousUser = previousAuthUserRef.current;
+      const didSignOut = Boolean(previousUser && !user);
+      previousAuthUserRef.current = user;
+
       setCurrentUser(user);
       setIdeasError(null);
 
       if (!user) {
-        console.debug('[Ideas Page] User is signed out');
+        if (didSignOut) {
+          try {
+            sessionStorage.removeItem(IDEAS_SORT_PREFERENCE_KEY);
+          } catch {
+            // sessionStorage unavailable
+          }
+
+          setSortBy('rating');
+        }
+
         setIdeas([]);
-        setSelectedIdeaId(null);
         setIsIdeasLoading(false);
         return;
       }
 
-      console.debug('[Ideas Page] User signed in, loading ideas from Firestore', { userId: user.uid });
       setIsIdeasLoading(true);
-      const ideasQuery = query(
-        collection(firestore, 'users', user.uid, 'ideas'),
-        orderBy('createdAtMs', 'desc'),
-      );
+      const ideasQuery = query(collection(firestore, 'users', user.uid, 'ideas'), orderBy('createdAtMs', 'desc'));
 
       unsubscribeIdeas = onSnapshot(
         ideasQuery,
@@ -177,29 +329,16 @@ export default function IdeasPage() {
               userId: typeof data.userId === 'string' ? data.userId : user.uid,
               createdAtMs,
               createdAtLabel: formatIdeaTimestamp(data.createdAt, createdAtMs),
+              relevance: normalizeRelevanceMetadata(data.relevance),
             } satisfies IdeaRecord;
           });
 
-          console.debug('[Ideas Page] Ideas loaded from Firestore', {
-            count: nextIdeas.length,
-            ideas: nextIdeas.map((i) => ({ id: i.id, topic: i.topic })),
-          });
-
           setIdeas(nextIdeas);
-          setSelectedIdeaId((previousValue) => {
-            if (previousValue && nextIdeas.some((idea) => idea.id === previousValue)) {
-              return previousValue;
-            }
-
-            return nextIdeas[0]?.id ?? null;
-          });
           setIsIdeasLoading(false);
         },
-        (error) => {
-          console.error('[Ideas Page] Error loading ideas from Firestore:', error);
+        () => {
           setIdeasError('Unable to load your saved ideas right now.');
           setIdeas([]);
-          setSelectedIdeaId(null);
           setIsIdeasLoading(false);
         },
       );
@@ -215,25 +354,17 @@ export default function IdeasPage() {
     const controller = new AbortController();
 
     async function loadTrends(): Promise<void> {
-      console.debug('[Ideas Page] Loading trends from /api/trends');
       setIsTrendsLoading(true);
       setTrendsError(null);
 
       try {
-        const response = await fetch('/api/trends', {
-          signal: controller.signal,
-        });
+        const response = await fetch('/api/trends', { signal: controller.signal });
 
         if (!response.ok) {
-          console.error('[Ideas Page] Trends request failed', { status: response.status });
           throw new Error('Trend request failed.');
         }
 
         const payload = (await response.json()) as TrendsResponse;
-        console.debug('[Ideas Page] Trends loaded successfully', {
-          topicCount: payload.topics.length,
-          articleCount: payload.articles.length,
-        });
         setTrends(payload);
       } catch (error) {
         if (controller.signal.aborted) {
@@ -241,7 +372,6 @@ export default function IdeasPage() {
         }
 
         const errorMessage = error instanceof Error ? error.message : 'Unable to load live trend signals right now.';
-        console.error('[Ideas Page] Error loading trends:', errorMessage);
         setTrends(null);
         setTrendsError(errorMessage);
       } finally {
@@ -264,85 +394,147 @@ export default function IdeasPage() {
 
     const topic = ideaText.trim();
     if (!topic) {
-      console.warn('[Ideas Page] Idea submission blocked - empty topic');
       setSubmitError('Idea text is required.');
       setSubmitSuccess(null);
       return;
     }
 
-    if (topic.length < 8) {
-      console.warn('[Ideas Page] Idea submission blocked - topic too short', { length: topic.length });
-      setSubmitError('Idea text should be at least 8 characters so it is useful later.');
+    if (topic.length < 12) {
+      setSubmitError('Use one specific sentence so relevance scoring and angle generation are reliable.');
       setSubmitSuccess(null);
       return;
     }
 
     const firestore = getFirebaseDb();
     if (!firestore || !currentUser) {
-      console.error('[Ideas Page] Cannot save idea - Firebase not configured or user not authenticated');
       setSubmitError('You must be signed in with Firebase configured before saving ideas.');
       setSubmitSuccess(null);
       return;
     }
-
-    console.debug('[Ideas Page] Submitting new idea', {
-      userId: currentUser.uid,
-      topicLength: topic.length,
-      tone,
-      audience,
-      format,
-    });
 
     setIsSubmitting(true);
     setSubmitError(null);
     setSubmitSuccess(null);
 
     try {
-      const docRef = await addDoc(collection(firestore, 'users', currentUser.uid, 'ideas'), {
+      const scoredAtMs = Date.now();
+      const relevance = scoreIdeaTopic(topic);
+
+      await addDoc(collection(firestore, 'users', currentUser.uid, 'ideas'), {
         topic,
         tone,
         audience,
-        format,
+        format: DEFAULT_IDEA_FORMAT,
         userId: currentUser.uid,
+        relevance: {
+          score: relevance.score,
+          label: relevance.label,
+          reason: relevance.reason,
+          scoredAtMs,
+        },
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-        createdAtMs: Date.now(),
-      });
-
-      console.debug('[Ideas Page] Idea saved successfully to Firestore', {
-        docId: docRef.id,
-        userId: currentUser.uid,
+        createdAtMs: scoredAtMs,
       });
 
       setIdeaText('');
       setSubmitSuccess('Idea saved to your Firebase backlog.');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[Ideas Page] Error saving idea to Firestore:', errorMessage, error);
+    } catch {
       setSubmitError('Unable to save your idea right now. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  const visibleIdeas = ideas
-    .filter((idea) => toneFilter === 'All' || idea.tone === toneFilter)
-    .filter((idea) => formatFilter === 'All' || idea.format === formatFilter)
-    .sort((left, right) => {
-      if (sortBy === 'oldest') {
-        return left.createdAtMs - right.createdAtMs;
+  async function openAnglesForIdea(idea: IdeaRecord): Promise<void> {
+    setWorkflowContext({ ideaId: idea.id, ideaTopic: idea.topic });
+
+    try {
+      localStorage.setItem(
+        'angles_idea_context',
+        JSON.stringify({
+          ideaId: idea.id,
+          topic: idea.topic,
+          tone: idea.tone,
+          audience: idea.audience,
+          format: idea.format,
+          createdAtMs: idea.createdAtMs,
+        }),
+      );
+    } catch {
+      // localStorage unavailable - Firestore fetch on Angles page is the fallback
+    }
+
+    const db = getFirebaseDb();
+    if (db && currentUser) {
+      try {
+        // Check adaptations first (furthest completed step)
+        const adaptSnap = await getDocs(
+          query(
+            collection(db, 'users', currentUser.uid, 'adaptations'),
+            where('ideaId', '==', idea.id),
+            orderBy('updatedAt', 'desc'),
+            limit(1),
+          ),
+        );
+        if (!adaptSnap.empty) {
+          const adaptation = adaptSnap.docs[0].data();
+          const angleId = typeof adaptation.angleId === 'string' ? adaptation.angleId : '';
+          if (angleId) {
+            router.push(`/adapt/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(angleId)}`);
+            return;
+          }
+        }
+      } catch {
+        // Fall through
       }
 
-      if (sortBy === 'topic') {
-        return left.topic.localeCompare(right.topic);
+      try {
+        // Check drafts (storyboard step)
+        const draftsQ = query(
+          collection(db, 'users', currentUser.uid, 'drafts'),
+          where('ideaId', '==', idea.id),
+          orderBy('updatedAt', 'desc'),
+          limit(1),
+        );
+        const snap = await getDocs(draftsQ);
+        if (!snap.empty) {
+          const draft = snap.docs[0].data();
+          const angleId = typeof draft.angleId === 'string' ? draft.angleId : '';
+          if (angleId) {
+            router.push(`/storyboard/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(angleId)}`);
+            return;
+          }
+        }
+      } catch {
+        // Fall through to angles on Firestore error
       }
+    }
 
-      return right.createdAtMs - left.createdAtMs;
-    });
+    router.push(`/angles?ideaId=${encodeURIComponent(idea.id)}`);
+  }
 
-  const selectedIdea = visibleIdeas.find((idea) => idea.id === selectedIdeaId)
-    ?? ideas.find((idea) => idea.id === selectedIdeaId)
-    ?? null;
+  const visibleIdeas = useMemo(() => {
+    return ideas
+      .filter((idea) => toneFilter === 'All' || idea.tone === toneFilter)
+      .sort((left, right) => {
+        if (sortBy === 'oldest') {
+          return left.createdAtMs - right.createdAtMs;
+        }
+
+        if (sortBy === 'topic') {
+          return left.topic.localeCompare(right.topic);
+        }
+
+        if (sortBy === 'rating') {
+          return compareIdeasForRatingSort(left, right);
+        }
+
+        return right.createdAtMs - left.createdAtMs;
+      });
+  }, [ideas, toneFilter, sortBy]);
+
+  const draftRating = ideaText.trim().length > 0 ? scoreIdeaTopic(ideaText) : null;
 
   return (
     <div className="flex gap-6">
@@ -350,9 +542,9 @@ export default function IdeasPage() {
         <div className="page-header">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h1>Idea Input &amp; Backlog</h1>
+              <h1>Idea Input and Backlog</h1>
               <p className="breadcrumb">
-                Capture ideas, save them to Firebase under the signed-in user, and track live market signals.
+                Enter one-sentence topics, review AI relevance scores, and open Angles by selecting any idea.
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-sm" style={{ color: '#a7c9be' }}>
@@ -365,6 +557,7 @@ export default function IdeasPage() {
             </div>
           </div>
         </div>
+        <WorkflowStepper />
 
         <section className="surface-card p-5">
           <div className="mb-4 flex items-center justify-between gap-3">
@@ -381,8 +574,8 @@ export default function IdeasPage() {
           <form className="space-y-3" onSubmit={handleSubmit}>
             <textarea
               className="w-full rounded-xl border border-slate-300 p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-              rows={4}
-              placeholder="Enter a new content idea..."
+              rows={3}
+              placeholder="Write one sentence topic description..."
               value={ideaText}
               onChange={(event) => {
                 setIdeaText(event.target.value);
@@ -395,6 +588,11 @@ export default function IdeasPage() {
               }}
               disabled={isSubmitting}
             />
+            {draftRating ? (
+              <p className="text-xs text-slate-600">
+                Relevance rating preview: <span className="font-semibold text-slate-800">{draftRating.score}/100</span> ({draftRating.label})
+              </p>
+            ) : null}
             <div className="flex flex-wrap items-center gap-3">
               <select
                 className="rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
@@ -420,18 +618,6 @@ export default function IdeasPage() {
                   </option>
                 ))}
               </select>
-              <select
-                className="rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                value={format}
-                onChange={(event) => setFormat(event.target.value)}
-                disabled={isSubmitting}
-              >
-                {FORMAT_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
               <button
                 type="submit"
                 className="ml-auto rounded-xl px-5 py-2 text-sm font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
@@ -451,33 +637,18 @@ export default function IdeasPage() {
               <select
                 className="pill bg-white"
                 value={sortBy}
-                onChange={(event) => setSortBy(event.target.value as 'newest' | 'oldest' | 'topic')}
+                onChange={(event) => updateSortPreference(event.target.value as IdeaSort)}
               >
                 <option value="newest">Sort: Newest</option>
                 <option value="oldest">Sort: Oldest</option>
                 <option value="topic">Sort: Topic A-Z</option>
+                <option value="rating">Sort: Rating High-Low</option>
               </select>
-              <select
-                className="pill bg-white"
-                value={toneFilter}
-                onChange={(event) => setToneFilter(event.target.value)}
-              >
+              <select className="pill bg-white" value={toneFilter} onChange={(event) => setToneFilter(event.target.value)}>
                 <option value="All">Tone: All</option>
                 {TONE_OPTIONS.map((option) => (
                   <option key={option} value={option}>
                     Tone: {option}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="pill bg-white"
-                value={formatFilter}
-                onChange={(event) => setFormatFilter(event.target.value)}
-              >
-                <option value="All">Format: All</option>
-                {FORMAT_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    Format: {option}
                   </option>
                 ))}
               </select>
@@ -507,31 +678,53 @@ export default function IdeasPage() {
                 <thead>
                   <tr className="text-xs font-bold uppercase tracking-wide text-slate-400">
                     <th className="pb-3 pr-4">Topic</th>
+                    <th className="pb-3 pr-4">Rating</th>
                     <th className="pb-3 pr-4">Tone</th>
                     <th className="pb-3 pr-4">Audience</th>
-                    <th className="pb-3 pr-4">Format</th>
                     <th className="pb-3 pr-4">Created</th>
                     <th className="pb-3">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {visibleIdeas.map((idea) => {
-                    const isSelected = idea.id === selectedIdeaId;
+                    const rating = idea.relevance;
 
                     return (
-                      <tr key={idea.id} className={isSelected ? 'bg-emerald-50/60' : ''}>
+                      <tr key={idea.id}>
                         <td className="py-3 pr-4 font-semibold text-slate-800">{idea.topic}</td>
+                        <td className="py-3 pr-4">
+                          {rating ? (
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-slate-800">{rating.score}</span>
+                              <span
+                                className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                                  rating.label === 'Strong'
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : rating.label === 'Moderate'
+                                      ? 'bg-amber-100 text-amber-700'
+                                      : 'bg-rose-100 text-rose-700'
+                                }`}
+                                title={rating.reason}
+                              >
+                                {rating.label}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600" title="No saved relevance metadata.">
+                              Unscored
+                            </span>
+                          )}
+                        </td>
                         <td className="py-3 pr-4 text-slate-600">{idea.tone}</td>
                         <td className="py-3 pr-4 text-slate-600">{idea.audience}</td>
-                        <td className="py-3 pr-4 text-slate-600">{idea.format}</td>
                         <td className="py-3 pr-4 text-slate-500">{idea.createdAtLabel}</td>
                         <td className="py-3">
                           <button
                             type="button"
                             className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                            onClick={() => setSelectedIdeaId(idea.id)}
+                            onClick={() => { void openAnglesForIdea(idea); }}
                           >
-                            {isSelected ? 'Selected' : 'Select'}
+                            Open Angles
                           </button>
                         </td>
                       </tr>
@@ -542,65 +735,6 @@ export default function IdeasPage() {
             </div>
           ) : null}
         </section>
-
-        {selectedIdea ? (
-          <div className="grid gap-5 lg:grid-cols-[1.2fr_1fr]">
-            <section className="surface-card p-5">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <h2 className="section-title">Selected Idea</h2>
-                <button
-                  type="button"
-                  className="rounded-xl px-4 py-2 text-sm font-bold text-white transition hover:opacity-90"
-                  style={{ background: '#1a7a5e' }}
-                  onClick={() => {
-                    try {
-                      localStorage.setItem(
-                        'angles_idea_context',
-                        JSON.stringify({
-                          ideaId: selectedIdea.id,
-                          topic: selectedIdea.topic,
-                          tone: selectedIdea.tone,
-                          audience: selectedIdea.audience,
-                          format: selectedIdea.format,
-                          createdAtMs: selectedIdea.createdAtMs,
-                        }),
-                      );
-                    } catch {
-                      // localStorage unavailable — Firestore fallback will be used
-                    }
-                    router.push(`/angles?ideaId=${encodeURIComponent(selectedIdea.id)}`);
-                  }}
-                >
-                  Generate Angles
-                </button>
-              </div>
-              <p className="text-lg font-semibold text-slate-900">{selectedIdea.topic}</p>
-              <div className="mt-4 flex flex-wrap gap-2 text-sm text-slate-600">
-                <span className="pill">Tone: {selectedIdea.tone}</span>
-                <span className="pill">Audience: {selectedIdea.audience}</span>
-                <span className="pill">Format: {selectedIdea.format}</span>
-              </div>
-              <p className="mt-4 text-sm text-slate-500">Created {selectedIdea.createdAtLabel}</p>
-            </section>
-
-            <section className="surface-card p-5">
-              <h2 className="section-title mb-3">Live Trend Snapshot</h2>
-              {isTrendsLoading ? <p className="text-sm text-slate-500">Loading live trend topics...</p> : null}
-              {trendsError ? <p className="text-sm text-red-700">{trendsError}</p> : null}
-              {!isTrendsLoading && !trendsError && trends?.topics.length === 0 ? (
-                <p className="text-sm text-slate-500">No live topics were returned.</p>
-              ) : null}
-              <ul className="space-y-2 text-sm text-slate-700">
-                {trends?.topics.slice(0, 4).map((topic) => (
-                  <li key={topic.label} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                    {topic.label}
-                    <span className="ml-2 text-xs text-slate-500">{topic.count} related articles</span>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          </div>
-        ) : null}
       </div>
 
       <TrendsPanel

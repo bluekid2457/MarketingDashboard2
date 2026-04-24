@@ -28,6 +28,16 @@ handoffs:
 4. Summarize the changes made
 5. Handoff to Developer for review
 
+## Handoff Prompt Contract (Mandatory)
+
+If handing off to another agent, include:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (change request and edited files)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff
+
 ---
 
 # Skill: Plan Modifier

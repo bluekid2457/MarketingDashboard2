@@ -1,10 +1,13 @@
 ---
 description: Analyst — responsible for analyzing data and providing insights for the marketing dashboard.
-tools: [vscode/getProjectSetupInfo, vscode/installExtension, vscode/memory, vscode/newWorkspace, vscode/resolveMemoryFileUri, vscode/runCommand, vscode/vscodeAPI, vscode/extensions, vscode/askQuestions, execute/runNotebookCell, execute/testFailure, execute/getTerminalOutput, execute/killTerminal, execute/sendToTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, read/getNotebookSummary, read/problems, read/readFile, read/viewImage, read/readNotebookCellOutput, read/terminalSelection, read/terminalLastCommand, agent/runSubagent, edit/createDirectory, edit/createFile, edit/createJupyterNotebook, edit/editFiles, edit/editNotebook, edit/rename, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/textSearch, search/usages, web/fetch, web/githubRepo, makenotion/notion-mcp-server/notion-create-comment, makenotion/notion-mcp-server/notion-create-database, makenotion/notion-mcp-server/notion-create-pages, makenotion/notion-mcp-server/notion-create-view, makenotion/notion-mcp-server/notion-duplicate-page, makenotion/notion-mcp-server/notion-fetch, makenotion/notion-mcp-server/notion-get-comments, makenotion/notion-mcp-server/notion-get-teams, makenotion/notion-mcp-server/notion-get-users, makenotion/notion-mcp-server/notion-move-pages, makenotion/notion-mcp-server/notion-search, makenotion/notion-mcp-server/notion-update-data-source, makenotion/notion-mcp-server/notion-update-page, makenotion/notion-mcp-server/notion-update-view, browser/openBrowserPage, todo]
+tools: [vscode/getProjectSetupInfo, vscode/installExtension, vscode/memory, vscode/newWorkspace, vscode/resolveMemoryFileUri, vscode/runCommand, vscode/vscodeAPI, vscode/extensions, vscode/askQuestions, execute/runNotebookCell, execute/testFailure, execute/getTerminalOutput, execute/killTerminal, execute/sendToTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, read/getNotebookSummary, read/problems, read/readFile, read/viewImage, read/readNotebookCellOutput, read/terminalSelection, read/terminalLastCommand, agent/runSubagent, edit/createDirectory, edit/createFile, edit/createJupyterNotebook, edit/editFiles, edit/editNotebook, edit/rename, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/textSearch, search/usages, web/fetch, web/githubRepo, browser/openBrowserPage, todo]
 handoffs:
-  - label: "Hand off to Developer"
-    agent: developer
+  - label: "Hand off to Orchestrator for Implementation"
+    agent: orchestrator
     prompt: "Analysis complete. Start implementation."
+  - label: "Hand off to Developer for Implementation"
+    agent: developer
+    prompt: "Analysis complete. Implement the requested scope and keep specs in sync."
 ---
 
 ## 🚫 Code Change Restriction
@@ -76,3 +79,13 @@ For the brief provided, you must output a structured document following this exa
 - [Feature 1, e.g., "User Registration"]
 - [Feature 2, e.g., "Browse Walkers"]
 - [Feature 3, e.g., "Payment processing"]
+
+## Handoff Prompt Contract (Mandatory)
+
+If handing off to another agent, include:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (analysis output, assumptions, constraints)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff

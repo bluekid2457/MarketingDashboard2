@@ -27,48 +27,22 @@ type AnglesRequestBody = {
   count?: number;
   selectedAngleId?: string;
   refinementPrompt?: string;
+  generationSeed?: string;
 };
 
 const MAX_ANGLES = 8;
-const DEFAULT_ANGLES = 4;
+const DEFAULT_ANGLES = 3;
+const PROVIDER_TIMEOUT_MS = 300_000; // 5 minutes
+const PROVIDER_MAX_ATTEMPTS = 2;
 
-function makeFallbackSections(topic: string, audience: string, format: string): string[] {
-  return [
-    `Define the core ${topic || 'topic'} problem for ${audience || 'the audience'}`,
-    `Outline a ${format || 'content'} framework with concrete steps`,
-    'Add one tactical example with measurable outcomes',
-    'Close with a practical CTA and next-step checklist',
-  ];
-}
+type AngleSource = 'provider' | 'fallback';
 
-function buildFallbackAngles(
-  idea: string | IdeaInput,
-  count: number,
-  isRefinement: boolean,
-  selectedAngleId: string,
-): Angle[] {
-  const topic = typeof idea === 'string' ? idea.trim() : asString(idea.topic);
-  const tone = typeof idea === 'string' ? '' : asString(idea.tone);
-  const audience = typeof idea === 'string' ? '' : asString(idea.audience);
-  const format = typeof idea === 'string' ? '' : asString(idea.format);
-  const sections = makeFallbackSections(topic, audience, format);
-
-  if (isRefinement) {
-    return [{
-      id: selectedAngleId || crypto.randomUUID(),
-      title: `${topic || 'Content'}: Refined Tactical Angle`,
-      summary: `A refined ${tone || 'clear'} approach focused on ${audience || 'the target audience'} with executable guidance.`,
-      sections,
-    }];
-  }
-
-  return Array.from({ length: count }, (_, index) => ({
-    id: crypto.randomUUID(),
-    title: `${topic || 'Content'} Angle ${index + 1}`,
-    summary: `A ${tone || 'practical'} strategy for ${audience || 'your audience'} optimized for ${format || 'your channel'}.`,
-    sections,
-  }));
-}
+type IdeaContext = {
+  topic: string;
+  tone: string;
+  audience: string;
+  format: string;
+};
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -129,6 +103,18 @@ function normalizeSections(rawSections: unknown): string[] {
     .filter(Boolean);
 }
 
+function areAnglesDistinct(angles: Angle[]): boolean {
+  const seen = new Set<string>();
+  for (const angle of angles) {
+    const dedupeKey = `${angle.title.trim().toLowerCase()}|${angle.summary.trim().toLowerCase()}`;
+    if (seen.has(dedupeKey)) {
+      return false;
+    }
+    seen.add(dedupeKey);
+  }
+  return true;
+}
+
 function validateAndNormalizeAngles(raw: unknown): Angle[] {
   const source = Array.isArray(raw)
     ? raw
@@ -176,6 +162,10 @@ function validateAndNormalizeAngles(raw: unknown): Angle[] {
     throw new Error('AI output could not be validated into structured angles.');
   }
 
+  if (!areAnglesDistinct(normalized)) {
+    throw new Error('AI output included duplicate angles.');
+  }
+
   return normalized;
 }
 
@@ -219,17 +209,133 @@ function ideaToPromptBlock(idea: string | IdeaInput): string {
   return parts.join('\n');
 }
 
-function buildGenerationPrompt(idea: string | IdeaInput, count: number): string {
+function normalizeIdeaContext(idea: string | IdeaInput): IdeaContext {
+  if (typeof idea === 'string') {
+    return {
+      topic: asString(idea) || 'your topic',
+      tone: 'clear and practical',
+      audience: 'your audience',
+      format: 'article',
+    };
+  }
+
+  return {
+    topic: asString(idea.topic) || 'your topic',
+    tone: asString(idea.tone) || 'clear and practical',
+    audience: asString(idea.audience) || 'your audience',
+    format: asString(idea.format) || 'article',
+  };
+}
+
+function hashString(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash >>> 0);
+}
+
+function buildDeterministicFallbackAngles(idea: string | IdeaInput, generationSeed?: string): Angle[] {
+  const context = normalizeIdeaContext(idea);
+  const seedBasis = generationSeed
+    || `${context.topic}|${context.tone}|${context.audience}|${context.format}`;
+  const seedHash = hashString(seedBasis);
+
+  const painPointLens = ['workflow bottlenecks', 'execution blind spots', 'delivery friction', 'performance stalls'];
+  const frameworkLens = ['operating blueprint', 'decision framework', 'execution playbook', 'repeatable system'];
+  const caseStudyLens = ['before/after transformation', 'turnaround scenario', 'measured pilot', 'field test'];
+
+  const urgencyQualifiers = ['immediate', 'high-impact', 'practical', 'low-lift'];
+  const narrativeStyles = ['stepwise', 'diagnostic', 'results-first', 'hands-on'];
+
+  const painLens = painPointLens[seedHash % painPointLens.length];
+  const frameworkName = frameworkLens[(seedHash + 1) % frameworkLens.length];
+  const caseLens = caseStudyLens[(seedHash + 2) % caseStudyLens.length];
+  const urgency = urgencyQualifiers[(seedHash + 3) % urgencyQualifiers.length];
+  const narrativeStyle = narrativeStyles[(seedHash + 4) % narrativeStyles.length];
+
+  return [
+    {
+      id: 'fallback-1',
+      title: `${context.audience} ${painLens} around ${context.topic}`,
+      summary: `Map the most ${urgency} blockers ${context.audience} face with ${context.topic} in a ${narrativeStyle} ${context.tone} ${context.format}.`,
+      sections: [
+        `Current state: how ${context.audience} currently approach ${context.topic}`,
+        `Top friction points causing weak outcomes`,
+        `Root-cause analysis with practical examples`,
+        'Action checklist for immediate wins',
+      ],
+    },
+    {
+      id: 'fallback-2',
+      title: `${context.topic} ${frameworkName} for ${context.audience}`,
+      summary: `Lay out a ${urgency} ${frameworkName} for ${context.topic}, tailored to ${context.audience} in a ${context.tone} voice.`,
+      sections: [
+        'Framework overview and success criteria',
+        `Step-by-step execution model in ${context.format} format`,
+        'Common implementation mistakes and fixes',
+        'Metrics to track progress over time',
+      ],
+    },
+    {
+      id: 'fallback-3',
+      title: `${context.topic} ${caseLens} for ${context.audience}`,
+      summary: `Walk through a ${narrativeStyle} ${caseLens} showing how ${context.audience} can improve outcomes with ${context.topic}.`,
+      sections: [
+        'Baseline scenario and constraints',
+        'Intervention strategy and decision points',
+        'Measured outcomes and lessons learned',
+        `Next-step roadmap for sustained improvement in a ${context.tone} tone`,
+      ],
+    },
+  ];
+}
+
+function buildSingleAnglePrompt(
+  idea: string | IdeaInput,
+  angleIndex: number,
+  totalCount: number,
+  generationSeed?: string,
+  previousAngles?: Angle[],
+): string {
+  const perspectiveHints = [
+    'Focus on the core problem or pain point this idea addresses for the target audience.',
+    'Focus on a practical framework, actionable strategy, or step-by-step execution approach.',
+    'Focus on a real-world scenario, transformation story, or case-study narrative.',
+    'Focus on a data-driven, research-backed, or evidence-led approach.',
+    'Focus on contrarian thinking, surprising insights, or an unconventional perspective.',
+    'Focus on beginner-friendly fundamentals or an educational deep-dive.',
+    'Focus on advanced tactics or expert-level nuance for seasoned practitioners.',
+    'Focus on future trends, emerging opportunities, or forward-looking strategy.',
+  ];
+
+  const perspective = perspectiveHints[angleIndex % perspectiveHints.length];
+
+  const avoidLines =
+    previousAngles && previousAngles.length > 0
+      ? [
+          '',
+          'Already generated — make this angle clearly distinct from these:',
+          ...previousAngles.map((a) => `- "${a.title}": ${a.summary}`),
+        ]
+      : [];
+
   return [
     'You are an expert content strategist for a marketing team.',
-    `Generate exactly ${count} distinct content angles for the idea below.`,
+    `Generate exactly 1 content angle for the idea below (angle ${angleIndex + 1} of ${totalCount}).`,
+    `Perspective directive: ${perspective}`,
     'Respond with JSON only. No prose, no markdown, no code fences.',
     'Expected schema: [{"id":"string","title":"string","summary":"string","sections":["string", "string"]}]',
-    'Each angle must contain 4 to 6 sections and each section should be concise and actionable.',
+    'The angle must contain 4 to 6 sections and each section should be concise and actionable.',
+    generationSeed ? `Generation seed: ${generationSeed}-${angleIndex}` : '',
+    ...avoidLines,
     '',
     'Idea context:',
     ideaToPromptBlock(idea),
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function buildRefinementPrompt(
@@ -255,7 +361,7 @@ async function callProvider(
   provider: AIProvider,
   apiKey: string,
   prompt: string,
-  options?: { ollamaBaseUrl?: string; ollamaModel?: string },
+  options?: { ollamaBaseUrl?: string; ollamaModel?: string; signal?: AbortSignal },
 ): Promise<string> {
   const messages: AIMessage[] = [
     { role: 'system', content: 'Return only valid JSON that follows the user schema.' },
@@ -266,6 +372,7 @@ async function callProvider(
     apiKey,
     ollamaBaseUrl: options?.ollamaBaseUrl,
     ollamaModel: options?.ollamaModel,
+    signal: options?.signal,
     messages,
     temperature: 0.4,
     tag: '[API Angles]',
@@ -289,6 +396,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const idea = body.idea;
   const selectedAngleId = asString(body.selectedAngleId);
   const refinementPrompt = asString(body.refinementPrompt);
+  const generationSeed = asString(body.generationSeed);
   const rawCount = typeof body.count === 'number' ? body.count : DEFAULT_ANGLES;
   const count = Math.max(1, Math.min(MAX_ANGLES, Math.floor(rawCount)));
 
@@ -297,97 +405,236 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     hasApiKey: !!apiKey,
     ideaType: typeof idea,
     isRefinement: !!refinementPrompt,
+    hasGenerationSeed: !!generationSeed,
     requestedCount: rawCount,
     normalizedCount: count,
   });
-
-  if (!provider || !['openai', 'gemini', 'claude', 'ollama'].includes(provider)) {
-    console.error('[API Angles] Invalid provider:', provider);
-    return NextResponse.json({ error: 'A valid provider is required.' }, { status: 400 });
-  }
-
-  if (provider !== 'ollama' && !apiKey) {
-    console.error('[API Angles] API key required for provider:', provider);
-    return NextResponse.json({ error: 'API key is required.' }, { status: 400 });
-  }
-
-  if (provider === 'ollama' && !ollamaModel) {
-    console.error('[API Angles] Ollama model is required');
-    return NextResponse.json({ error: 'Ollama model is required.' }, { status: 400 });
-  }
 
   if (!idea || (typeof idea === 'string' && !idea.trim())) {
     console.error('[API Angles] Idea content is required');
     return NextResponse.json({ error: 'Idea content is required.' }, { status: 400 });
   }
 
+  const validProviders: AIProvider[] = ['openai', 'gemini', 'claude', 'ollama'];
+  const providerValid = provider !== undefined && validProviders.includes(provider);
+  const configIncomplete =
+    !providerValid ||
+    (provider !== 'ollama' && !apiKey) ||
+    (provider === 'ollama' && !ollamaModel);
+
+  if (configIncomplete) {
+    const fallbackReason = !providerValid
+      ? `Invalid or missing provider: '${String(provider)}'.`
+      : provider !== 'ollama' && !apiKey
+        ? `No API key configured for provider '${String(provider)}'.`
+        : `No Ollama model configured for provider 'ollama'.`;
+
+    console.warn('[API Angles] Provider config incomplete, returning deterministic fallback', {
+      provider,
+      fallbackReason,
+    });
+
+    const fallbackAngles = buildDeterministicFallbackAngles(idea, generationSeed);
+    return NextResponse.json({
+      angles: fallbackAngles.slice(0, count),
+      provider: String(provider ?? 'unknown'),
+      source: 'fallback' satisfies AngleSource,
+      fallbackReason,
+    });
+  }
+
+  // Structural narrowing guard: configIncomplete already returned above if provider was absent.
+  if (!provider) {
+    return NextResponse.json({ error: 'Unexpected: provider required.' }, { status: 500 });
+  }
+
   try {
     const isRefinement = Boolean(refinementPrompt);
-    const prompt = isRefinement
-      ? buildRefinementPrompt(idea, selectedAngleId || 'selected-angle', refinementPrompt)
-      : buildGenerationPrompt(idea, count);
 
-    console.debug('[API Angles] Built prompt', {
-      isRefinement,
-      promptLength: prompt.length,
-    });
-    console.log(`[API Angles] Final prompt prepared for ${provider}:\n${prompt}`);
+    // ── Refinement path (single prompt, unchanged) ────────────────────────────
+    if (isRefinement) {
+      const prompt = buildRefinementPrompt(idea, selectedAngleId || 'selected-angle', refinementPrompt);
+      console.debug('[API Angles] Built refinement prompt', { promptLength: prompt.length });
+      console.log(`[API Angles] Final refinement prompt for ${provider}:\n${prompt}`);
 
-    const modelText = await callProvider(provider, apiKey, prompt, {
-      ollamaBaseUrl,
-      ollamaModel,
-    });
+      let lastError = 'Unknown provider error.';
 
-    console.log(`[API Angles] Raw model response from ${provider}:\n${modelText}`);
+      for (let attempt = 1; attempt <= PROVIDER_MAX_ATTEMPTS; attempt += 1) {
+        const providerAbortController = new AbortController();
+        const providerTimeoutId = setTimeout(() => providerAbortController.abort(), PROVIDER_TIMEOUT_MS);
+        const requestAbortHandler = (): void => { providerAbortController.abort(); };
+        request.signal.addEventListener('abort', requestAbortHandler, { once: true });
 
-    const parsedAngles = parseAnglesFromModelText(modelText);
+        try {
+          const modelText = await callProvider(provider, apiKey, prompt, {
+            ollamaBaseUrl,
+            ollamaModel,
+            signal: providerAbortController.signal,
+          });
 
-    console.debug('[API Angles] Parsed angles', {
-      count: parsedAngles.length,
-      angles: parsedAngles.map((a) => ({ id: a.id, title: a.title })),
-    });
+          console.log(`[API Angles] Raw refinement response from ${provider} (attempt ${attempt}):\n${modelText}`);
 
-    const normalizedAngles = isRefinement
-      ? parsedAngles.slice(0, 1).map((angle) => ({
-          ...angle,
-          id: selectedAngleId || angle.id,
-        }))
-      : parsedAngles.slice(0, count).map((angle) => ({
-          ...angle,
-          id: angle.id || crypto.randomUUID(),
-        }));
+          const parsedAngles = parseAnglesFromModelText(modelText);
+          const normalizedAngles = parsedAngles.slice(0, 1).map((angle) => ({
+            ...angle,
+            id: selectedAngleId || angle.id,
+          }));
 
-    console.debug('[API Angles] Returning response', {
+          console.debug('[API Angles] Returning refinement response', {
+            provider,
+            source: 'provider' satisfies AngleSource,
+            attempt,
+          });
+
+          return NextResponse.json({
+            angles: normalizedAngles,
+            provider,
+            promptUsed: prompt,
+            modelText,
+            source: 'provider' satisfies AngleSource,
+          });
+        } catch (error) {
+          if (providerAbortController.signal.aborted) {
+            lastError = request.signal.aborted
+              ? 'Client canceled the request before generation completed.'
+              : `Provider call timed out after ${Math.floor(PROVIDER_TIMEOUT_MS / 1000)} seconds.`;
+          } else {
+            lastError = error instanceof Error ? error.message : 'Unable to refine angle.';
+          }
+
+          console.warn('[API Angles] Refinement attempt failed', {
+            provider,
+            attempt,
+            maxAttempts: PROVIDER_MAX_ATTEMPTS,
+            error: lastError,
+          });
+
+          if (request.signal.aborted) {
+            throw new Error(lastError);
+          }
+        } finally {
+          clearTimeout(providerTimeoutId);
+          request.signal.removeEventListener('abort', requestAbortHandler);
+        }
+      }
+
+      throw new Error(lastError);
+    }
+
+    // ── Sequential generation path (one angle at a time) ─────────────────────
+    const collectedAngles: Angle[] = [];
+    let anyFromProvider = false;
+    const fallbackPool = buildDeterministicFallbackAngles(idea, generationSeed);
+
+    for (let angleIndex = 0; angleIndex < count; angleIndex += 1) {
+      const singlePrompt = buildSingleAnglePrompt(idea, angleIndex, count, generationSeed, collectedAngles);
+      console.debug('[API Angles] Generating angle', { slot: angleIndex + 1, total: count });
+      console.log(`[API Angles] Single-angle prompt for slot ${angleIndex + 1} of ${count}:\n${singlePrompt}`);
+
+      let angleForSlot: Angle | null = null;
+      let slotLastError = 'Unknown provider error.';
+
+      for (let attempt = 1; attempt <= PROVIDER_MAX_ATTEMPTS; attempt += 1) {
+        const providerAbortController = new AbortController();
+        const providerTimeoutId = setTimeout(() => providerAbortController.abort(), PROVIDER_TIMEOUT_MS);
+        const requestAbortHandler = (): void => { providerAbortController.abort(); };
+        request.signal.addEventListener('abort', requestAbortHandler, { once: true });
+
+        try {
+          const modelText = await callProvider(provider, apiKey, singlePrompt, {
+            ollamaBaseUrl,
+            ollamaModel,
+            signal: providerAbortController.signal,
+          });
+
+          console.log(`[API Angles] Raw model response for slot ${angleIndex + 1} (attempt ${attempt}):\n${modelText}`);
+
+          const parsed = parseAnglesFromModelText(modelText);
+          if (parsed.length === 0) {
+            throw new Error('AI returned no usable angle.');
+          }
+
+          angleForSlot = { ...parsed[0], id: parsed[0].id || crypto.randomUUID() };
+          anyFromProvider = true;
+
+          console.debug('[API Angles] Angle slot filled', {
+            slot: angleIndex + 1,
+            attempt,
+            title: angleForSlot.title,
+          });
+
+          break;
+        } catch (error) {
+          if (providerAbortController.signal.aborted) {
+            slotLastError = request.signal.aborted
+              ? 'Client canceled the request before generation completed.'
+              : `Provider call timed out after ${Math.floor(PROVIDER_TIMEOUT_MS / 1000)} seconds.`;
+          } else {
+            slotLastError = error instanceof Error ? error.message : 'Unable to generate angle.';
+          }
+
+          console.warn('[API Angles] Angle slot attempt failed', {
+            provider,
+            slot: angleIndex + 1,
+            attempt,
+            maxAttempts: PROVIDER_MAX_ATTEMPTS,
+            error: slotLastError,
+          });
+
+          if (request.signal.aborted) {
+            throw new Error(slotLastError);
+          }
+        } finally {
+          clearTimeout(providerTimeoutId);
+          request.signal.removeEventListener('abort', requestAbortHandler);
+        }
+      }
+
+      if (!angleForSlot) {
+        angleForSlot = {
+          ...fallbackPool[angleIndex % fallbackPool.length],
+          id: `fallback-${angleIndex + 1}`,
+        };
+        console.warn('[API Angles] Using fallback for angle slot', {
+          slot: angleIndex + 1,
+          reason: slotLastError,
+        });
+      }
+
+      collectedAngles.push(angleForSlot);
+    }
+
+    const source: AngleSource = anyFromProvider ? 'provider' : 'fallback';
+
+    console.debug('[API Angles] Returning sequential generation response', {
       provider,
-      angleCount: normalizedAngles.length,
+      source,
+      angleCount: collectedAngles.length,
     });
 
     return NextResponse.json({
-      angles: normalizedAngles,
+      angles: collectedAngles,
       provider,
-      promptUsed: prompt,
-      modelText,
+      promptUsed: `[sequential:${count}] angles generated one at a time`,
+      modelText: null,
+      source,
+      ...(source === 'fallback'
+        ? { fallbackReason: 'All provider attempts failed for all angle slots.' }
+        : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to generate angles.';
     console.error('[API Angles] Error generating angles:', { provider, error: message });
 
-    const isRefinement = Boolean(refinementPrompt);
-    const fallbackAngles = buildFallbackAngles(idea, isRefinement ? 1 : count, isRefinement, selectedAngleId);
-
-    console.warn('[API Angles] Returning fallback angles to avoid hard failure', {
-      provider,
-      isRefinement,
-      count: fallbackAngles.length,
-    });
-
-    return NextResponse.json({
-      angles: fallbackAngles,
-      provider,
-      error: `AI provider failed, fallback angles were returned. Root cause: ${message}`,
-      promptUsed: null,
-      modelText: null,
-      fallback: true,
-    });
+    return NextResponse.json(
+      {
+        angles: [],
+        provider,
+        error: `AI angle generation failed. Root cause: ${message}`,
+        promptUsed: null,
+        modelText: null,
+      },
+      { status: 502 },
+    );
   }
 }

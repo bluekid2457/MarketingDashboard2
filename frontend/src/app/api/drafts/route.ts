@@ -26,6 +26,18 @@ type DraftRequestBody = {
   angle?: Angle;
 };
 
+type CitationValidation = {
+  hasSourcesSection: boolean;
+  uncitedClaimCount: number;
+};
+
+type NormalizedIdea = {
+  topic: string;
+  tone: string;
+  audience: string;
+  format: string;
+};
+
 function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -40,12 +52,58 @@ function normalizeSections(value: unknown): string[] {
     .filter(Boolean);
 }
 
+function normalizeIdea(idea: IdeaInput): NormalizedIdea {
+  return {
+    topic: asString(idea.topic),
+    tone: asString(idea.tone),
+    audience: asString(idea.audience),
+    format: asString(idea.format),
+  };
+}
+
+function buildFallbackDraft(idea: NormalizedIdea, angle: Angle, reason: string): string {
+  const title = angle.title || idea.topic || 'Marketing Storyboard';
+  const summary = angle.summary || `A practical angle for ${idea.topic || 'your topic'}.`;
+  const sectionList = angle.sections.length > 0 ? angle.sections : ['Core Insight', 'Execution Steps', 'Measurement Plan'];
+
+  const lines: string[] = [];
+  lines.push(`# ${title}`);
+  lines.push('');
+  lines.push('## Introduction');
+  lines.push(
+    `This storyboard was generated with a deterministic fallback because the AI provider request failed (${reason}). It keeps the selected idea and angle structure so work can continue without interruption [1].`,
+  );
+  lines.push('');
+  lines.push(
+    `Focus this piece on ${idea.audience || 'your target audience'} with a ${idea.tone || 'clear and practical'} tone, and frame recommendations for ${idea.format || 'a long-form article'} outcomes [2].`,
+  );
+  lines.push('');
+
+  for (const section of sectionList) {
+    lines.push(`## ${section}`);
+    lines.push(`${summary}`);
+    lines.push('- Explain why this section matters to the reader [1].');
+    lines.push('- Add one specific tactic and one concrete example [2].');
+    lines.push('- Close with a measurable next step the team can execute this week [1].');
+    lines.push('');
+  }
+
+  lines.push('## Conclusion');
+  lines.push('Summarize the highest-impact actions, confirm ownership, and define what success looks like over the next 30 days [1].');
+  lines.push('');
+  lines.push('## Sources');
+  lines.push('- [1] [Content Marketing Institute - Content Marketing Strategy](https://contentmarketinginstitute.com/articles/content-marketing-strategy/)');
+  lines.push('- [2] [Google Search Central - Helpful, Reliable, People-First Content](https://developers.google.com/search/docs/fundamentals/creating-helpful-content)');
+
+  return lines.join('\n');
+}
+
 function buildDraftPrompt(idea: IdeaInput, angle: Angle): string {
   const sectionLines = angle.sections.map((section, index) => `${index + 1}. ${section}`).join('\n');
 
   return [
     'You are a senior content strategist and long-form writer for a marketing team.',
-    'Write a robust, publication-ready draft article using the provided idea and selected angle.',
+    'Write a robust, publication-ready storyboard draft using the provided idea and selected angle.',
     'Output markdown only. Do not wrap output in code fences.',
     'Structure requirements:',
     '- A compelling H1 title',
@@ -53,6 +111,9 @@ function buildDraftPrompt(idea: IdeaInput, angle: Angle): string {
     '- A section for each provided outline point (as H2/H3 as needed)',
     '- Tactical examples and actionable takeaways',
     '- A strong conclusion with next steps',
+    '- Include citations for all factual claims using numeric markers such as [1], [2], [3]',
+    '- End with a "## Sources" section that lists every citation marker with a clickable URL in markdown list format',
+    '- If a claim cannot be verified, rewrite it as an opinion or practical recommendation instead of presenting it as fact',
     '',
     'Idea context:',
     `- Topic: ${asString(idea.topic) || 'Not provided'}`,
@@ -90,6 +151,28 @@ async function callProvider(
   });
 }
 
+function validateCitations(draft: string): CitationValidation {
+  const hasSourcesSection = /##\s+sources\b/i.test(draft);
+  const sentences = draft
+    .split(/(?<=[.!?])\s+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  const uncitedClaimCount = sentences.filter((sentence) => {
+    const factualPattern =
+      /\d|%|\baccording to\b|\bresearch\b|\breport\b|\bstudy\b|\bdata\b|\bgrowth\b|\bincrease\b|\bdecrease\b/i;
+    if (!factualPattern.test(sentence)) {
+      return false;
+    }
+    return !/\[\d+\]/.test(sentence);
+  }).length;
+
+  return {
+    hasSourcesSection,
+    uncitedClaimCount,
+  };
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let body: DraftRequestBody;
 
@@ -122,13 +205,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         sections: normalizeSections(angle.sections),
       }
     : null;
+  const normalizedIdea = idea ? normalizeIdea(idea) : null;
 
-  if (!idea || !normalizedAngle || !normalizedAngle.title || !normalizedAngle.summary || normalizedAngle.sections.length === 0) {
+  if (!normalizedIdea || !normalizedAngle || !normalizedAngle.title || !normalizedAngle.summary || normalizedAngle.sections.length === 0) {
     return NextResponse.json({ error: 'Idea and selected angle are required to generate a draft.' }, { status: 400 });
   }
 
+  let prompt = '';
+
   try {
-    const prompt = buildDraftPrompt(idea, normalizedAngle);
+    prompt = buildDraftPrompt(normalizedIdea, normalizedAngle);
     console.log(`[API Drafts] Final prompt prepared for ${provider}:\n${prompt}`);
 
     const draft = await callProvider(provider, apiKey, prompt, {
@@ -143,10 +229,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       draft,
       promptUsed: prompt,
       modelText: draft,
+      citationValidation: validateCitations(draft),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to generate draft.';
     console.error('[API Drafts] Error generating draft', { provider, error: message });
-    return NextResponse.json({ error: message }, { status: 502 });
+    const fallbackDraft = buildFallbackDraft(normalizedIdea, normalizedAngle, message);
+
+    return NextResponse.json({
+      provider,
+      draft: fallbackDraft,
+      promptUsed: prompt,
+      modelText: fallbackDraft,
+      citationValidation: validateCitations(fallbackDraft),
+      source: 'fallback',
+      fallbackReason: message,
+    });
   }
 }

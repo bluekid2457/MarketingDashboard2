@@ -1,4 +1,4 @@
-export const ADAPT_PROVIDER_TIMEOUT_MS = 45_000;
+export const ADAPT_PROVIDER_TIMEOUT_MS = 300_000; // 5 minutes
 export const ADAPT_CLIENT_TIMEOUT_MS = ADAPT_PROVIDER_TIMEOUT_MS + 2_000;
 
 const ABORT_ERROR_NAMES = new Set(['AbortError', 'TimeoutError']);

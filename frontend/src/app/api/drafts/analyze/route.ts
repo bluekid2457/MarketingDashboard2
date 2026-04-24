@@ -12,6 +12,7 @@ type AnalyzeRequestBody = {
   ollamaModel?: string;
   draft?: string;
   type?: AnalyzeType;
+  platform?: string;
 };
 
 export type SeoResult = {
@@ -374,10 +375,16 @@ function buildFallbackResult(type: AnalyzeType, draft: string): SeoResult | Plag
   return buildSourcesFallback(draft);
 }
 
-function buildSeoPrompt(draft: string): string {
+function buildSeoPrompt(draft: string, platform?: string): string {
+  const normalizedPlatform = typeof platform === 'string' ? platform.trim().toLowerCase() : '';
+  const platformContext = normalizedPlatform
+    ? `Prioritize SEO recommendations appropriate for this publishing channel: ${normalizedPlatform}.`
+    : 'Use general web-article SEO best practices.';
+
   return [
     'You are an expert SEO analyst and content strategist.',
     'Analyze the following article draft for SEO optimization.',
+    platformContext,
     'Return ONLY valid JSON with no extra text, code fences, or explanation, matching this exact schema:',
     '{',
     '  "primaryKeyword": string,',
@@ -496,6 +503,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeAp
   const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
   const draft = typeof body.draft === 'string' ? body.draft.trim() : '';
   const type = body.type;
+  const platform = typeof body.platform === 'string' ? body.platform.trim() : '';
   const ollamaBaseUrl =
     typeof body.ollamaBaseUrl === 'string' ? body.ollamaBaseUrl.trim() : DEFAULT_OLLAMA_BASE_URL;
   const ollamaModel =
@@ -524,7 +532,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeAp
 
   let prompt: string;
   if (type === 'seo') {
-    prompt = buildSeoPrompt(draft);
+    prompt = buildSeoPrompt(draft, platform);
   } else if (type === 'plagiarism') {
     prompt = buildPlagiarismPrompt(draft);
   } else {

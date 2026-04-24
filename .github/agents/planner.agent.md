@@ -162,6 +162,16 @@ Run `./create_issues.ps1` from the repo root to create the issues.
 7. Save all commands to `create_issues.ps1`.
 8. Do not call the Architect agent automatically.
 
+## Handoff Prompt Contract (Mandatory)
+
+If you hand off to another agent, the prompt must include all of these sections:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (issue context, labels, assumptions)
+4. Deliverables
+5. Done Criteria
+6. Next Handoff
+
 ## DO NOT
 
 - Write implementation code or pseudocode.

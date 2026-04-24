@@ -15,7 +15,7 @@ const navLinks = [
 const contentLinks = [
   { href: '/ideas', label: 'Ideas' },
   { href: '/angles', label: 'AI Angles' },
-  { href: '/drafts/new', label: 'Drafts' },
+  { href: '/storyboard', label: 'Storyboard' },
   { href: '/adapt/new', label: 'Adapt' },
   { href: '/publish', label: 'Publish' },
   { href: '/review', label: 'Review' },

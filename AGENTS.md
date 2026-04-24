@@ -23,7 +23,36 @@ Start here for overall repo context before diving into a specific agent file:
 - All non-developer agents are read/analyze/coordinate roles unless their file explicitly says otherwise.
 - Any code change must keep the relevant file in `specs/` in sync with the actual implementation.
 - The main execution chain is `planner -> architect -> developer -> tester_reviewer`, coordinated by `feature-loop` and `orchestrator` when autonomous execution is needed.
-- Notion is used for operational logging by workflow agents that explicitly mention it, but implementation authority still stays with `developer`.
+- Do not write operational logs to Notion; use GitHub Issues and in-repo documentation only.
+
+## Cross-Agent Delegation Contract
+
+Use this contract whenever one agent calls another agent. This is mandatory for all handoffs.
+
+- Any agent may invoke another agent when that target is listed in either `handoffs:` or `agents:` in the caller's `.agent.md` file.
+- Every handoff prompt must be explicit and include the required sections below.
+- Never use vague delegation prompts such as "please continue" or "handle this".
+
+Required handoff sections:
+1. Objective
+2. Scope (in-scope and out-of-scope)
+3. Inputs (issue/TIP, files, constraints, assumptions)
+4. Deliverables (exact output expected)
+5. Done Criteria (what counts as complete)
+6. Next Handoff (who receives output next)
+
+Handoff prompt template:
+
+```text
+Objective:
+Scope:
+In-Scope:
+Out-of-Scope:
+Inputs:
+Deliverables:
+Done Criteria:
+Next Handoff:
+```
 
 ## Agent Roster
 
@@ -37,7 +66,7 @@ Start here for overall repo context before diving into a specific agent file:
 | Feature Loop Manager | `.github/agents/feature-loop.agent.md` | Fire-and-forget execution of one feature or one TIP | No | Closed-loop orchestration across architect, developer, and tester until approved or blocked | none; returns final verdict |
 | Orchestrator | `.github/agents/orchestrator.agent.md` | Batch execution across open feature issues | No | Multi-issue coordination, spec TODO cleanup, and issue-level completion tracking | `feature-loop` |
 | Reviewer | `.github/agents/reviewer.agent.md` | Ad-hoc or periodic codebase audit | No | Prioritized review report and general improvement plan | `planner` |
-| Debugger | `.github/agents/debugger.agent.md` | Interactive bug diagnosis or small targeted fixes | Yes | Diagnosis, minimal fix, spec sync, and bug log entry | none required |
+| Debugger | `.github/agents/debugger.agent.md` | Interactive bug diagnosis or small targeted fixes | Yes | Diagnosis, minimal fix, and spec sync | none required |
 | Analyst | `.github/agents/analyst.agent.md` | Product/data analysis, story expansion, insight work | No | Structured analysis, story breakdowns, and planning-ready output | `developer` when implementation is requested |
 | Plan Modifyer | `.github/agents/plan_modifyer.agent.md` | High-level edits to non-spec markdown plans/docs | No | Updated markdown documentation outside `specs/` | `developer` review |
 
@@ -96,7 +125,7 @@ Multi-issue autonomous path
 | `feature-loop` | Must keep looping without asking for approval until tester approves or loop guardrails stop execution |
 | `orchestrator` | Must preserve Planner ordering, keep `specs/*.md` TODO markers accurate, and log feature outcomes |
 | `reviewer` | Must produce evidence-based findings only, grouped into a review report and general improvement plan |
-| `debugger` | Must keep fixes minimal, sync specs, and log the bug/fix to Notion |
+| `debugger` | Must keep fixes minimal and sync specs |
 | `analyst` | Produces structured analysis and story output, not implementation changes |
 | `plan_modifyer` | Limited to markdown documentation changes outside `specs/` |
 
