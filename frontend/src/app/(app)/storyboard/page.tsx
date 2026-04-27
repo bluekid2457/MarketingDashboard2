@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { collection, deleteDoc, doc, onSnapshot, orderBy, query } from 'firebase/firestore';
 
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { Spinner } from '@/components/Spinner';
@@ -31,6 +31,7 @@ export default function StoryboardIndexPage() {
   const [records, setRecords] = useState<StoryboardRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const ctx = getWorkflowContext();
 
@@ -88,6 +89,22 @@ export default function StoryboardIndexPage() {
     ? `/angles?ideaId=${encodeURIComponent(ctx.ideaId)}`
     : '/ideas';
 
+  async function deleteRecord(record: StoryboardRecord): Promise<void> {
+    if (!uid) return;
+    const label = record.ideaTopic || 'this storyboard';
+    if (!window.confirm(`Delete "${label}"? This cannot be undone.`)) return;
+    const db = getFirebaseDb();
+    if (!db) return;
+    setDeletingId(record.id);
+    try {
+      await deleteDoc(doc(db, 'users', uid, 'drafts', record.id));
+    } catch {
+      setError('Unable to delete this storyboard. Please try again.');
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-3xl space-y-6 py-4">
       <div className="flex items-center justify-between">
@@ -119,10 +136,10 @@ export default function StoryboardIndexPage() {
       ) : (
         <ul className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white shadow-sm">
           {records.map((record) => (
-            <li key={record.id}>
+            <li key={record.id} className="flex items-center justify-between gap-2 px-5 py-4 hover:bg-slate-50">
               <Link
                 href={`/storyboard/${encodeURIComponent(record.ideaId || record.id)}?angleId=${encodeURIComponent(record.angleId)}`}
-                className="flex items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-slate-50"
+                className="flex min-w-0 flex-1 items-center justify-between gap-4"
               >
                 <div className="min-w-0">
                   <p className="truncate font-semibold text-slate-800">{record.ideaTopic}</p>
@@ -135,6 +152,14 @@ export default function StoryboardIndexPage() {
                   <p className="mt-1 text-xs text-slate-400">{record.updatedAtLabel}</p>
                 </div>
               </Link>
+              <button
+                type="button"
+                className="ml-2 shrink-0 rounded-lg border border-red-200 px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-60"
+                onClick={() => { void deleteRecord(record); }}
+                disabled={deletingId === record.id}
+              >
+                {deletingId === record.id ? 'Deleting...' : 'Delete'}
+              </button>
             </li>
           ))}
         </ul>

@@ -6,6 +6,7 @@ import { User, onAuthStateChanged } from 'firebase/auth';
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -503,6 +504,7 @@ export default function IdeasPage() {
   const [editingTitleValue, setEditingTitleValue] = useState('');
   const [isSavingTitleIdeaId, setIsSavingTitleIdeaId] = useState<string | null>(null);
   const [titleEditError, setTitleEditError] = useState<string | null>(null);
+  const [deletingIdeaId, setDeletingIdeaId] = useState<string | null>(null);
   const [trends, setTrends] = useState<TrendsResponse | null>(null);
   const [trendsError, setTrendsError] = useState<string | null>(null);
   const [isTrendsLoading, setIsTrendsLoading] = useState(true);
@@ -724,6 +726,20 @@ export default function IdeasPage() {
     setEditingTitleIdeaId(null);
     setEditingTitleValue('');
     setTitleEditError(null);
+  }
+
+  async function deleteIdea(idea: IdeaRecord): Promise<void> {
+    if (!window.confirm(`Delete "${(idea.title || idea.topic).trim()}"? This cannot be undone.`)) return;
+    const firestore = getFirebaseDb();
+    if (!firestore || !currentUser) return;
+    setDeletingIdeaId(idea.id);
+    try {
+      await deleteDoc(doc(firestore, 'users', currentUser.uid, 'ideas', idea.id));
+    } catch {
+      setIdeasError('Unable to delete this idea right now. Please try again.');
+    } finally {
+      setDeletingIdeaId(null);
+    }
   }
 
   async function saveTitleEdit(idea: IdeaRecord): Promise<void> {
@@ -1112,6 +1128,14 @@ export default function IdeasPage() {
                               }}
                             >
                               Open Angles
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-lg border border-red-200 px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-60"
+                              onClick={() => { void deleteIdea(idea); }}
+                              disabled={deletingIdeaId === idea.id}
+                            >
+                              {deletingIdeaId === idea.id ? 'Deleting...' : 'Delete'}
                             </button>
                           </div>
                         </td>

@@ -1,0 +1,43 @@
+version: 1
+applications:
+  - appRoot: frontend
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+            - |
+              set -euo pipefail
+              node - <<'NODE'
+              const fs = require('fs');
+
+              const required = [
+                'NEXT_PUBLIC_FIREBASE_API_KEY',
+                'NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN',
+                'NEXT_PUBLIC_FIREBASE_PROJECT_ID',
+                'NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET',
+                'NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID',
+                'NEXT_PUBLIC_FIREBASE_APP_ID',
+              ];
+
+              const resolved = Object.fromEntries(required.map((key) => [key, String(process.env[key] ?? '').trim()]));
+              const missing = required.filter((key) => !resolved[key]);
+              if (missing.length) {
+                console.error(`Missing Amplify environment variables: ${missing.join(', ')}`);
+                process.exit(1);
+              }
+
+              const lines = required.map((key) => `${key}=${resolved[key].replace(/\r?\n/g, '\\n')}`);
+              fs.writeFileSync('.env.local', `${lines.join('\n')}\n`, 'utf8');
+              console.log('Created .env.local from Amplify environment variables.');
+              NODE
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        baseDirectory: .next
+        files:
+          - "**/*"
+      cache:
+        paths:
+          - node_modules/**/*

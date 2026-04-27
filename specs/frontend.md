@@ -9,7 +9,7 @@ This table centralizes the current frontend `(TODO)` items for quick planning an
 | Area | Section | Status |
 |---|---|---|
 | Login & Authentication | Forgot password link (UI placeholder) | TODO |
-| Dashboard | Content Calendar | TODO |
+| Dashboard | Content Calendar | DONE |
 | Dashboard | Idea Backlog Summary | TODO |
 | Dashboard | Drafts / Review Queue | TODO |
 | Dashboard | Recent Analytics | TODO |
@@ -22,9 +22,9 @@ This table centralizes the current frontend `(TODO)` items for quick planning an
 | Publishing & Scheduling | One-click LinkedIn Handoff (clipboard + open compose) | DONE |
 | Publishing & Scheduling | One-click X/Twitter Intent Prefill | DONE |
 | Publishing & Scheduling | Missing Content / Error / Status Hints | DONE |
-| Publishing & Scheduling | Schedule Picker / Calendar | TODO |
-| Publishing & Scheduling | Visual Content Calendar | TODO |
-| Publishing & Scheduling | Gap Detection Alerts | TODO |
+| Publishing & Scheduling | Schedule Picker / Calendar | DONE |
+| Publishing & Scheduling | Visual Content Calendar | DONE |
+| Publishing & Scheduling | Gap Detection Alerts | DONE |
 | Publishing & Scheduling | Submit to Search Engines | TODO |
 | Review & Approval Workflow | Draft Queue | DONE |
 | Review & Approval Workflow | Inline Editor | TODO |
@@ -46,9 +46,9 @@ This table centralizes the current frontend `(TODO)` items for quick planning an
 | Settings & Compliance | Compliance Flags | TODO |
 | Settings & Compliance | Audit Log Viewer | TODO |
 | Settings & Compliance | Integration Connectors | TODO |
-| Error & Notifications | Error Messages | TODO |
-| Error & Notifications | Success / Warning Notifications | TODO |
-| Error & Notifications | System Alerts | TODO |
+| Error & Notifications | Error Messages | DONE |
+| Error & Notifications | Success / Warning Notifications | DONE |
+| Error & Notifications | System Alerts | DONE |
 | API Integration | `/api/v1/*` proxy to FastAPI backend | TODO |
 
 ---
@@ -278,11 +278,14 @@ Note: `(TODO)` marks features that are currently not functional and still need i
 **Route:** `src/app/(app)/dashboard/page.tsx`
 **Layout Notes:** Hero with KPI metrics, then responsive grid for calendar, backlog, queue, analytics, and quick links.
 **Sections:**
-1. Content Calendar (TODO)
+1. Content Calendar
 2. Idea Backlog Summary (TODO)
 3. Drafts / Review Queue (TODO)
 4. Recent Analytics (TODO)
-5. Quick Links (TODO)
+5. All Adaptations list renders saved adaptations from `users/{uid}/adaptations` and shows card-level actions:
+  - `Edit` routes to `/adapt/{ideaId}?angleId={angleId}` for that specific adaptation.
+  - `Delete` removes `users/{uid}/adaptations/{adaptationId}` from Firestore with confirmation.
+6. Quick Links (TODO)
 
 ---
 
@@ -425,7 +428,7 @@ Implementation note:
    When a configured non-Ollama AI key exists, the route keeps using the existing AI-backed prompt/call/parse flow. When the active provider is non-Ollama and no key is configured, the route returns deterministic, schema-compatible fallback outputs per tool based on the currently active platform copy instead of surfacing a shared missing-key failure.
 14. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content.
 15. Right-hand trends sidebar consumes live `/api/trends` data and shows truthful loading, error, or empty states instead of placeholder topics/articles.
-16. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; review/schedule action placeholders remain present but unchanged.
+16. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; the primary completion CTA saves the current adaptation, preserves exact `ideaId` + `angleId` workflow context, and routes directly to `/publish`.
 17. The Adapt editor shares Storyboard inline editing UX: floating in-place prompt/diff controls anchored near current selection, red/green inline diff preview in the floating panel, and direct textarea editability while AI proposals are pending.
 18. Adapt inline editing and chat preview avoid duplicate revised-text surfaces by using the same active textarea as the only authoritative editing surface.
 
@@ -433,20 +436,21 @@ Implementation note:
 
 ### Screen 7 — Publishing & Scheduling (`/publish`)
 **Route:** `src/app/(app)/publish/page.tsx`
-**Layout Notes:** Two-card one-click handoff workspace (LinkedIn + X/Twitter) with context/status banner and prefilled content previews.
+**Layout Notes:** Library-style scheduling workspace that lists every saved adaptation for the signed-in user, with per-adaptation platform cards, edit/delete controls, schedule pickers, and a global upcoming schedule list.
 **Sections:**
-1. Resolves publish context from the signed-in user session and picks the best available adaptation source in this order:
-  - workflow/local route context candidate doc IDs (`workflow_context`, `adapt_draft_context`) -> `users/{uid}/adaptations/{ideaId}_{angleId}`
-  - latest adaptation fallback (`users/{uid}/adaptations` ordered by `updatedAt desc`, limit 1)
-  - local draft fallback (`adapt_draft_context.draftContent`) when no adaptation document exists
-2. Renders idea/angle labels from adaptation data when available; otherwise falls back to local adaptation context labels when present.
-3. LinkedIn one-click action:
+1. Loads all adaptation documents in realtime from `users/{uid}/adaptations` ordered by `updatedAt desc` and renders each adaptation as its own scheduling block.
+2. Each adaptation block shows idea + angle labels and an `Edit Adaptation` route action that deep-links to `/adapt/{ideaId}?angleId={angleId}`.
+3. LinkedIn one-click action per adaptation card:
   - attempts `navigator.clipboard.writeText(linkedinText)`
   - opens `https://www.linkedin.com/feed/?shareActive=true` in a new tab
   - shows explicit status message for copied-success or clipboard-blocked fallback guidance
-4. X/Twitter one-click action opens `https://twitter.com/intent/tweet?text=...` with URL-encoded prefilled text.
-5. Both platform cards include read-only content preview textareas plus explicit secondary `Copy` buttons.
-6. Clear UX states are present for loading, signed-out/config errors, missing adaptation content, and successful publish handoff actions.
+4. X/Twitter one-click action per adaptation card opens `https://twitter.com/intent/tweet?text=...` with URL-encoded prefilled text.
+5. Platform cards include content textareas, explicit `Copy` buttons, and card-level `Edit` / `Delete` controls.
+6. Card-level `Edit` enables in-card text editing for the selected adaptation + platform and persists to `users/{uid}/adaptations/{adaptationId}`.
+7. Card-level `Delete` removes the selected platform field from `users/{uid}/adaptations/{adaptationId}`; once removed, that platform card is hidden from the Publish UI.
+8. Platform-specific schedule pickers persist reminders to `users/{uid}/scheduledPosts` with adaptation/article metadata and `scheduledForMs` timestamp.
+9. Publish renders upcoming scheduled posts from Firestore so users can verify queued reminders and dates across all adaptations.
+10. Clear UX states are present for loading, signed-out/config errors, empty adaptation library, schedule validation errors, and successful publish/schedule actions.
 
 Implementation notes:
 - Publish page now runs as a client component and uses Firebase Auth + Firestore browser SDK lookups.
@@ -520,9 +524,15 @@ Draft Queue behavior details:
 **Route:** `src/app/(app)/notifications/page.tsx`
 **Layout Notes:** Alert severity cards using color-coded surfaces (error, warning, system).
 **Sections:**
-1. Error Messages (TODO)
-2. Success / Warning Notifications (TODO)
-3. System Alerts (TODO)
+1. Error Messages
+2. Success / Warning Notifications
+3. System Alerts
+
+Notifications behavior details:
+- Loads scheduled reminders from `users/{uid}/scheduledPosts` for the signed-in user.
+- `Success / Warning Notifications` card highlights reminders due now (within +/-15 minutes of scheduled time).
+- `System Alerts` card shows upcoming reminders for the next 24 hours and lists missed posting windows from older scheduled reminders.
+- Signed-out/Firebase-unavailable/Firestore-load failures surface via the `Error Messages` card.
 
 ---
 TEST_MARKER

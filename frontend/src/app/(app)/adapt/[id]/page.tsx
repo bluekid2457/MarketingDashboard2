@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, getDoc, deleteDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 
 import { Spinner } from '@/components/Spinner';
@@ -12,6 +12,7 @@ import { getActiveAIKey } from '@/lib/aiConfig';
 import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { useInlineEdit, type InlineSelection } from '@/lib/useInlineEdit';
+import { setWorkflowContext } from '@/lib/workflowContext';
 import WorkflowStepper from '@/components/WorkflowStepper';
 
 type IdeaRecord = {
@@ -238,6 +239,7 @@ export default function AdaptPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [hasExistingAdaptation, setHasExistingAdaptation] = useState(false);
+  const [isDeletingAdaptation, setIsDeletingAdaptation] = useState(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedSignatureRef = useRef<string | null>(null);
 
@@ -896,6 +898,22 @@ export default function AdaptPage() {
       : `/storyboard/${encodeURIComponent(ideaId)}`;
   }, [angleIdFromQuery, ideaId]);
 
+  const deleteAdaptation = useCallback(async (): Promise<void> => {
+    if (!currentUid || !ideaId || !angleIdFromQuery) return;
+    const label = adaptContext?.selectedAngle.title || 'this adaptation';
+    if (!window.confirm(`Delete adaptation "${label}"? This cannot be undone.`)) return;
+    const db = getFirebaseDb();
+    if (!db) return;
+    setIsDeletingAdaptation(true);
+    try {
+      const docId = `${ideaId}_${angleIdFromQuery}`;
+      await deleteDoc(doc(db, 'users', currentUid, 'adaptations', docId));
+      router.push('/storyboard');
+    } catch {
+      setIsDeletingAdaptation(false);
+    }
+  }, [adaptContext?.selectedAngle.title, angleIdFromQuery, currentUid, ideaId, router]);
+
   const savedAtText = useMemo(
     () => savedAt?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? null,
     [savedAt],
@@ -1119,6 +1137,19 @@ export default function AdaptPage() {
               <span className="text-green-300">Saved at {savedAtText}</span>
             ) : null}
             {saveError ? <span className="text-red-400">{saveError}</span> : null}
+          </div>
+        ) : null}
+
+        {adaptContext && hasExistingAdaptation ? (
+          <div className="mt-3">
+            <button
+              type="button"
+              className="rounded-lg border border-red-400 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-900/30 disabled:opacity-60"
+              onClick={() => { void deleteAdaptation(); }}
+              disabled={isDeletingAdaptation}
+            >
+              {isDeletingAdaptation ? 'Deleting...' : 'Delete Adaptation'}
+            </button>
           </div>
         ) : null}
       </div>
@@ -1471,9 +1502,34 @@ export default function AdaptPage() {
               <button
                 type="button"
                 className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                onClick={() => router.push('/review')}
+                onClick={() => {
+                  if (!adaptContext) {
+                    return;
+                  }
+
+                  const publishContext: AdaptDraftContext = {
+                    ideaId: adaptContext.ideaId,
+                    angleId: adaptContext.angleId,
+                    idea: adaptContext.idea,
+                    selectedAngle: adaptContext.selectedAngle,
+                    draftContent: adaptContext.draftContent,
+                  };
+
+                  void (async () => {
+                    const nextSelected = selectedPlatforms.length > 0 ? selectedPlatforms : [activePlatform];
+                    await saveAdaptation(platforms, activePlatform, nextSelected);
+
+                    localStorage.setItem(ADAPT_CONTEXT_STORAGE_KEY, JSON.stringify(publishContext));
+                    setWorkflowContext({
+                      ideaId: adaptContext.ideaId,
+                      angleId: adaptContext.angleId,
+                      ideaTopic: adaptContext.idea.topic,
+                    });
+                    router.push('/publish');
+                  })();
+                }}
               >
-                Submit for Review
+                Send to Publish & Schedule
               </button>
             </div>
           ) : null}
