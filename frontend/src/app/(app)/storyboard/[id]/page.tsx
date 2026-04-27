@@ -13,6 +13,8 @@ import { DraftChatPanel, type DraftChatMessage } from '@/components/DraftChatPan
 import { useInlineEdit, type InlineSelection } from '@/lib/useInlineEdit';
 import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
 import WorkflowStepper from '@/components/WorkflowStepper';
+import { runCitationCheck } from '@/lib/citationCheck';
+import { AIToolbox, type PlagiarismResult } from '@/components/AIToolbox';
 
 type IdeaRecord = {
   id: string;
@@ -53,19 +55,6 @@ type DraftChatApiResponse = {
   error?: string;
 };
 
-type ReferenceLink = {
-  marker: string;
-  url: string;
-  label?: string;
-};
-
-type CitationCheck = {
-  uncitedClaims: string[];
-  references: ReferenceLink[];
-  missingReferenceMarkers: string[];
-  invalidReferences: string[];
-};
-
 type FloatingAnchor = {
   top: number;
   left: number;
@@ -81,307 +70,6 @@ function extractSourceUrls(markdown: string): string[] {
   return [...new Set([...markdownLinkMatches, ...directUrlMatches].map((entry) => entry.replace(/[.,;:!?]+$/, '')))].filter(Boolean);
 }
 
-function sanitizeUrlCandidate(value: string): string {
-  return value.trim().replace(/[)>.,;:!?]+$/, '').replace(/^<+/, '').replace(/>+$/, '');
-}
-
-function isValidHttpUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-function isReferenceHeadingLabel(label: string): boolean {
-  const normalized = label
-    .trim()
-    .replace(/[:：]\s*$/, '')
-    .replace(/[*_`~]/g, '')
-    .trim();
-
-  return /^(sources?|references?)$/i.test(normalized);
-}
-
-function parseAtxHeadingLabel(line: string): string | null {
-  const match = line.match(/^\s*#{1,6}\s+(.+?)\s*#*\s*$/);
-  return match ? match[1].trim() : null;
-}
-
-function isSetextUnderline(line: string): boolean {
-  return /^\s*(?:=|-){3,}\s*$/.test(line);
-}
-
-function extractReferenceSections(markdown: string): string[] {
-  const lines = markdown.split(/\r?\n/);
-  const sections: string[] = [];
-  let collectingStart: number | null = null;
-
-  const pushSection = (endExclusive: number): void => {
-    if (collectingStart === null) {
-      return;
-    }
-
-    const sectionText = lines
-      .slice(collectingStart, endExclusive)
-      .map((line) => line.replace(/\s{2,}$/, ''))
-      .join('\n')
-      .trim();
-
-    if (sectionText) {
-      sections.push(sectionText);
-    }
-
-    collectingStart = null;
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? '';
-    const nextLine = lines[index + 1] ?? '';
-    const atxHeadingLabel = parseAtxHeadingLabel(line);
-
-    const isReferenceHeading =
-      (atxHeadingLabel !== null && isReferenceHeadingLabel(atxHeadingLabel)) ||
-      (isSetextUnderline(nextLine) && isReferenceHeadingLabel(line));
-
-    const isAnyHeading =
-      atxHeadingLabel !== null ||
-      (line.trim().length > 0 && isSetextUnderline(nextLine) && !/^\s*[-*+]\s+/.test(line));
-
-    if (isReferenceHeading) {
-      pushSection(index);
-      collectingStart = index + (isSetextUnderline(nextLine) ? 2 : 1);
-      if (isSetextUnderline(nextLine)) {
-        index += 1;
-      }
-      continue;
-    }
-
-    if (collectingStart !== null && isAnyHeading) {
-      pushSection(index);
-      if (isSetextUnderline(nextLine)) {
-        index += 1;
-      }
-    }
-  }
-
-  pushSection(lines.length);
-
-  return sections.filter((section) => section.trim().length > 0);
-}
-
-function parseReferenceLinePrefix(line: string): { markerHint: string | null; content: string } {
-  let content = line.trim().replace(/\s{2,}$/, '');
-  let markerHint: string | null = null;
-
-  const listPrefixMatch = content.match(/^(?:[-*+]|(\d+)[.)])\s+(.*)$/);
-  if (listPrefixMatch) {
-    content = listPrefixMatch[2].trim();
-    if (listPrefixMatch[1]) {
-      markerHint = `[${listPrefixMatch[1]}]`;
-    }
-  }
-
-  const explicitMarkerMatch = content.match(/^\[(\d+)\]\s*(.*)$/);
-  if (explicitMarkerMatch) {
-    markerHint = `[${explicitMarkerMatch[1]}]`;
-    content = explicitMarkerMatch[2].trim();
-  }
-
-  return { markerHint, content };
-}
-
-function extractReferences(markdown: string): ReferenceLink[] {
-  const candidates: Array<{ markerHint: string | null; url: string; explicitMarker: boolean; label?: string }> = [];
-  const byUrl = new Map<string, number>();
-
-  const addCandidate = (urlCandidate: string, markerHint: string | null, explicitMarker: boolean, label?: string): void => {
-    const url = sanitizeUrlCandidate(urlCandidate);
-    if (!isValidHttpUrl(url)) {
-      return;
-    }
-
-    const dedupeKey = (() => {
-      try {
-        return new URL(url).toString();
-      } catch {
-        return url.toLowerCase();
-      }
-    })();
-
-    const existingIndex = byUrl.get(dedupeKey);
-    if (typeof existingIndex === 'number') {
-      const existing = candidates[existingIndex];
-      if (!existing.explicitMarker && explicitMarker && markerHint) {
-        existing.markerHint = markerHint;
-        existing.explicitMarker = true;
-      }
-      if (!existing.label && label) {
-        existing.label = label;
-      }
-      return;
-    }
-
-    byUrl.set(dedupeKey, candidates.length);
-    candidates.push({ markerHint, url, explicitMarker, label });
-  };
-
-  const parseReferenceLine = (line: string): void => {
-    if (!line.trim()) {
-      return;
-    }
-
-    const { markerHint, content } = parseReferenceLinePrefix(line);
-    if (!content) {
-      return;
-    }
-
-    let usedMarkerHint = false;
-    const markdownLinkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
-    for (const match of content.matchAll(markdownLinkRegex)) {
-      const label = match[1]?.trim();
-      const urlCandidate = match[2] ?? '';
-      addCandidate(urlCandidate, markerHint && !usedMarkerHint ? markerHint : null, Boolean(markerHint) && !usedMarkerHint, label);
-      usedMarkerHint = true;
-    }
-
-    const contentWithoutMarkdownLinks = content.replace(markdownLinkRegex, ' ');
-    const bareUrlMatches = contentWithoutMarkdownLinks.match(/https?:\/\/[^\s<>()]+/gi) ?? [];
-    for (const urlCandidate of bareUrlMatches) {
-      addCandidate(urlCandidate, markerHint && !usedMarkerHint ? markerHint : null, Boolean(markerHint) && !usedMarkerHint);
-      usedMarkerHint = true;
-    }
-  };
-
-  const parseReferenceSectionText = (section: string): void => {
-    const lines = section.split(/\r?\n/);
-    for (const line of lines) {
-      parseReferenceLine(line);
-    }
-  };
-
-  const referenceSections = extractReferenceSections(markdown);
-  if (referenceSections.length > 0) {
-    for (const section of referenceSections) {
-      parseReferenceSectionText(section);
-    }
-  }
-
-  // Fallback: if a Sources/References heading exists but no valid candidates were found,
-  // scan reference-style list lines across the full markdown body.
-  if (candidates.length === 0 && /\b(?:sources?|references?)\b/i.test(markdown)) {
-    const referenceStyleLines = markdown.match(/^\s*(?:[-*+]|\d+[.)])\s+.+$/gim) ?? [];
-    for (const line of referenceStyleLines) {
-      parseReferenceLine(line);
-    }
-  }
-
-  const inlineListMatches = markdown.matchAll(/^[\t ]*[-*][\t ]*\[(\d+)\][^\n]*?\(([^)]+)\)/gim);
-  for (const match of inlineListMatches) {
-    addCandidate(match[2], `[${match[1]}]`, true);
-  }
-
-  const footnoteMatches = markdown.matchAll(/^[\t ]*\[(\d+)\]:[\t ]*(\S+)/gim);
-  for (const match of footnoteMatches) {
-    addCandidate(match[2], `[${match[1]}]`, true);
-  }
-
-  const sourceLineMatches = markdown.matchAll(/^[\t ]*(?:[-*]|\d+[.)])[\t ]*(?:\[(\d+)\][\t ]*)?(https?:\/\/\S+)/gim);
-  for (const match of sourceLineMatches) {
-    addCandidate(match[2], match[1] ? `[${match[1]}]` : null, Boolean(match[1]));
-  }
-
-  const explicitMarkerNumbers = candidates
-    .map((candidate) => candidate.markerHint)
-    .filter((marker): marker is string => Boolean(marker))
-    .map((marker) => {
-      const match = marker.match(/^\[(\d+)\]$/);
-      return match ? Number(match[1]) : null;
-    })
-    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-
-  let nextAutoMarker = explicitMarkerNumbers.length > 0 ? Math.max(...explicitMarkerNumbers) + 1 : 1;
-
-  return candidates.map((candidate) => {
-    const marker = candidate.markerHint ?? `[${nextAutoMarker++}]`;
-    return {
-      marker,
-      url: candidate.url,
-      label: candidate.label,
-    };
-  });
-}
-
-function extractInvalidReferenceCandidates(markdown: string): string[] {
-  const candidates: string[] = [];
-
-  const collectInvalidCandidatesFromText = (text: string): void => {
-    const markdownLinkRegex = /\[[^\]]+\]\(([^)]+)\)/g;
-    for (const match of text.matchAll(markdownLinkRegex)) {
-      candidates.push(sanitizeUrlCandidate(match[1] ?? ''));
-    }
-
-    const stripped = text.replace(markdownLinkRegex, ' ');
-    const bareMatches = stripped.match(/(?:https?:\/\/|www\.)[^\s<>()]+/gi) ?? [];
-    for (const match of bareMatches) {
-      candidates.push(sanitizeUrlCandidate(match));
-    }
-  };
-
-  const referenceSections = extractReferenceSections(markdown);
-  if (referenceSections.length > 0) {
-    for (const section of referenceSections) {
-      const lines = section.split(/\r?\n/);
-      for (const line of lines) {
-        const { content } = parseReferenceLinePrefix(line);
-        if (content) {
-          collectInvalidCandidatesFromText(content);
-        }
-      }
-    }
-  } else {
-    collectInvalidCandidatesFromText(markdown);
-  }
-
-  return [...new Set(candidates)]
-    .filter((candidate) => /^(?:https?:\/\/|www\.)/i.test(candidate))
-    .filter((candidate) => !isValidHttpUrl(candidate))
-    .slice(0, 5);
-}
-
-function findUncitedClaims(markdown: string): string[] {
-  const sentences = markdown
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-
-  return sentences
-    .filter((sentence) => {
-      const factualPattern =
-        /\d|%|\baccording to\b|\bresearch\b|\breport\b|\bstudy\b|\bdata\b|\bgrowth\b|\bincrease\b|\bdecrease\b/i;
-      if (!factualPattern.test(sentence)) {
-        return false;
-      }
-      return !/\[\d+\]/.test(sentence);
-    })
-    .slice(0, 5);
-}
-
-function runCitationCheck(markdown: string): CitationCheck {
-  const references = extractReferences(markdown);
-  const referencedMarkers = new Set(references.map((ref) => ref.marker));
-  const citedMarkers = [...markdown.matchAll(/\[(\d+)\]/g)].map((match) => `[${match[1]}]`);
-  const missingReferenceMarkers = [...new Set(citedMarkers.filter((marker) => !referencedMarkers.has(marker)))];
-  const invalidReferenceCandidates = extractInvalidReferenceCandidates(markdown);
-
-  return {
-    uncitedClaims: findUncitedClaims(markdown),
-    references,
-    missingReferenceMarkers,
-    invalidReferences: invalidReferenceCandidates,
-  };
-}
 
 export default function StoryboardEditorPage() {
   const params = useParams<{ id: string }>();
@@ -419,6 +107,25 @@ export default function StoryboardEditorPage() {
   const [chatProvider, setChatProvider] = useState<string | null>(null);
   const [chatPendingDiffs, setChatPendingDiffs] = useState<ChatSentenceDiff[]>([]);
   const inlineEditor = useInlineEdit({ text: storyboardText, setText: setStoryboardText });
+
+  const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+  const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
+  const [toolboxNotice, setToolboxNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    const refreshKey = (): void => {
+      const config = getActiveAIKey();
+      setHasApiKey(config.provider === 'ollama' ? Boolean(config.ollamaModel.trim()) : Boolean(config.apiKey));
+    };
+    refreshKey();
+    const handler = (): void => refreshKey();
+    window.addEventListener('storage', handler);
+    window.addEventListener('focus', handler);
+    return () => {
+      window.removeEventListener('storage', handler);
+      window.removeEventListener('focus', handler);
+    };
+  }, []);
 
   useEffect(() => {
     const auth = getFirebaseAuth();
@@ -1050,6 +757,33 @@ export default function StoryboardEditorPage() {
           </section>
 
           <section className="surface-card p-5">
+            <AIToolbox
+              draft={storyboardText}
+              ideaContext={
+                storyboardContext
+                  ? {
+                      topic: storyboardContext.idea.topic,
+                      audience: storyboardContext.idea.audience,
+                      tone: storyboardContext.idea.tone,
+                      format: storyboardContext.idea.format,
+                    }
+                  : null
+              }
+              hasApiKeyConfigured={hasApiKey}
+              onApplyDraft={(nextDraft, summary) => {
+                setStoryboardText(nextDraft);
+                setToolboxNotice(summary);
+                setPlagiarismResult(null);
+                setChatPendingDiffs([]);
+              }}
+              onPlagiarismResult={(result) => setPlagiarismResult(result)}
+            />
+            {toolboxNotice ? (
+              <p className="mt-2 text-xs text-emerald-700">{toolboxNotice}</p>
+            ) : null}
+          </section>
+
+          <section className="surface-card p-5">
             <DraftChatPanel
               title="AI Chat Assistant"
               helperText="Ask for rewrites. AI returns sentence-level diffs that render in the editor with per-change Keep/Undo."
@@ -1063,6 +797,15 @@ export default function StoryboardEditorPage() {
               isSending={isChatSending}
               error={chatError}
               pendingDiffCount={pendingChatDiffCount}
+              hasApiKeyConfigured={hasApiKey}
+              toneSuggestions={[
+                { label: 'Make it more concise', prompt: 'Tighten the prose. Remove filler words and combine related sentences. Keep the same structure.' },
+                { label: 'Add concrete examples', prompt: 'Add 2-3 short concrete examples that illustrate the main points. Keep the existing flow.' },
+                { label: 'Sharpen the hook', prompt: 'Rewrite the opening so it grabs attention in the first sentence with a specific stakes-led hook.' },
+                { label: 'Cut hype language', prompt: 'Rewrite to remove hype words ("revolutionary", "game-changing", etc.) and replace them with specific evidence.' },
+                { label: 'Add a CTA', prompt: 'Add a single clear call to action at the end. Keep the rest of the draft unchanged.' },
+              ]}
+              onApplyToneSuggestion={(prompt) => setChatInput(prompt)}
             />
           </section>
 
@@ -1090,9 +833,17 @@ export default function StoryboardEditorPage() {
                 {citationCheck.references.map((entry) => (
                   <li key={`${entry.marker}-${entry.url}`}>
                     <span className="mr-2 font-semibold text-slate-600">{entry.marker}</span>
-                    <a className="text-blue-700 hover:underline" href={entry.url} target="_blank" rel="noreferrer">
+                    <a
+                      className="text-blue-700 underline hover:text-blue-900"
+                      href={entry.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
                       {entry.label || entry.url}
                     </a>
+                    {entry.label ? (
+                      <p className="ml-6 break-all text-[11px] text-slate-400">{entry.url}</p>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -1115,6 +866,27 @@ export default function StoryboardEditorPage() {
             ) : null}
           </section>
 
+          {plagiarismResult ? (
+            <section
+              className={`surface-card p-4 ${
+                plagiarismResult.verdict === 'high-risk'
+                  ? 'border border-red-200'
+                  : plagiarismResult.verdict === 'review-needed'
+                  ? 'border border-amber-200'
+                  : 'border border-emerald-200'
+              }`}
+            >
+              <p className="text-sm font-semibold text-slate-900">
+                Plagiarism check: {plagiarismResult.verdict.replace('-', ' ')} (risk {plagiarismResult.riskScore}/100)
+              </p>
+              {plagiarismResult.verdict === 'high-risk' ? (
+                <p className="mt-1 text-xs text-red-700">
+                  Resolve flagged passages before submitting for review or publishing. The Submit for Review button is disabled until this is no longer high-risk.
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
@@ -1136,8 +908,19 @@ export default function StoryboardEditorPage() {
 
             <button
               type="button"
-              className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
               onClick={handleSubmitForReview}
+              disabled={
+                !storyboardText.trim() ||
+                plagiarismResult?.verdict === 'high-risk'
+              }
+              title={
+                plagiarismResult?.verdict === 'high-risk'
+                  ? 'Plagiarism check returned high risk. Resolve flagged passages first.'
+                  : !plagiarismResult
+                  ? 'Tip: run the plagiarism check in AI Content Tools before submitting.'
+                  : undefined
+              }
             >
               Submit for Review
             </button>

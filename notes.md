@@ -69,6 +69,7 @@ upcoming scheduled posts, color-coded by status.
 ---
 
 ## 3. Best post type / Format performance — no format tracking
+ — best post type
 
 **Where it shows on dashboard:** Recent Analytics tile 2 — rendered red with TODO
 badge.
