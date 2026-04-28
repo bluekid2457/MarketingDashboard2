@@ -59,6 +59,7 @@ Copy `backend/.env.example` → `backend/.env` before running.
   - `selectionStart: number` (required)
   - `selectionEnd: number` (required)
   - `instruction: string` (required)
+  - `companyContext?: string[]` (optional company profile lines from `companyProfileToContextLines`; injected into all three prompt variants — selected-text, autonomous-single, autonomous-multi — so rewrites preserve product references and brand voice)
 - **Behavior**:
   - Rejects missing selection/instruction with `400`.
   - Returns a structured `proposal` object for normal provider responses.
@@ -73,6 +74,7 @@ Copy `backend/.env.example` → `backend/.env` before running.
     - `hasSourcesSection: boolean`
     - `uncitedClaimCount: number`
   - This allows UI gating before review submission while keeping generation non-blocking.
+  - Accepts optional `companyContext: string[]` and renders a "Company context" block inside the draft prompt to ground tone, examples, audience framing, and product references.
 
 ### `POST /api/drafts/analyze`
 - **Location**: `frontend/src/app/api/drafts/analyze/route.ts`
@@ -80,6 +82,27 @@ Copy `backend/.env.example` → `backend/.env` before running.
   - Accepts optional `platform` in request body.
   - SEO prompt includes platform-specific optimization context when provided.
   - Used by Adapt auto-SEO lifecycle after each platform generation.
+  - Accepts optional `companyContext: string[]`. Injected ONLY for `type: 'seo'` (biases primary/secondary keywords, meta description, and title suggestions toward the configured company). Ignored for `type: 'plagiarism'` and `type: 'sources'`.
+
+### Other Next.js Route Handlers receiving `companyContext`
+- `POST /api/drafts/adapt` — appends a "Company context" block to the platform adaptation prompt so adapted copy preserves product references and brand voice.
+- `POST /api/drafts/chat` — appends a "Company context" block to the system prompt before the current draft so chat rewrites stay on-brand.
+- `POST /api/drafts/rewrite` — appends a "Company context" block to the system prompt for tone, sentiment, and readability rewrites.
+- `POST /api/drafts/personas` — appends a "Company context" block to the user prompt so each persona variant stays consistent with the company's product/brand voice.
+- `POST /api/drafts/headlines` — appends a "Company context" block to the user prompt so headline variants ground product references and brand voice.
+- `POST /api/drafts/research` — appends a "Company context" block to the synthesis prompt so the brief biases toward findings relevant to the company's industry/audience/product. The DuckDuckGo search query itself is unchanged.
+- `POST /api/angles` — appends a "Company context" block to both the per-slot single-angle prompt and the refinement prompt so generated angles are grounded in the company's audience and product references.
+- `POST /api/ideas/rationale` — already accepts `personalizationContext.company` (string lines) and renders it in the rationale prompt. The Ideas page extractor reads from `users/{uid}.companyContext` (the same Firestore field that `saveCompanyProfile` writes).
+
+### Endpoints intentionally NOT receiving `companyContext`
+- `POST /api/drafts/plagiarism` — pure verbatim-quote web search + AI heuristic review of submitted text. Brand framing does not change exact-quote matching or AI-pattern detection and would only add prompt noise.
+- `GET /api/trends` — RSS-only Bing News fetcher; no AI provider call, so the request body never carries `companyContext`. The route DOES, however, accept an optional `companyTerms` query string (comma-separated keyword list, normalized to entries of length 2–60). When present it (a) issues up to four extra Bing News queries built from those terms (`"<term> marketing"`, `"<term> content strategy"`), (b) boosts ranking of articles whose title contains any term, and (c) prepends per-term topic-rule labels so the trend cluster panel surfaces company-relevant clusters first. The response payload includes `companyTermsApplied: string[]` for transparency.
+- `POST /api/angles/persist` and `POST /api/angles/select` — pure persistence/state-cleanup endpoints; no prompt construction.
+
+### `companyContext` shape contract
+- Always optional `string[]` in the request body.
+- Each entry is a pre-formatted `"Field label: value"` line produced by `companyProfileToContextLines(profile)` in `frontend/src/lib/companyProfile.ts`.
+- Server routes normalize the array (drop non-strings, trim, drop empties) and skip injection when the resulting list is empty, so the prompt is unchanged for users who have not filled in a Company Profile.
 
 ### `GET /health`
 - **Tags**: Health

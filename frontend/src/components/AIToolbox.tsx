@@ -10,6 +10,7 @@ import {
   type ComplexityLabel,
 } from '@/lib/readability';
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 
 type ToolboxNotice = { tone: 'success' | 'error' | 'info'; message: string };
 
@@ -44,7 +45,7 @@ type HeadlineVariant = {
   rationale: string;
 };
 
-type PersonaVariant = {
+export type PersonaVariant = {
   id: string;
   name: string;
   description: string;
@@ -81,6 +82,7 @@ type AIToolboxProps = {
   ideaContext: AIToolboxIdeaContext | null;
   onApplyDraft: (nextDraft: string, summary: string) => void;
   onPlagiarismResult?: (result: PlagiarismResult | null) => void;
+  onPersonaVariantsGenerated?: (variants: PersonaVariant[]) => void;
   hasApiKeyConfigured: boolean;
 };
 
@@ -106,6 +108,11 @@ function formatCommonAuth(): { provider: string; apiKey: string; ollamaBaseUrl: 
     ollamaBaseUrl: config.ollamaBaseUrl,
     ollamaModel: config.ollamaModel,
   };
+}
+
+async function loadCompanyContextLines(): Promise<string[]> {
+  const profile = await loadCompanyProfile(null);
+  return companyProfileToContextLines(profile);
 }
 
 function chunkPersonaInputs(extra: Array<{ name: string; description: string }>): Array<{ id: string; name: string; description: string }> {
@@ -174,7 +181,7 @@ function renderLikelySource(value: string): ReactNode {
 }
 
 export function AIToolbox(props: AIToolboxProps) {
-  const { draft, ideaContext, onApplyDraft, onPlagiarismResult, hasApiKeyConfigured } = props;
+  const { draft, ideaContext, onApplyDraft, onPlagiarismResult, onPersonaVariantsGenerated, hasApiKeyConfigured } = props;
 
   const readability = useMemo(() => calculateReadability(draft), [draft]);
   const [complexityValue, setComplexityValue] = useState<number>(readability.complexityValue);
@@ -231,6 +238,7 @@ export function AIToolbox(props: AIToolboxProps) {
   const runRewrite = useCallback(
     async (mode: 'tone' | 'sentiment' | 'readability', payloadExtras: Record<string, unknown>): Promise<RewriteApiResponse> => {
       const auth = formatCommonAuth();
+      const companyContext = await loadCompanyContextLines();
       const response = await fetch('/api/drafts/rewrite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -238,6 +246,7 @@ export function AIToolbox(props: AIToolboxProps) {
           ...auth,
           draft,
           mode,
+          companyContext,
           ...payloadExtras,
         }),
       });
@@ -338,23 +347,25 @@ export function AIToolbox(props: AIToolboxProps) {
     setAppliedPersonaId(null);
     try {
       const auth = formatCommonAuth();
+      const companyContext = await loadCompanyContextLines();
       const response = await fetch('/api/drafts/personas', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...auth, draft, personas }),
+        body: JSON.stringify({ ...auth, draft, personas, companyContext }),
       });
       const payload = (await response.json()) as PersonasApiResponse;
       if (!response.ok || !payload.variants) {
         throw new Error(payload.error ?? 'Persona generation failed.');
       }
       setPersonaVariants(payload.variants);
+      onPersonaVariantsGenerated?.(payload.variants);
       setNotice({ tone: 'success', message: `Generated ${payload.variants.length} persona variants.` });
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Persona generation failed.' });
     } finally {
       setPersonasRunning(false);
     }
-  }, [buildPersonaList, draft, requireApiKey, requireDraft]);
+  }, [buildPersonaList, draft, onPersonaVariantsGenerated, requireApiKey, requireDraft]);
 
   const handleApplyPersona = useCallback(
     (variant: PersonaVariant) => {
@@ -372,6 +383,7 @@ export function AIToolbox(props: AIToolboxProps) {
     setHeadlines([]);
     try {
       const auth = formatCommonAuth();
+      const companyContext = await loadCompanyContextLines();
       const response = await fetch('/api/drafts/headlines', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -381,6 +393,7 @@ export function AIToolbox(props: AIToolboxProps) {
           topic: ideaContext?.topic ?? '',
           audience: ideaContext?.audience ?? '',
           count: 5,
+          companyContext,
         }),
       });
       const payload = (await response.json()) as HeadlinesApiResponse;
@@ -429,6 +442,7 @@ export function AIToolbox(props: AIToolboxProps) {
     setResearchResult(null);
     try {
       const auth = formatCommonAuth();
+      const companyContext = await loadCompanyContextLines();
       const response = await fetch('/api/drafts/research', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -438,6 +452,7 @@ export function AIToolbox(props: AIToolboxProps) {
           topic: ideaContext?.topic ?? '',
           audience: ideaContext?.audience ?? '',
           draft,
+          companyContext,
         }),
       });
       const payload = (await response.json()) as ResearchApiResponse;

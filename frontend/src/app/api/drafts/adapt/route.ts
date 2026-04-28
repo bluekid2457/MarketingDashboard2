@@ -21,6 +21,7 @@ type AdaptRequestBody = {
   platform?: string;
   sourceDraft?: string;
   currentPlatformDraft?: string;
+  companyContext?: string[];
 };
 
 type AdaptApiResponse = {
@@ -69,12 +70,30 @@ async function callAdaptProviderWithTimeout(
   }
 }
 
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
+
 function buildAdaptationPrompt(
   platform: PlatformPromptKey,
   sourceDraft: string,
   currentPlatformDraft: string,
+  companyContext: string[],
 ): string {
   const platformRules = getPromptRulesForPlatform(platform);
+
+  const companyBlock = companyContext.length > 0
+    ? [
+        '',
+        'Company context (use to ground product references, audience framing, and brand voice):',
+        ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
 
   return [
     'Adapt the source draft for the requested platform using the platform prompt rules.',
@@ -85,6 +104,7 @@ function buildAdaptationPrompt(
     '',
     'Platform prompt rules:',
     platformRules,
+    ...companyBlock,
     '',
     'Source draft:',
     '---',
@@ -114,6 +134,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdaptApiR
   const platform = asString(body.platform);
   const sourceDraft = typeof body.sourceDraft === 'string' ? body.sourceDraft : '';
   const currentPlatformDraft = typeof body.currentPlatformDraft === 'string' ? body.currentPlatformDraft : '';
+  const companyContext = normalizeContextLines(body.companyContext);
 
   if (!provider || !['openai', 'gemini', 'claude', 'ollama'].includes(provider)) {
     return NextResponse.json({ error: 'A valid provider is required.' }, { status: 400 });
@@ -135,7 +156,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdaptApiR
     return NextResponse.json({ error: 'Ollama model is required.' }, { status: 400 });
   }
 
-  const prompt = buildAdaptationPrompt(platform, sourceDraft, currentPlatformDraft);
+  const prompt = buildAdaptationPrompt(platform, sourceDraft, currentPlatformDraft, companyContext);
   const messages: AIMessage[] = [
     {
       role: 'system',

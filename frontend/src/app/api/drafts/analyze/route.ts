@@ -13,7 +13,17 @@ type AnalyzeRequestBody = {
   draft?: string;
   type?: AnalyzeType;
   platform?: string;
+  companyContext?: string[];
 };
+
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
 
 export type SeoResult = {
   primaryKeyword: string;
@@ -375,11 +385,19 @@ function buildFallbackResult(type: AnalyzeType, draft: string): SeoResult | Plag
   return buildSourcesFallback(draft);
 }
 
-function buildSeoPrompt(draft: string, platform?: string): string {
+function buildSeoPrompt(draft: string, platform?: string, companyContext: string[] = []): string {
   const normalizedPlatform = typeof platform === 'string' ? platform.trim().toLowerCase() : '';
   const platformContext = normalizedPlatform
     ? `Prioritize SEO recommendations appropriate for this publishing channel: ${normalizedPlatform}.`
     : 'Use general web-article SEO best practices.';
+
+  const companyBlock = companyContext.length > 0
+    ? [
+        '',
+        'Company context (use to tailor primary/secondary keywords, meta description, and title suggestions to this company\'s product, industry, and audience):',
+        ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
 
   return [
     'You are an expert SEO analyst and content strategist.',
@@ -398,6 +416,7 @@ function buildSeoPrompt(draft: string, platform?: string): string {
     '  "similarArticleTopics": string[] (5 topics similar articles rank for, used to suggest SEO coverage),',
     '  "wordCount": number',
     '}',
+    ...companyBlock,
     '',
     'Draft to analyze:',
     draft,
@@ -510,6 +529,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeAp
     typeof body.ollamaModel === 'string' && body.ollamaModel.trim()
       ? body.ollamaModel.trim()
       : DEFAULT_OLLAMA_MODEL;
+  const companyContext = normalizeContextLines(body.companyContext);
 
   if (!draft) {
     return NextResponse.json({ error: 'draft is required.' }, { status: 400 });
@@ -532,7 +552,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalyzeAp
 
   let prompt: string;
   if (type === 'seo') {
-    prompt = buildSeoPrompt(draft, platform);
+    prompt = buildSeoPrompt(draft, platform, companyContext);
   } else if (type === 'plagiarism') {
     prompt = buildPlagiarismPrompt(draft);
   } else {

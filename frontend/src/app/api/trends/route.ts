@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 type TrendArticle = {
   title: string;
@@ -9,6 +9,7 @@ type TrendArticle = {
 
 type TrendArticleRecord = TrendArticle & {
   publishedAtMs: number;
+  relevanceBoost: number;
 };
 
 type TrendTopic = {
@@ -21,13 +22,13 @@ type TopicRule = {
   pattern: RegExp;
 };
 
-const SEARCH_QUERIES = [
+const BASE_SEARCH_QUERIES = [
   'marketing AI SEO',
   'generative engine optimization',
   'content marketing AI search',
 ];
 
-const TOPIC_RULES: TopicRule[] = [
+const BASE_TOPIC_RULES: TopicRule[] = [
   { label: 'AI Search', pattern: /ai search|llm optimization|generative ai/i },
   { label: 'AI-powered SEO', pattern: /ai[- ]powered seo|ai driven seo|ai seo|seo with ai/i },
   { label: 'Generative Engine Optimization', pattern: /\bgeo\b|generative engine optimization/i },
@@ -40,6 +41,9 @@ const TOPIC_RULES: TopicRule[] = [
 
 const MAX_ARTICLES = 8;
 const MAX_TOPICS = 6;
+const MAX_COMPANY_QUERIES = 4;
+const MAX_COMPANY_TOPIC_RULES = 6;
+const COMPANY_BOOST = 5;
 
 function decodeXmlEntities(value: string): string {
   return value
@@ -100,7 +104,7 @@ function formatPublishedAt(value: string): string {
   });
 }
 
-function parseRss(xml: string): TrendArticleRecord[] {
+function parseRss(xml: string, relevanceBoost = 0): TrendArticleRecord[] {
   const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/gi) ?? [];
 
   return itemMatches
@@ -116,12 +120,13 @@ function parseRss(xml: string): TrendArticleRecord[] {
         source,
         publishedAt: formatPublishedAt(publishedAt),
         publishedAtMs: parsePublishedAt(publishedAt),
+        relevanceBoost,
       } satisfies TrendArticleRecord;
     })
     .filter((article) => article.title && article.url);
 }
 
-async function fetchTrendFeed(query: string): Promise<TrendArticleRecord[]> {
+async function fetchTrendFeed(query: string, relevanceBoost = 0): Promise<TrendArticleRecord[]> {
   const response = await fetch(
     `https://www.bing.com/news/search?q=${encodeURIComponent(query)}&format=rss`,
     {
@@ -137,34 +142,84 @@ async function fetchTrendFeed(query: string): Promise<TrendArticleRecord[]> {
   }
 
   const xml = await response.text();
-  return parseRss(xml);
+  return parseRss(xml, relevanceBoost);
 }
 
-function deduplicateArticles(articles: TrendArticleRecord[]): TrendArticle[] {
+function deduplicateArticles(articles: TrendArticleRecord[], companyTerms: string[]): TrendArticle[] {
   const articleMap = new Map<string, TrendArticleRecord>();
 
   for (const article of articles) {
     const key = article.url || article.title;
     const existingArticle = articleMap.get(key);
 
+    const merged: TrendArticleRecord = {
+      ...article,
+      relevanceBoost: Math.max(article.relevanceBoost, existingArticle?.relevanceBoost ?? 0),
+    };
+
     if (!existingArticle || article.publishedAtMs > existingArticle.publishedAtMs) {
-      articleMap.set(key, article);
+      articleMap.set(key, merged);
+    } else {
+      articleMap.set(key, { ...existingArticle, relevanceBoost: merged.relevanceBoost });
     }
   }
 
+  const lowerTerms = companyTerms.map((term) => term.toLowerCase()).filter(Boolean);
+
   return Array.from(articleMap.values())
-    .sort((left, right) => right.publishedAtMs - left.publishedAtMs)
+    .map((article) => {
+      if (lowerTerms.length === 0) {
+        return article;
+      }
+      const titleLower = article.title.toLowerCase();
+      const titleMatches = lowerTerms.filter((term) => titleLower.includes(term)).length;
+      return {
+        ...article,
+        relevanceBoost: article.relevanceBoost + titleMatches * COMPANY_BOOST,
+      };
+    })
+    .sort((left, right) => {
+      if (right.relevanceBoost !== left.relevanceBoost) {
+        return right.relevanceBoost - left.relevanceBoost;
+      }
+      return right.publishedAtMs - left.publishedAtMs;
+    })
     .slice(0, MAX_ARTICLES)
-    .map(({ publishedAtMs, ...article }) => article);
+    .map(({ publishedAtMs, relevanceBoost, ...article }) => {
+      void publishedAtMs;
+      void relevanceBoost;
+      return article;
+    });
 }
 
-function deriveTopics(articles: TrendArticle[]): TrendTopic[] {
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildCompanyTopicRules(companyTerms: string[]): TopicRule[] {
+  return companyTerms
+    .slice(0, MAX_COMPANY_TOPIC_RULES)
+    .map((term) => {
+      const trimmed = term.trim();
+      if (!trimmed) {
+        return null;
+      }
+      return {
+        label: trimmed,
+        pattern: new RegExp(`\\b${escapeRegex(trimmed)}\\b`, 'i'),
+      };
+    })
+    .filter((rule): rule is TopicRule => rule !== null);
+}
+
+function deriveTopics(articles: TrendArticle[], companyTerms: string[]): TrendTopic[] {
   const tallies = new Map<string, number>();
+  const topicRules = [...buildCompanyTopicRules(companyTerms), ...BASE_TOPIC_RULES];
 
   for (const article of articles) {
     const matchedLabels = new Set<string>();
 
-    for (const rule of TOPIC_RULES) {
+    for (const rule of topicRules) {
       if (rule.pattern.test(article.title)) {
         matchedLabels.add(rule.label);
       }
@@ -194,16 +249,58 @@ function deriveTopics(articles: TrendArticle[]): TrendTopic[] {
     .map(([label, count]) => ({ label, count }));
 }
 
-export async function GET(): Promise<NextResponse> {
+function parseCompanyTerms(rawValue: string | null): string[] {
+  if (!rawValue) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      rawValue
+        .split(/[,\n]/)
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length >= 2 && entry.length <= 60),
+    ),
+  );
+}
+
+function buildCompanyQueries(companyTerms: string[]): string[] {
+  if (companyTerms.length === 0) {
+    return [];
+  }
+
+  const queries = new Set<string>();
+  for (const term of companyTerms) {
+    queries.add(`${term} marketing`);
+    queries.add(`${term} content strategy`);
+    if (queries.size >= MAX_COMPANY_QUERIES) {
+      break;
+    }
+  }
+  return Array.from(queries).slice(0, MAX_COMPANY_QUERIES);
+}
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const companyTerms = parseCompanyTerms(request.nextUrl.searchParams.get('companyTerms'));
+  const companyQueries = buildCompanyQueries(companyTerms);
+
+  const queries: Array<{ query: string; relevanceBoost: number }> = [
+    ...companyQueries.map((query) => ({ query, relevanceBoost: COMPANY_BOOST })),
+    ...BASE_SEARCH_QUERIES.map((query) => ({ query, relevanceBoost: 0 })),
+  ];
+
   try {
-    const feedResults = await Promise.all(SEARCH_QUERIES.map((query) => fetchTrendFeed(query)));
-    const articles = deduplicateArticles(feedResults.flat());
-    const topics = deriveTopics(articles);
+    const feedResults = await Promise.all(
+      queries.map(({ query, relevanceBoost }) => fetchTrendFeed(query, relevanceBoost)),
+    );
+    const articles = deduplicateArticles(feedResults.flat(), companyTerms);
+    const topics = deriveTopics(articles, companyTerms);
 
     return NextResponse.json({
       topics,
       articles,
       fetchedAt: new Date().toISOString(),
+      companyTermsApplied: companyTerms,
     });
   } catch {
     return NextResponse.json(

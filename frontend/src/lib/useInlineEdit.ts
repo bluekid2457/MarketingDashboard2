@@ -1,6 +1,7 @@
 import { type Dispatch, type SetStateAction, useCallback, useMemo, useState } from 'react';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 
 export type InlineSelection = {
   start: number;
@@ -102,6 +103,9 @@ export function useInlineEdit({ text, setText }: UseInlineEditArgs) {
       setError(null);
 
       try {
+        const companyProfile = await loadCompanyProfile(null);
+        const companyContext = companyProfileToContextLines(companyProfile);
+
         const response = await fetch('/api/drafts/inline-edit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -115,6 +119,7 @@ export function useInlineEdit({ text, setText }: UseInlineEditArgs) {
             selectionStart: trimmedSelection ? selection.start : undefined,
             selectionEnd: trimmedSelection ? selection.end : undefined,
             instruction: trimmedInstruction,
+            companyContext,
           }),
         });
 

@@ -16,7 +16,17 @@ type PersonasRequestBody = {
   ollamaModel?: string;
   draft?: string;
   personas?: PersonaTarget[];
+  companyContext?: string[];
 };
+
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
 
 type PersonaVariant = {
   id: string;
@@ -79,6 +89,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<PersonasA
   const personas = Array.isArray(body.personas) ? body.personas : [];
   const ollamaBaseUrl = typeof body.ollamaBaseUrl === 'string' ? body.ollamaBaseUrl.trim() : DEFAULT_OLLAMA_BASE_URL;
   const ollamaModel = typeof body.ollamaModel === 'string' && body.ollamaModel.trim() ? body.ollamaModel.trim() : DEFAULT_OLLAMA_MODEL;
+  const companyContext = normalizeContextLines(body.companyContext);
 
   if (!draft) {
     return NextResponse.json({ error: 'Draft text is required.' }, { status: 400 });
@@ -90,11 +101,20 @@ export async function POST(request: NextRequest): Promise<NextResponse<PersonasA
     return NextResponse.json({ error: 'No API key provided.' }, { status: 400 });
   }
 
+  const companyBlock = companyContext.length > 0
+    ? [
+        '',
+        'Company context (use to keep product references and brand voice consistent across all persona variants):',
+        ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
+
   const userPrompt = [
     'Original draft:',
     '---',
     draft,
     '---',
+    ...companyBlock,
     '',
     'Generate one rewrite per persona below. Match each output object\'s "id" and "name" exactly to the persona it targets.',
     'Personas:',
@@ -107,6 +127,13 @@ export async function POST(request: NextRequest): Promise<NextResponse<PersonasA
       { role: 'user', content: userPrompt },
     ];
 
+    const draftTokensEstimate = Math.ceil(draft.length / 4);
+    const personasOverhead = 200;
+    const requestedMaxTokens = Math.min(
+      16000,
+      Math.max(4000, draftTokensEstimate * personas.length + personasOverhead * personas.length),
+    );
+
     const raw = await callAI({
       provider: provider as AIProvider,
       apiKey,
@@ -114,13 +141,17 @@ export async function POST(request: NextRequest): Promise<NextResponse<PersonasA
       ollamaModel,
       messages,
       temperature: 0.5,
-      maxTokens: 4000,
+      maxTokens: requestedMaxTokens,
       tag: '[API Draft Personas]',
     });
 
     const parsed = safeJsonParse(raw) as { variants?: unknown } | null;
     if (!parsed || !Array.isArray(parsed.variants)) {
-      return NextResponse.json({ error: 'AI returned an unexpected format.' }, { status: 502 });
+      console.error('[API Draft Personas] Failed to parse AI response. Raw output:', raw.slice(0, 500));
+      return NextResponse.json(
+        { error: 'AI returned an unexpected format. The output may have been truncated — try fewer personas or a shorter draft.' },
+        { status: 502 },
+      );
     }
 
     const variants: PersonaVariant[] = (parsed.variants as Array<Record<string, unknown>>).map((entry, index) => {

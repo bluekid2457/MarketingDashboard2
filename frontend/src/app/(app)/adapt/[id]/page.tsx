@@ -8,7 +8,9 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { Spinner } from '@/components/Spinner';
 import { InlineEditPanel } from '@/components/InlineEditPanel';
 import { DraftChatPanel, type DraftChatMessage } from '@/components/DraftChatPanel';
+import { AIToolbox, type PersonaVariant, type PlagiarismResult } from '@/components/AIToolbox';
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { useInlineEdit, type InlineSelection } from '@/lib/useInlineEdit';
@@ -89,6 +91,15 @@ type FloatingAnchor = {
 };
 
 type PlatformChatDiffMap = Record<PlatformKey, ChatSentenceDiff[]>;
+
+type PersonaTab = {
+  id: string;
+  basePlatform: PlatformKey;
+  personaName: string;
+  description: string;
+  pitchAdjustment: string;
+  draft: string;
+};
 
 const ADAPT_CONTEXT_STORAGE_KEY = 'adapt_draft_context';
 const SAVE_DEBOUNCE_MS = 1500;
@@ -270,6 +281,38 @@ export default function AdaptPage() {
   });
   const [chatError, setChatError] = useState<string | null>(null);
   const [isChatSending, setIsChatSending] = useState(false);
+  const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+  const [personaTabs, setPersonaTabs] = useState<PersonaTab[]>([]);
+  const [activePersonaTabId, setActivePersonaTabId] = useState<string | null>(null);
+  const [toolboxNoticeByPlatform, setToolboxNoticeByPlatform] = useState<Record<PlatformKey, string | null>>({
+    linkedin: null,
+    twitter: null,
+    medium: null,
+    newsletter: null,
+    blog: null,
+  });
+  const [plagiarismByPlatform, setPlagiarismByPlatform] = useState<Record<PlatformKey, PlagiarismResult | null>>({
+    linkedin: null,
+    twitter: null,
+    medium: null,
+    newsletter: null,
+    blog: null,
+  });
+
+  useEffect(() => {
+    const refreshKey = (): void => {
+      const config = getActiveAIKey();
+      setHasApiKey(config.provider === 'ollama' ? Boolean(config.ollamaModel.trim()) : Boolean(config.apiKey));
+    };
+    refreshKey();
+    const handler = (): void => refreshKey();
+    window.addEventListener('storage', handler);
+    window.addEventListener('focus', handler);
+    return () => {
+      window.removeEventListener('storage', handler);
+      window.removeEventListener('focus', handler);
+    };
+  }, []);
 
   const applyAdaptContext = useCallback((context: AdaptDraftContext) => {
     setAdaptContext(context);
@@ -286,6 +329,8 @@ export default function AdaptPage() {
     setSavedAt(null);
     lastSavedSignatureRef.current = null;
     setContextError(null);
+    setPersonaTabs([]);
+    setActivePersonaTabId(null);
   }, []);
 
   useEffect(() => {
@@ -646,6 +691,9 @@ export default function AdaptPage() {
       }));
 
       try {
+        const companyProfile = await loadCompanyProfile(currentUid);
+        const companyContext = companyProfileToContextLines(companyProfile);
+
         const response = await fetch('/api/drafts/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -657,6 +705,7 @@ export default function AdaptPage() {
             draft,
             type: 'seo',
             platform,
+            companyContext,
           }),
         });
 
@@ -694,7 +743,7 @@ export default function AdaptPage() {
         }));
       }
     },
-    [],
+    [currentUid],
   );
 
   const generatePlatform = useCallback(
@@ -746,6 +795,9 @@ export default function AdaptPage() {
       }));
 
       try {
+        const companyProfile = await loadCompanyProfile(currentUid);
+        const companyContext = companyProfileToContextLines(companyProfile);
+
         const response = await fetch('/api/drafts/adapt', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -757,6 +809,7 @@ export default function AdaptPage() {
             platform,
             sourceDraft: adaptContext.draftContent,
             currentPlatformDraft: platforms[platform] ?? '',
+            companyContext,
           }),
         });
 
@@ -813,7 +866,7 @@ export default function AdaptPage() {
         }));
       }
     },
-    [adaptContext, platforms, runSeoForPlatform, saveAdaptation, selectedPlatforms],
+    [adaptContext, currentUid, platforms, runSeoForPlatform, saveAdaptation, selectedPlatforms],
   );
 
   const startSequentialGeneration = useCallback(async (): Promise<void> => {
@@ -972,6 +1025,9 @@ export default function AdaptPage() {
     }));
 
     try {
+      const companyProfile = await loadCompanyProfile(currentUid);
+      const companyContext = companyProfileToContextLines(companyProfile);
+
       const response = await fetch('/api/drafts/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -983,6 +1039,7 @@ export default function AdaptPage() {
           draft: activeDraft,
           messages: historyForPlatform,
           userMessage: nextMessage,
+          companyContext,
         }),
       });
 
@@ -1018,7 +1075,7 @@ export default function AdaptPage() {
     } finally {
       setIsChatSending(false);
     }
-  }, [activePlatform, chatHistoryByPlatform, chatInputByPlatform, platforms]);
+  }, [activePlatform, chatHistoryByPlatform, chatInputByPlatform, currentUid, platforms]);
 
   const handleKeepPlatformChatDiff = useCallback(
     (diffId: string): void => {
@@ -1249,9 +1306,12 @@ export default function AdaptPage() {
                     <button
                       key={platformMeta.key}
                       type="button"
-                      onClick={() => setActivePlatform(platformMeta.key)}
+                      onClick={() => {
+                        setActivePlatform(platformMeta.key);
+                        setActivePersonaTabId(null);
+                      }}
                       className={`flex items-center gap-1.5 rounded-t-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
-                        isActive
+                        isActive && activePersonaTabId === null
                           ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
                           : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
                       }`}
@@ -1266,9 +1326,133 @@ export default function AdaptPage() {
                     </button>
                   );
                 })}
+
+                {personaTabs.map((tab) => {
+                  const baseMeta = PLATFORM_CONFIG.find((p) => p.key === tab.basePlatform) ?? PLATFORM_CONFIG[0];
+                  const isActive = activePersonaTabId === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => {
+                        setActivePlatform(tab.basePlatform);
+                        setActivePersonaTabId(tab.id);
+                      }}
+                      className={`flex items-center gap-1.5 rounded-t-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                        isActive
+                          ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                      }`}
+                      title={tab.description || tab.personaName}
+                    >
+                      <span
+                        className={`inline-flex h-4 min-w-4 items-center justify-center rounded text-[9px] font-bold text-white ${baseMeta.accentClass}`}
+                      >
+                        {baseMeta.label.slice(0, 1)}
+                      </span>
+                      <span>
+                        {baseMeta.label} ({tab.personaName})
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
 
-              {(() => {
+              {activePersonaTabId !== null && personaTabs.some((tab) => tab.id === activePersonaTabId)
+                ? (() => {
+                    const tab = personaTabs.find((entry) => entry.id === activePersonaTabId)!;
+                    const baseMeta = PLATFORM_CONFIG.find((p) => p.key === tab.basePlatform) ?? PLATFORM_CONFIG[0];
+                    const personaWords = tab.draft.trim() ? tab.draft.trim().split(/\s+/).length : 0;
+
+                    const updatePersonaDraft = (nextDraft: string): void => {
+                      setPersonaTabs((previous) =>
+                        previous.map((entry) => (entry.id === tab.id ? { ...entry, draft: nextDraft } : entry)),
+                      );
+                    };
+
+                    return (
+                      <div className="rounded-xl border border-slate-200 bg-white p-4">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`inline-flex h-5 min-w-5 items-center justify-center rounded text-[10px] font-bold text-white ${baseMeta.accentClass}`}
+                            >
+                              {baseMeta.label.slice(0, 1)}
+                            </span>
+                            <span className="font-semibold text-slate-800">
+                              {baseMeta.label} ({tab.personaName})
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">{personaWords} words</span>
+                            <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-semibold text-emerald-700">persona</span>
+                          </div>
+                        </div>
+
+                        {tab.description ? (
+                          <p className="mb-1 text-xs text-slate-500">{tab.description}</p>
+                        ) : null}
+                        {tab.pitchAdjustment ? (
+                          <p className="mb-3 text-xs italic text-slate-500">Pitch shift: {tab.pitchAdjustment}</p>
+                        ) : null}
+
+                        <textarea
+                          className="min-h-[180px] w-full resize-y rounded-xl border border-slate-300 p-3 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
+                          value={tab.draft}
+                          onChange={(event) => updatePersonaDraft(event.target.value)}
+                        />
+
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800"
+                            onClick={() => {
+                              setPlatforms((previous) => ({ ...previous, [tab.basePlatform]: tab.draft }));
+                              setContentVersion((previous) => ({
+                                ...previous,
+                                [tab.basePlatform]: previous[tab.basePlatform] + 1,
+                              }));
+                              setActivePlatform(tab.basePlatform);
+                              setActivePersonaTabId(null);
+                            }}
+                          >
+                            Promote to {baseMeta.label}
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            onClick={() => {
+                              setPersonaTabs((previous) => previous.filter((entry) => entry.id !== tab.id));
+                              setActivePersonaTabId(null);
+                            }}
+                          >
+                            Remove tab
+                          </button>
+                        </div>
+
+                        <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                          <AIToolbox
+                            draft={tab.draft}
+                            ideaContext={
+                              adaptContext
+                                ? {
+                                    topic: adaptContext.idea.topic,
+                                    audience: tab.personaName,
+                                    tone: adaptContext.idea.tone,
+                                    format: baseMeta.label,
+                                  }
+                                : null
+                            }
+                            hasApiKeyConfigured={hasApiKey}
+                            onApplyDraft={(nextDraft) => updatePersonaDraft(nextDraft)}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()
+                : null}
+
+              {activePersonaTabId !== null && personaTabs.some((tab) => tab.id === activePersonaTabId) ? null : (() => {
                 const platformMeta = PLATFORM_CONFIG.find((p) => p.key === activePlatform) ?? PLATFORM_CONFIG[0];
                 const state = platformStates[activePlatform];
                 const seo = seoByPlatform[activePlatform];
@@ -1483,6 +1667,64 @@ export default function AdaptPage() {
                         </div>
                       </div>
                     ) : null}
+
+                    <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                      <AIToolbox
+                        draft={text}
+                        ideaContext={
+                          adaptContext
+                            ? {
+                                topic: adaptContext.idea.topic,
+                                audience: adaptContext.idea.audience,
+                                tone: adaptContext.idea.tone,
+                                format: platformMeta.label,
+                              }
+                            : null
+                        }
+                        hasApiKeyConfigured={hasApiKey}
+                        onApplyDraft={(nextDraft, summary) => {
+                          setPlatforms((previous) => ({
+                            ...previous,
+                            [activePlatform]: nextDraft,
+                          }));
+                          setContentVersion((previous) => ({
+                            ...previous,
+                            [activePlatform]: previous[activePlatform] + 1,
+                          }));
+                          setToolboxNoticeByPlatform((previous) => ({
+                            ...previous,
+                            [activePlatform]: summary,
+                          }));
+                          setPlagiarismByPlatform((previous) => ({
+                            ...previous,
+                            [activePlatform]: null,
+                          }));
+                        }}
+                        onPlagiarismResult={(result) =>
+                          setPlagiarismByPlatform((previous) => ({
+                            ...previous,
+                            [activePlatform]: result,
+                          }))
+                        }
+                        onPersonaVariantsGenerated={(variants) => {
+                          if (variants.length === 0) return;
+                          const basePlatform = activePlatform;
+                          const newTabs: PersonaTab[] = variants.map((variant) => ({
+                            id: `${basePlatform}-${variant.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                            basePlatform,
+                            personaName: variant.name,
+                            description: variant.description,
+                            pitchAdjustment: variant.pitchAdjustment,
+                            draft: variant.draft,
+                          }));
+                          setPersonaTabs((previous) => [...previous, ...newTabs]);
+                          setActivePersonaTabId(newTabs[0].id);
+                        }}
+                      />
+                      {toolboxNoticeByPlatform[activePlatform] ? (
+                        <p className="mt-2 text-xs text-emerald-700">{toolboxNoticeByPlatform[activePlatform]}</p>
+                      ) : null}
+                    </div>
                   </div>
                 );
               })()}

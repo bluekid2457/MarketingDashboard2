@@ -20,6 +20,7 @@ import {
 } from 'firebase/firestore';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { companyProfileToTrendTerms, loadCompanyProfileFromCache } from '@/lib/companyProfile';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { setWorkflowContext } from '@/lib/workflowContext';
 import { Spinner } from '@/components/Spinner';
@@ -607,7 +608,11 @@ export default function IdeasPage() {
       setTrendsError(null);
 
       try {
-        const response = await fetch('/api/trends', { signal: controller.signal });
+        const trendTerms = companyProfileToTrendTerms(loadCompanyProfileFromCache());
+        const trendsUrl = trendTerms.length > 0
+          ? `/api/trends?companyTerms=${encodeURIComponent(trendTerms.join(','))}`
+          : '/api/trends';
+        const response = await fetch(trendsUrl, { signal: controller.signal });
 
         if (!response.ok) {
           throw new Error('Trend request failed.');

@@ -12,7 +12,17 @@ type HeadlinesRequestBody = {
   topic?: string;
   audience?: string;
   count?: number;
+  companyContext?: string[];
 };
+
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
 
 type HeadlineVariant = {
   id: string;
@@ -74,6 +84,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<Headlines
   const requestedCount = Number.isFinite(body.count) ? Math.max(2, Math.min(5, Math.floor(body.count as number))) : 5;
   const ollamaBaseUrl = typeof body.ollamaBaseUrl === 'string' ? body.ollamaBaseUrl.trim() : DEFAULT_OLLAMA_BASE_URL;
   const ollamaModel = typeof body.ollamaModel === 'string' && body.ollamaModel.trim() ? body.ollamaModel.trim() : DEFAULT_OLLAMA_MODEL;
+  const companyContext = normalizeContextLines(body.companyContext);
 
   if (!draft) {
     return NextResponse.json({ error: 'Draft text is required.' }, { status: 400 });
@@ -82,10 +93,19 @@ export async function POST(request: NextRequest): Promise<NextResponse<Headlines
     return NextResponse.json({ error: 'No API key provided.' }, { status: 400 });
   }
 
+  const companyLines = companyContext.length > 0
+    ? [
+        '',
+        'Company context (use to ground product references and brand voice in the headlines):',
+        ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
+
   const userPrompt = [
     `Generate ${requestedCount} distinct A/B headline variants for this draft.`,
     topic ? `Topic: ${topic}` : null,
     audience ? `Audience: ${audience}` : null,
+    ...companyLines,
     '',
     'Draft:',
     '---',

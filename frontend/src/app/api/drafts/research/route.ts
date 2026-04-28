@@ -12,7 +12,17 @@ type ResearchRequestBody = {
   audience?: string;
   draft?: string;
   query?: string;
+  companyContext?: string[];
 };
+
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
 
 type ResearchSource = {
   title: string;
@@ -200,6 +210,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ResearchA
   const explicitQuery = typeof body.query === 'string' ? body.query.trim() : '';
   const ollamaBaseUrl = typeof body.ollamaBaseUrl === 'string' ? body.ollamaBaseUrl.trim() : DEFAULT_OLLAMA_BASE_URL;
   const ollamaModel = typeof body.ollamaModel === 'string' && body.ollamaModel.trim() ? body.ollamaModel.trim() : DEFAULT_OLLAMA_MODEL;
+  const companyContext = normalizeContextLines(body.companyContext);
 
   const query = explicitQuery || [topic, audience].filter(Boolean).join(' ').trim();
   if (!query) {
@@ -217,9 +228,18 @@ export async function POST(request: NextRequest): Promise<NextResponse<ResearchA
         .join('\n\n')
     : '(No live web search results were available. Use draft context to suggest research questions and explicitly mark them as "needs verification".)';
 
+  const companyLines = companyContext.length > 0
+    ? [
+        '',
+        'Company context (use to bias relevance toward findings that fit this company\'s industry, audience, and product):',
+        ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
+
   const userPrompt = [
     `Topic: ${query}`,
     audience ? `Audience: ${audience}` : null,
+    ...companyLines,
     '',
     'Search results to ground the brief:',
     sourcesForPrompt,

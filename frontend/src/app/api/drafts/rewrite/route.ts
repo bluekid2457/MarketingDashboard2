@@ -18,7 +18,17 @@ type RewriteRequestBody = {
   complexityDescription?: string;
   audienceHint?: string;
   fleschTarget?: number;
+  companyContext?: string[];
 };
+
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
 
 type RewriteApiResponse = {
   updatedDraft?: string;
@@ -27,7 +37,7 @@ type RewriteApiResponse = {
   error?: string;
 };
 
-function buildSystemPrompt(body: RewriteRequestBody): string {
+function buildSystemPrompt(body: RewriteRequestBody, companyContext: string[]): string {
   const lines: string[] = [
     'You are a senior content editor.',
     'You will rewrite the user\'s draft and return the FULL updated draft only.',
@@ -60,6 +70,14 @@ function buildSystemPrompt(body: RewriteRequestBody): string {
     }
   }
 
+  if (companyContext.length > 0) {
+    lines.push('');
+    lines.push('Company context (preserve product references and brand voice when rewriting):');
+    for (const entry of companyContext) {
+      lines.push(`- ${entry}`);
+    }
+  }
+
   lines.push('Output only the rewritten draft text.');
   return lines.join('\n');
 }
@@ -77,6 +95,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<RewriteAp
   const draft = typeof body.draft === 'string' ? body.draft.trim() : '';
   const ollamaBaseUrl = typeof body.ollamaBaseUrl === 'string' ? body.ollamaBaseUrl.trim() : DEFAULT_OLLAMA_BASE_URL;
   const ollamaModel = typeof body.ollamaModel === 'string' && body.ollamaModel.trim() ? body.ollamaModel.trim() : DEFAULT_OLLAMA_MODEL;
+  const companyContext = normalizeContextLines(body.companyContext);
 
   if (!draft) {
     return NextResponse.json({ error: 'Draft text is required.' }, { status: 400 });
@@ -86,7 +105,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<RewriteAp
     return NextResponse.json({ error: 'No API key provided.' }, { status: 400 });
   }
 
-  const systemPrompt = buildSystemPrompt(body);
+  const systemPrompt = buildSystemPrompt(body, companyContext);
 
   try {
     const messages: AIMessage[] = [

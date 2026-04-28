@@ -6,6 +6,7 @@ import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { Spinner } from '@/components/Spinner';
 import { InlineEditPanel } from '@/components/InlineEditPanel';
@@ -15,6 +16,7 @@ import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type Chat
 import WorkflowStepper from '@/components/WorkflowStepper';
 import { runCitationCheck } from '@/lib/citationCheck';
 import { AIToolbox, type PlagiarismResult } from '@/components/AIToolbox';
+import { DiffAwareEditor } from '@/components/DiffAwareEditor';
 
 type IdeaRecord = {
   id: string;
@@ -355,6 +357,9 @@ export default function StoryboardEditorPage() {
     setIsGeneratingStoryboard(true);
 
     try {
+      const companyProfile = await loadCompanyProfile(currentUid);
+      const companyContext = companyProfileToContextLines(companyProfile);
+
       const response = await fetch('/api/drafts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -370,6 +375,7 @@ export default function StoryboardEditorPage() {
             format: storyboardContext.idea.format,
           },
           angle: storyboardContext.selectedAngle,
+          companyContext,
         }),
       });
 
@@ -385,7 +391,7 @@ export default function StoryboardEditorPage() {
     } finally {
       setIsGeneratingStoryboard(false);
     }
-  }, [storyboardContext]);
+  }, [currentUid, storyboardContext]);
 
   useEffect(() => {
     if (!storyboardContext || !firebaseLoaded || storyboardText || isGeneratingStoryboard) return;
@@ -423,10 +429,6 @@ export default function StoryboardEditorPage() {
   const activePendingInlineChange = useMemo(
     () => inlineEditor.changes.find((change) => change.status === 'pending') ?? null,
     [inlineEditor.changes],
-  );
-  const visibleChatDiffs = useMemo(
-    () => chatPendingDiffs.filter((diff) => diff.status === 'pending' || diff.status === 'conflict'),
-    [chatPendingDiffs],
   );
   const pendingChatDiffCount = useMemo(
     () => chatPendingDiffs.filter((diff) => diff.status === 'pending').length,
@@ -531,6 +533,9 @@ export default function StoryboardEditorPage() {
     setChatError(null);
 
     try {
+      const companyProfile = await loadCompanyProfile(currentUid);
+      const companyContext = companyProfileToContextLines(companyProfile);
+
       const response = await fetch('/api/drafts/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -542,6 +547,7 @@ export default function StoryboardEditorPage() {
           draft: storyboardText,
           messages: chatMessages,
           userMessage: nextMessage,
+          companyContext,
         }),
       });
 
@@ -567,7 +573,7 @@ export default function StoryboardEditorPage() {
     } finally {
       setIsChatSending(false);
     }
-  }, [chatInput, chatMessages, storyboardText]);
+  }, [chatInput, chatMessages, currentUid, storyboardText]);
 
   const canAdaptStoryboard = Boolean(storyboardContext && storyboardText.trim());
 
@@ -677,83 +683,48 @@ export default function StoryboardEditorPage() {
               </div>
             ) : null}
 
-            <div className="relative">
-              <textarea
-                ref={editorRef}
-                className="min-h-[480px] w-full resize-y rounded-xl border border-slate-300 p-4 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
-                value={storyboardText}
-                onChange={(event) => {
-                  setStoryboardText(event.target.value);
-                }}
-                onSelect={captureSelection}
-                onKeyUp={captureSelection}
-                onMouseUp={captureSelection}
-                placeholder="Your storyboard draft appears here."
-                spellCheck
-              />
-
-              {visibleChatDiffs.length > 0 ? (
-                <div className="pointer-events-none absolute inset-x-3 bottom-3 max-h-56 overflow-auto rounded-xl border border-slate-300 bg-white/95 p-2 shadow-sm">
-                  <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                    Pending AI sentence diffs in editor
-                  </p>
-                  <div className="space-y-2">
-                    {visibleChatDiffs.map((diff) => (
-                      <div key={diff.id} className="pointer-events-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
-                        <p className="mb-1 text-[11px] font-semibold text-slate-600">Sentence change</p>
-                        <p className="rounded bg-red-50 px-2 py-1 text-xs text-red-800 line-through">{diff.beforeText || '(insert)'}</p>
-                        <p className="mt-1 rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-800">{diff.afterText || '(remove)'}</p>
-                        {diff.message ? <p className="mt-1 text-[11px] text-amber-700">{diff.message}</p> : null}
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            className="rounded-md bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
-                            onClick={() => handleKeepChatDiff(diff.id)}
-                            disabled={diff.status !== 'pending'}
-                            aria-label="Keep this sentence diff"
-                          >
-                            Keep
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded-md border border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
-                            onClick={() => handleUndoChatDiff(diff.id)}
-                            aria-label="Undo this sentence diff"
-                          >
-                            Undo
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              <InlineEditPanel
-                isVisible={hasInlineOverlay}
-                anchorTop={floatingAnchor.top}
-                anchorLeft={floatingAnchor.left}
-                selectedText={selection.text}
-                instruction={instruction}
-                onInstructionChange={setInstruction}
-                onPropose={() => {
-                  void handleProposeInlineEdit();
-                }}
-                isLoading={inlineEditor.isLoading}
-                error={inlineEditor.error}
-                pendingChange={activePendingInlineChange}
-                onAcceptPending={() => {
-                  if (activePendingInlineChange) {
-                    inlineEditor.acceptChange(activePendingInlineChange.id);
-                  }
-                }}
-                onDenyPending={() => {
-                  if (activePendingInlineChange) {
-                    inlineEditor.denyChange(activePendingInlineChange.id);
-                  }
-                }}
-              />
-            </div>
+            <DiffAwareEditor
+              value={storyboardText}
+              onChange={setStoryboardText}
+              pendingDiffs={chatPendingDiffs}
+              onKeepDiff={handleKeepChatDiff}
+              onUndoDiff={handleUndoChatDiff}
+              onUndoAll={() => {
+                setChatPendingDiffs([]);
+                setChatError(null);
+              }}
+              editorRef={editorRef}
+              onSelect={captureSelection}
+              onKeyUp={captureSelection}
+              onMouseUp={captureSelection}
+              placeholder="Your storyboard draft appears here."
+              overlay={
+                <InlineEditPanel
+                  isVisible={hasInlineOverlay}
+                  anchorTop={floatingAnchor.top}
+                  anchorLeft={floatingAnchor.left}
+                  selectedText={selection.text}
+                  instruction={instruction}
+                  onInstructionChange={setInstruction}
+                  onPropose={() => {
+                    void handleProposeInlineEdit();
+                  }}
+                  isLoading={inlineEditor.isLoading}
+                  error={inlineEditor.error}
+                  pendingChange={activePendingInlineChange}
+                  onAcceptPending={() => {
+                    if (activePendingInlineChange) {
+                      inlineEditor.acceptChange(activePendingInlineChange.id);
+                    }
+                  }}
+                  onDenyPending={() => {
+                    if (activePendingInlineChange) {
+                      inlineEditor.denyChange(activePendingInlineChange.id);
+                    }
+                  }}
+                />
+              }
+            />
           </section>
 
           <section className="surface-card p-5">
