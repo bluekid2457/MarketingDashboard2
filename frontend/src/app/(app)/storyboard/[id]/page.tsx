@@ -9,9 +9,11 @@ import { getActiveAIKey } from '@/lib/aiConfig';
 import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { Spinner } from '@/components/Spinner';
+import { AIEditTimeline } from '@/components/AIEditTimeline';
 import { InlineEditPanel } from '@/components/InlineEditPanel';
 import { DraftChatPanel, type DraftChatMessage } from '@/components/DraftChatPanel';
 import { useInlineEdit, type InlineSelection } from '@/lib/useInlineEdit';
+import { appendAIEditHistory, createEmptyAIEditHistoryState, type AIEditHistoryState } from '@/lib/aiEditHistory';
 import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
 import WorkflowStepper from '@/components/WorkflowStepper';
 import { runCitationCheck } from '@/lib/citationCheck';
@@ -108,11 +110,22 @@ export default function StoryboardEditorPage() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatProvider, setChatProvider] = useState<string | null>(null);
   const [chatPendingDiffs, setChatPendingDiffs] = useState<ChatSentenceDiff[]>([]);
-  const inlineEditor = useInlineEdit({ text: storyboardText, setText: setStoryboardText });
 
   const [hasApiKey, setHasApiKey] = useState<boolean>(false);
   const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
   const [toolboxNotice, setToolboxNotice] = useState<string | null>(null);
+  const [aiHistory, setAiHistory] = useState<AIEditHistoryState>(createEmptyAIEditHistoryState());
+
+  const recordAIEdit = useCallback((previousContent: string, nextContent: string, summary: string, label: string): void => {
+    setAiHistory((previous) => appendAIEditHistory(previous, { previousContent, nextContent, summary, label }));
+  }, []);
+  const inlineEditor = useInlineEdit({
+    text: storyboardText,
+    setText: setStoryboardText,
+    onAcceptChange: (change, previousText, nextText) => {
+      recordAIEdit(previousText, nextText, change.summary, 'Inline edit');
+    },
+  });
 
   useEffect(() => {
     const refreshKey = (): void => {
@@ -384,6 +397,7 @@ export default function StoryboardEditorPage() {
         throw new Error(payload.error ?? 'Storyboard generation failed.');
       }
 
+      recordAIEdit(storyboardText, payload.draft, 'Generated a fresh storyboard draft.', 'Storyboard generation');
       setStoryboardText(payload.draft);
       setLastProvider(payload.provider ?? activeConfig.provider);
     } catch (error) {
@@ -391,7 +405,7 @@ export default function StoryboardEditorPage() {
     } finally {
       setIsGeneratingStoryboard(false);
     }
-  }, [currentUid, storyboardContext]);
+  }, [currentUid, recordAIEdit, storyboardContext, storyboardText]);
 
   useEffect(() => {
     if (!storyboardContext || !firebaseLoaded || storyboardText || isGeneratingStoryboard) return;
@@ -499,11 +513,26 @@ export default function StoryboardEditorPage() {
         );
 
         setChatError(null);
+        recordAIEdit(currentText, applied.nextText, 'Kept one AI chat sentence change.', 'Chat diff');
         return applied.nextText;
       });
     },
-    [chatPendingDiffs],
+    [chatPendingDiffs, recordAIEdit],
   );
+
+  const handleRestoreAIEdit = useCallback((entryId: string): void => {
+    const entry = aiHistory.entries.find((item) => item.id === entryId);
+    if (!entry) {
+      return;
+    }
+    setStoryboardText(entry.content);
+    setAiHistory((previous) => ({ ...previous, activeEntryId: entryId }));
+    setToolboxNotice(`Restored ${entry.label.toLowerCase()}.`);
+    setPlagiarismResult(null);
+    setChatPendingDiffs([]);
+    setChatError(null);
+    inlineEditor.setChanges([]);
+  }, [aiHistory.entries, inlineEditor]);
 
   const handleUndoChatDiff = useCallback((diffId: string): void => {
     setChatPendingDiffs((previous) => previous.filter((entry) => entry.id !== diffId));
@@ -683,48 +712,57 @@ export default function StoryboardEditorPage() {
               </div>
             ) : null}
 
-            <DiffAwareEditor
-              value={storyboardText}
-              onChange={setStoryboardText}
-              pendingDiffs={chatPendingDiffs}
-              onKeepDiff={handleKeepChatDiff}
-              onUndoDiff={handleUndoChatDiff}
-              onUndoAll={() => {
-                setChatPendingDiffs([]);
-                setChatError(null);
-              }}
-              editorRef={editorRef}
-              onSelect={captureSelection}
-              onKeyUp={captureSelection}
-              onMouseUp={captureSelection}
-              placeholder="Your storyboard draft appears here."
-              overlay={
-                <InlineEditPanel
-                  isVisible={hasInlineOverlay}
-                  anchorTop={floatingAnchor.top}
-                  anchorLeft={floatingAnchor.left}
-                  selectedText={selection.text}
-                  instruction={instruction}
-                  onInstructionChange={setInstruction}
-                  onPropose={() => {
-                    void handleProposeInlineEdit();
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start">
+                <DiffAwareEditor
+                  value={storyboardText}
+                  onChange={setStoryboardText}
+                  pendingDiffs={chatPendingDiffs}
+                  onKeepDiff={handleKeepChatDiff}
+                  onUndoDiff={handleUndoChatDiff}
+                  onUndoAll={() => {
+                    setChatPendingDiffs([]);
+                    setChatError(null);
                   }}
-                  isLoading={inlineEditor.isLoading}
-                  error={inlineEditor.error}
-                  pendingChange={activePendingInlineChange}
-                  onAcceptPending={() => {
-                    if (activePendingInlineChange) {
-                      inlineEditor.acceptChange(activePendingInlineChange.id);
-                    }
-                  }}
-                  onDenyPending={() => {
-                    if (activePendingInlineChange) {
-                      inlineEditor.denyChange(activePendingInlineChange.id);
-                    }
-                  }}
+                  editorRef={editorRef}
+                  onSelect={captureSelection}
+                  onKeyUp={captureSelection}
+                  onMouseUp={captureSelection}
+                  placeholder="Your storyboard draft appears here."
+                  overlay={
+                    <InlineEditPanel
+                      isVisible={hasInlineOverlay}
+                      anchorTop={floatingAnchor.top}
+                      anchorLeft={floatingAnchor.left}
+                      selectedText={selection.text}
+                      instruction={instruction}
+                      onInstructionChange={setInstruction}
+                      onPropose={() => {
+                        void handleProposeInlineEdit();
+                      }}
+                      isLoading={inlineEditor.isLoading}
+                      error={inlineEditor.error}
+                      pendingChange={activePendingInlineChange}
+                      onAcceptPending={() => {
+                        if (activePendingInlineChange) {
+                          inlineEditor.acceptChange(activePendingInlineChange.id);
+                        }
+                      }}
+                      onDenyPending={() => {
+                        if (activePendingInlineChange) {
+                          inlineEditor.denyChange(activePendingInlineChange.id);
+                        }
+                      }}
+                    />
+                  }
                 />
-              }
-            />
+                <div className="xl:sticky xl:top-5">
+                  <AIEditTimeline
+                    entries={aiHistory.entries}
+                    activeEntryId={aiHistory.activeEntryId}
+                    onRestore={handleRestoreAIEdit}
+                  />
+                </div>
+              </div>
           </section>
 
           <section className="surface-card p-5">
@@ -741,7 +779,8 @@ export default function StoryboardEditorPage() {
                   : null
               }
               hasApiKeyConfigured={hasApiKey}
-              onApplyDraft={(nextDraft, summary) => {
+              onApplyDraft={(nextDraft, summary, label) => {
+                recordAIEdit(storyboardText, nextDraft, summary, label ?? 'AI tool');
                 setStoryboardText(nextDraft);
                 setToolboxNotice(summary);
                 setPlagiarismResult(null);

@@ -6,10 +6,12 @@ import { doc, getDoc, deleteDoc, serverTimestamp, setDoc } from 'firebase/firest
 import { onAuthStateChanged } from 'firebase/auth';
 
 import { Spinner } from '@/components/Spinner';
+import { AIEditTimeline } from '@/components/AIEditTimeline';
 import { InlineEditPanel } from '@/components/InlineEditPanel';
 import { DraftChatPanel, type DraftChatMessage } from '@/components/DraftChatPanel';
-import { AIToolbox, type PersonaVariant, type PlagiarismResult } from '@/components/AIToolbox';
+import { AIToolbox, type PlagiarismResult } from '@/components/AIToolbox';
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { appendAIEditHistory, createEmptyAIEditHistoryState, type AIEditHistoryState } from '@/lib/aiEditHistory';
 import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
@@ -45,6 +47,7 @@ type PlatformContent = Record<PlatformKey, string>;
 type PlatformStateMap = Record<PlatformKey, PlatformState>;
 type SeoStateMap = Record<PlatformKey, SeoState>;
 type PlatformVersionMap = Record<PlatformKey, number>;
+type PlatformAIHistoryMap = Record<PlatformKey, AIEditHistoryState>;
 
 type PlatformState = {
   status: 'idle' | 'queued' | 'running' | 'success' | 'failed';
@@ -91,15 +94,6 @@ type FloatingAnchor = {
 };
 
 type PlatformChatDiffMap = Record<PlatformKey, ChatSentenceDiff[]>;
-
-type PersonaTab = {
-  id: string;
-  basePlatform: PlatformKey;
-  personaName: string;
-  description: string;
-  pitchAdjustment: string;
-  draft: string;
-};
 
 const ADAPT_CONTEXT_STORAGE_KEY = 'adapt_draft_context';
 const SAVE_DEBOUNCE_MS = 1500;
@@ -159,6 +153,16 @@ function createEmptyChatDiffState(): PlatformChatDiffMap {
     medium: [],
     newsletter: [],
     blog: [],
+  };
+}
+
+function createEmptyAIHistoryMap(): PlatformAIHistoryMap {
+  return {
+    linkedin: createEmptyAIEditHistoryState(),
+    twitter: createEmptyAIEditHistoryState(),
+    medium: createEmptyAIEditHistoryState(),
+    newsletter: createEmptyAIEditHistoryState(),
+    blog: createEmptyAIEditHistoryState(),
   };
 }
 
@@ -282,8 +286,7 @@ export default function AdaptPage() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [isChatSending, setIsChatSending] = useState(false);
   const [hasApiKey, setHasApiKey] = useState<boolean>(false);
-  const [personaTabs, setPersonaTabs] = useState<PersonaTab[]>([]);
-  const [activePersonaTabId, setActivePersonaTabId] = useState<string | null>(null);
+  const [aiHistoryByPlatform, setAiHistoryByPlatform] = useState<PlatformAIHistoryMap>(createEmptyAIHistoryMap);
   const [toolboxNoticeByPlatform, setToolboxNoticeByPlatform] = useState<Record<PlatformKey, string | null>>({
     linkedin: null,
     twitter: null,
@@ -329,8 +332,7 @@ export default function AdaptPage() {
     setSavedAt(null);
     lastSavedSignatureRef.current = null;
     setContextError(null);
-    setPersonaTabs([]);
-    setActivePersonaTabId(null);
+    setAiHistoryByPlatform(createEmptyAIHistoryMap());
   }, []);
 
   useEffect(() => {
@@ -640,9 +642,22 @@ export default function AdaptPage() {
     [activePlatform],
   );
 
+  const recordPlatformAIEdit = useCallback(
+    (platform: PlatformKey, previousContent: string, nextContent: string, summary: string, label: string): void => {
+      setAiHistoryByPlatform((previous) => ({
+        ...previous,
+        [platform]: appendAIEditHistory(previous[platform], { previousContent, nextContent, summary, label }),
+      }));
+    },
+    [],
+  );
+
   const inlineEditor = useInlineEdit({
     text: platforms[activePlatform] ?? '',
     setText: setActivePlatformText,
+    onAcceptChange: (change, previousText, nextText) => {
+      recordPlatformAIEdit(activePlatform, previousText, nextText, change.summary, 'Inline edit');
+    },
   });
   const activePendingInlineChange = useMemo(
     () => inlineEditor.changes.find((change) => change.status === 'pending') ?? null,
@@ -656,6 +671,7 @@ export default function AdaptPage() {
     () => (chatDiffsByPlatform[activePlatform] ?? []).filter((diff) => diff.status === 'pending').length,
     [activePlatform, chatDiffsByPlatform],
   );
+  const activeAiHistory = aiHistoryByPlatform[activePlatform];
 
   const captureSelection = useCallback(
     (platform: PlatformKey, target: HTMLTextAreaElement) => {
@@ -795,6 +811,7 @@ export default function AdaptPage() {
       }));
 
       try {
+        const previousPlatformDraft = platforms[platform] ?? '';
         const companyProfile = await loadCompanyProfile(currentUid);
         const companyContext = companyProfileToContextLines(companyProfile);
 
@@ -824,6 +841,13 @@ export default function AdaptPage() {
           ...previous,
           [platform]: generated,
         }));
+        recordPlatformAIEdit(
+          platform,
+          previousPlatformDraft,
+          generated,
+          `Generated a fresh ${PLATFORM_CONFIG.find((entry) => entry.key === platform)?.label ?? 'platform'} adaptation.`,
+          `${PLATFORM_CONFIG.find((entry) => entry.key === platform)?.label ?? 'Platform'} generation`,
+        );
         setContentVersion((previous) => {
           nextVersion = previous[platform] + 1;
           return {
@@ -866,7 +890,7 @@ export default function AdaptPage() {
         }));
       }
     },
-    [adaptContext, currentUid, platforms, runSeoForPlatform, saveAdaptation, selectedPlatforms],
+    [adaptContext, currentUid, platforms, recordPlatformAIEdit, runSeoForPlatform, saveAdaptation, selectedPlatforms],
   );
 
   const startSequentialGeneration = useCallback(async (): Promise<void> => {
@@ -1147,6 +1171,7 @@ export default function AdaptPage() {
           [platform]: versions[platform] + 1,
         }));
         setChatError(null);
+        recordPlatformAIEdit(platform, currentText, applied.nextText, 'Kept one AI chat sentence change.', 'Chat diff');
 
         return {
           ...previous,
@@ -1154,7 +1179,7 @@ export default function AdaptPage() {
         };
       });
     },
-    [activePlatform, chatDiffsByPlatform],
+    [activePlatform, chatDiffsByPlatform, recordPlatformAIEdit],
   );
 
   const handleUndoPlatformChatDiff = useCallback(
@@ -1167,6 +1192,47 @@ export default function AdaptPage() {
       setChatError(null);
     },
     [activePlatform],
+  );
+
+  const handleRestorePlatformAIEdit = useCallback(
+    (entryId: string): void => {
+      const platform = activePlatform;
+      const entry = aiHistoryByPlatform[platform].entries.find((item) => item.id === entryId);
+      if (!entry) {
+        return;
+      }
+
+      setPlatforms((previous) => ({
+        ...previous,
+        [platform]: entry.content,
+      }));
+      setContentVersion((previous) => ({
+        ...previous,
+        [platform]: previous[platform] + 1,
+      }));
+      setAiHistoryByPlatform((previous) => ({
+        ...previous,
+        [platform]: {
+          ...previous[platform],
+          activeEntryId: entryId,
+        },
+      }));
+      setToolboxNoticeByPlatform((previous) => ({
+        ...previous,
+        [platform]: `Restored ${entry.label.toLowerCase()}.`,
+      }));
+      setPlagiarismByPlatform((previous) => ({
+        ...previous,
+        [platform]: null,
+      }));
+      setChatDiffsByPlatform((previous) => ({
+        ...previous,
+        [platform]: [],
+      }));
+      setChatError(null);
+      inlineEditor.setChanges([]);
+    },
+    [activePlatform, aiHistoryByPlatform, inlineEditor],
   );
 
   return (
@@ -1306,12 +1372,9 @@ export default function AdaptPage() {
                     <button
                       key={platformMeta.key}
                       type="button"
-                      onClick={() => {
-                        setActivePlatform(platformMeta.key);
-                        setActivePersonaTabId(null);
-                      }}
+                      onClick={() => setActivePlatform(platformMeta.key)}
                       className={`flex items-center gap-1.5 rounded-t-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
-                        isActive && activePersonaTabId === null
+                        isActive
                           ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
                           : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
                       }`}
@@ -1326,133 +1389,9 @@ export default function AdaptPage() {
                     </button>
                   );
                 })}
-
-                {personaTabs.map((tab) => {
-                  const baseMeta = PLATFORM_CONFIG.find((p) => p.key === tab.basePlatform) ?? PLATFORM_CONFIG[0];
-                  const isActive = activePersonaTabId === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => {
-                        setActivePlatform(tab.basePlatform);
-                        setActivePersonaTabId(tab.id);
-                      }}
-                      className={`flex items-center gap-1.5 rounded-t-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
-                        isActive
-                          ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-                      }`}
-                      title={tab.description || tab.personaName}
-                    >
-                      <span
-                        className={`inline-flex h-4 min-w-4 items-center justify-center rounded text-[9px] font-bold text-white ${baseMeta.accentClass}`}
-                      >
-                        {baseMeta.label.slice(0, 1)}
-                      </span>
-                      <span>
-                        {baseMeta.label} ({tab.personaName})
-                      </span>
-                    </button>
-                  );
-                })}
               </div>
 
-              {activePersonaTabId !== null && personaTabs.some((tab) => tab.id === activePersonaTabId)
-                ? (() => {
-                    const tab = personaTabs.find((entry) => entry.id === activePersonaTabId)!;
-                    const baseMeta = PLATFORM_CONFIG.find((p) => p.key === tab.basePlatform) ?? PLATFORM_CONFIG[0];
-                    const personaWords = tab.draft.trim() ? tab.draft.trim().split(/\s+/).length : 0;
-
-                    const updatePersonaDraft = (nextDraft: string): void => {
-                      setPersonaTabs((previous) =>
-                        previous.map((entry) => (entry.id === tab.id ? { ...entry, draft: nextDraft } : entry)),
-                      );
-                    };
-
-                    return (
-                      <div className="rounded-xl border border-slate-200 bg-white p-4">
-                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`inline-flex h-5 min-w-5 items-center justify-center rounded text-[10px] font-bold text-white ${baseMeta.accentClass}`}
-                            >
-                              {baseMeta.label.slice(0, 1)}
-                            </span>
-                            <span className="font-semibold text-slate-800">
-                              {baseMeta.label} ({tab.personaName})
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2 text-xs">
-                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">{personaWords} words</span>
-                            <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-semibold text-emerald-700">persona</span>
-                          </div>
-                        </div>
-
-                        {tab.description ? (
-                          <p className="mb-1 text-xs text-slate-500">{tab.description}</p>
-                        ) : null}
-                        {tab.pitchAdjustment ? (
-                          <p className="mb-3 text-xs italic text-slate-500">Pitch shift: {tab.pitchAdjustment}</p>
-                        ) : null}
-
-                        <textarea
-                          className="min-h-[180px] w-full resize-y rounded-xl border border-slate-300 p-3 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
-                          value={tab.draft}
-                          onChange={(event) => updatePersonaDraft(event.target.value)}
-                        />
-
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800"
-                            onClick={() => {
-                              setPlatforms((previous) => ({ ...previous, [tab.basePlatform]: tab.draft }));
-                              setContentVersion((previous) => ({
-                                ...previous,
-                                [tab.basePlatform]: previous[tab.basePlatform] + 1,
-                              }));
-                              setActivePlatform(tab.basePlatform);
-                              setActivePersonaTabId(null);
-                            }}
-                          >
-                            Promote to {baseMeta.label}
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                            onClick={() => {
-                              setPersonaTabs((previous) => previous.filter((entry) => entry.id !== tab.id));
-                              setActivePersonaTabId(null);
-                            }}
-                          >
-                            Remove tab
-                          </button>
-                        </div>
-
-                        <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
-                          <AIToolbox
-                            draft={tab.draft}
-                            ideaContext={
-                              adaptContext
-                                ? {
-                                    topic: adaptContext.idea.topic,
-                                    audience: tab.personaName,
-                                    tone: adaptContext.idea.tone,
-                                    format: baseMeta.label,
-                                  }
-                                : null
-                            }
-                            hasApiKeyConfigured={hasApiKey}
-                            onApplyDraft={(nextDraft) => updatePersonaDraft(nextDraft)}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })()
-                : null}
-
-              {activePersonaTabId !== null && personaTabs.some((tab) => tab.id === activePersonaTabId) ? null : (() => {
+              {(() => {
                 const platformMeta = PLATFORM_CONFIG.find((p) => p.key === activePlatform) ?? PLATFORM_CONFIG[0];
                 const state = platformStates[activePlatform];
                 const seo = seoByPlatform[activePlatform];
@@ -1514,89 +1453,100 @@ export default function AdaptPage() {
                     {state.error ? <p className="mb-2 text-xs text-red-700">{state.error}</p> : null}
                     {seo.error ? <p className="mb-2 text-xs text-red-700">SEO: {seo.error}</p> : null}
 
-                    <div className="relative">
-                      <textarea
-                        className="min-h-[180px] w-full resize-y rounded-xl border border-slate-300 p-3 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
-                        value={text}
-                        onChange={(event) => {
-                          setPlatforms((previous) => ({
-                            ...previous,
-                            [activePlatform]: event.target.value,
-                          }));
-                          setContentVersion((previous) => ({
-                            ...previous,
-                            [activePlatform]: previous[activePlatform] + 1,
-                          }));
-                        }}
-                        onSelect={(event) => captureSelection(activePlatform, event.currentTarget)}
-                        onKeyUp={(event) => captureSelection(activePlatform, event.currentTarget)}
-                        onMouseUp={(event) => captureSelection(activePlatform, event.currentTarget)}
-                        placeholder={`Adapted ${platformMeta.label} copy appears here.`}
-                      />
+                    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start">
+                      <div className="relative">
+                        <textarea
+                          className="min-h-[180px] w-full resize-y rounded-xl border border-slate-300 p-3 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
+                          value={text}
+                          onChange={(event) => {
+                            setPlatforms((previous) => ({
+                              ...previous,
+                              [activePlatform]: event.target.value,
+                            }));
+                            setContentVersion((previous) => ({
+                              ...previous,
+                              [activePlatform]: previous[activePlatform] + 1,
+                            }));
+                          }}
+                          onSelect={(event) => captureSelection(activePlatform, event.currentTarget)}
+                          onKeyUp={(event) => captureSelection(activePlatform, event.currentTarget)}
+                          onMouseUp={(event) => captureSelection(activePlatform, event.currentTarget)}
+                          placeholder={`Adapted ${platformMeta.label} copy appears here.`}
+                        />
 
-                      {activePlatformChatDiffs.length > 0 ? (
-                        <div className="pointer-events-none absolute inset-x-3 bottom-3 max-h-52 overflow-auto rounded-xl border border-slate-300 bg-white/95 p-2 shadow-sm">
-                          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                            Pending AI sentence diffs in editor
-                          </p>
-                          <div className="space-y-2">
-                            {activePlatformChatDiffs.map((diff) => (
-                              <div key={diff.id} className="pointer-events-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
-                                <p className="mb-1 text-[11px] font-semibold text-slate-600">Sentence change</p>
-                                <p className="rounded bg-red-50 px-2 py-1 text-xs text-red-800 line-through">{diff.beforeText || '(insert)'}</p>
-                                <p className="mt-1 rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-800">{diff.afterText || '(remove)'}</p>
-                                {diff.message ? <p className="mt-1 text-[11px] text-amber-700">{diff.message}</p> : null}
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  <button
-                                    type="button"
-                                    className="rounded-md bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
-                                    onClick={() => handleKeepPlatformChatDiff(diff.id)}
-                                    disabled={diff.status !== 'pending'}
-                                    aria-label="Keep this sentence diff"
-                                  >
-                                    Keep
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="rounded-md border border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
-                                    onClick={() => handleUndoPlatformChatDiff(diff.id)}
-                                    aria-label="Undo this sentence diff"
-                                  >
-                                    Undo
-                                  </button>
+                        {activePlatformChatDiffs.length > 0 ? (
+                          <div className="pointer-events-none absolute inset-x-3 bottom-3 max-h-52 overflow-auto rounded-xl border border-slate-300 bg-white/95 p-2 shadow-sm">
+                            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                              Pending AI sentence diffs in editor
+                            </p>
+                            <div className="space-y-2">
+                              {activePlatformChatDiffs.map((diff) => (
+                                <div key={diff.id} className="pointer-events-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+                                  <p className="mb-1 text-[11px] font-semibold text-slate-600">Sentence change</p>
+                                  <p className="rounded bg-red-50 px-2 py-1 text-xs text-red-800 line-through">{diff.beforeText || '(insert)'}</p>
+                                  <p className="mt-1 rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-800">{diff.afterText || '(remove)'}</p>
+                                  {diff.message ? <p className="mt-1 text-[11px] text-amber-700">{diff.message}</p> : null}
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    <button
+                                      type="button"
+                                      className="rounded-md bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
+                                      onClick={() => handleKeepPlatformChatDiff(diff.id)}
+                                      disabled={diff.status !== 'pending'}
+                                      aria-label="Keep this sentence diff"
+                                    >
+                                      Keep
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="rounded-md border border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                                      onClick={() => handleUndoPlatformChatDiff(diff.id)}
+                                      aria-label="Undo this sentence diff"
+                                    >
+                                      Undo
+                                    </button>
+                                  </div>
                                 </div>
-                              </div>
-                            ))}
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                      ) : null}
+                        ) : null}
 
-                      <InlineEditPanel
-                        isVisible={hasInlineOverlay}
-                        anchorTop={floatingAnchor.top}
-                        anchorLeft={floatingAnchor.left}
-                        selectedText={selection.text}
-                        instruction={instruction}
-                        onInstructionChange={setInstruction}
-                        onPropose={() => {
-                          void inlineEditor.proposeChange({ selection, instruction }).then(() => {
-                            setInstruction('');
-                          });
-                        }}
-                        isLoading={inlineEditor.isLoading}
-                        error={inlineEditor.error}
-                        pendingChange={activePendingInlineChange}
-                        onAcceptPending={() => {
-                          if (activePendingInlineChange) {
-                            inlineEditor.acceptChange(activePendingInlineChange.id);
-                          }
-                        }}
-                        onDenyPending={() => {
-                          if (activePendingInlineChange) {
-                            inlineEditor.denyChange(activePendingInlineChange.id);
-                          }
-                        }}
-                      />
+                        <InlineEditPanel
+                          isVisible={hasInlineOverlay}
+                          anchorTop={floatingAnchor.top}
+                          anchorLeft={floatingAnchor.left}
+                          selectedText={selection.text}
+                          instruction={instruction}
+                          onInstructionChange={setInstruction}
+                          onPropose={() => {
+                            void inlineEditor.proposeChange({ selection, instruction }).then(() => {
+                              setInstruction('');
+                            });
+                          }}
+                          isLoading={inlineEditor.isLoading}
+                          error={inlineEditor.error}
+                          pendingChange={activePendingInlineChange}
+                          onAcceptPending={() => {
+                            if (activePendingInlineChange) {
+                              inlineEditor.acceptChange(activePendingInlineChange.id);
+                            }
+                          }}
+                          onDenyPending={() => {
+                            if (activePendingInlineChange) {
+                              inlineEditor.denyChange(activePendingInlineChange.id);
+                            }
+                          }}
+                        />
+                      </div>
+
+                      <div className="xl:sticky xl:top-5">
+                        <AIEditTimeline
+                          entries={activeAiHistory.entries}
+                          activeEntryId={activeAiHistory.activeEntryId}
+                          onRestore={handleRestorePlatformAIEdit}
+                          title={`${platformMeta.label} AI Timeline`}
+                        />
+                      </div>
                     </div>
 
                     <div className="mt-3 flex flex-wrap gap-2">
@@ -1682,7 +1632,8 @@ export default function AdaptPage() {
                             : null
                         }
                         hasApiKeyConfigured={hasApiKey}
-                        onApplyDraft={(nextDraft, summary) => {
+                        onApplyDraft={(nextDraft, summary, label) => {
+                          recordPlatformAIEdit(activePlatform, text, nextDraft, summary, label ?? 'AI tool');
                           setPlatforms((previous) => ({
                             ...previous,
                             [activePlatform]: nextDraft,
@@ -1706,20 +1657,6 @@ export default function AdaptPage() {
                             [activePlatform]: result,
                           }))
                         }
-                        onPersonaVariantsGenerated={(variants) => {
-                          if (variants.length === 0) return;
-                          const basePlatform = activePlatform;
-                          const newTabs: PersonaTab[] = variants.map((variant) => ({
-                            id: `${basePlatform}-${variant.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                            basePlatform,
-                            personaName: variant.name,
-                            description: variant.description,
-                            pitchAdjustment: variant.pitchAdjustment,
-                            draft: variant.draft,
-                          }));
-                          setPersonaTabs((previous) => [...previous, ...newTabs]);
-                          setActivePersonaTabId(newTabs[0].id);
-                        }}
                       />
                       {toolboxNoticeByPlatform[activePlatform] ? (
                         <p className="mt-2 text-xs text-emerald-700">{toolboxNoticeByPlatform[activePlatform]}</p>

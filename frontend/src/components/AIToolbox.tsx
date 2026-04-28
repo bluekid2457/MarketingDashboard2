@@ -23,20 +23,6 @@ const TONE_PRESETS: Array<{ key: string; label: string; description: string }> =
   { key: 'casual-storyteller', label: 'Casual storyteller', description: 'Conversational, anecdotal, flowing.' },
 ];
 
-const SENTIMENT_PRESETS: Array<{ key: string; label: string; description: string }> = [
-  { key: 'optimistic', label: 'Optimistic', description: 'Lean into upside and momentum.' },
-  { key: 'balanced', label: 'Balanced', description: 'Acknowledge tradeoffs, neutral tone.' },
-  { key: 'urgent', label: 'Urgent', description: 'Highlight cost of inaction without hype.' },
-  { key: 'reassuring', label: 'Reassuring', description: 'Calm, lower-stakes framing.' },
-  { key: 'critical', label: 'Critical', description: 'Honest about gaps and limits.' },
-];
-
-const DEFAULT_PERSONAS: Array<{ id: string; name: string; description: string }> = [
-  { id: 'persona-cmo', name: 'CMO', description: 'Strategic marketing leader, cares about pipeline impact and team velocity.' },
-  { id: 'persona-founder', name: 'Founder', description: 'Time-constrained operator, cares about pragmatic adoption and ROI.' },
-  { id: 'persona-individual', name: 'Individual contributor', description: 'Hands-on practitioner, cares about workflow specifics and tools.' },
-];
-
 type HeadlineVariant = {
   id: string;
   variant: 'A' | 'B' | 'C' | 'D' | 'E';
@@ -80,9 +66,8 @@ export type AIToolboxIdeaContext = {
 type AIToolboxProps = {
   draft: string;
   ideaContext: AIToolboxIdeaContext | null;
-  onApplyDraft: (nextDraft: string, summary: string) => void;
+  onApplyDraft: (nextDraft: string, summary: string, label?: string) => void;
   onPlagiarismResult?: (result: PlagiarismResult | null) => void;
-  onPersonaVariantsGenerated?: (variants: PersonaVariant[]) => void;
   hasApiKeyConfigured: boolean;
 };
 
@@ -113,12 +98,6 @@ function formatCommonAuth(): { provider: string; apiKey: string; ollamaBaseUrl: 
 async function loadCompanyContextLines(): Promise<string[]> {
   const profile = await loadCompanyProfile(null);
   return companyProfileToContextLines(profile);
-}
-
-function chunkPersonaInputs(extra: Array<{ name: string; description: string }>): Array<{ id: string; name: string; description: string }> {
-  return extra
-    .map((entry, index) => ({ id: `extra-persona-${index}`, name: entry.name.trim(), description: entry.description.trim() }))
-    .filter((entry) => entry.name.length > 0);
 }
 
 function escapeRegExp(value: string): string {
@@ -181,7 +160,7 @@ function renderLikelySource(value: string): ReactNode {
 }
 
 export function AIToolbox(props: AIToolboxProps) {
-  const { draft, ideaContext, onApplyDraft, onPlagiarismResult, onPersonaVariantsGenerated, hasApiKeyConfigured } = props;
+  const { draft, ideaContext, onApplyDraft, onPlagiarismResult, hasApiKeyConfigured } = props;
 
   const readability = useMemo(() => calculateReadability(draft), [draft]);
   const [complexityValue, setComplexityValue] = useState<number>(readability.complexityValue);
@@ -193,21 +172,16 @@ export function AIToolbox(props: AIToolboxProps) {
   const [activeTool, setActiveTool] = useState<'tone' | 'readability' | 'personas' | 'headlines' | 'research' | 'plagiarism'>('tone');
   const [notice, setNotice] = useState<ToolboxNotice | null>(null);
 
-  // Tone & sentiment
+  // Tone
   const [toneRunning, setToneRunning] = useState<string | null>(null);
-  const [sentimentRunning, setSentimentRunning] = useState<string | null>(null);
 
   // Readability
   const [readabilityRunning, setReadabilityRunning] = useState(false);
 
-  // Personas
-  const [personaRows, setPersonaRows] = useState<Array<{ name: string; description: string }>>([
-    { name: '', description: '' },
-  ]);
-  const [includeDefaults, setIncludeDefaults] = useState(true);
+  // Persona
+  const [personaName, setPersonaName] = useState('');
+  const [personaDescription, setPersonaDescription] = useState('');
   const [personasRunning, setPersonasRunning] = useState(false);
-  const [personaVariants, setPersonaVariants] = useState<PersonaVariant[]>([]);
-  const [appliedPersonaId, setAppliedPersonaId] = useState<string | null>(null);
 
   // Headlines
   const [headlinesRunning, setHeadlinesRunning] = useState(false);
@@ -236,7 +210,7 @@ export function AIToolbox(props: AIToolboxProps) {
   }, [draft]);
 
   const runRewrite = useCallback(
-    async (mode: 'tone' | 'sentiment' | 'readability', payloadExtras: Record<string, unknown>): Promise<RewriteApiResponse> => {
+    async (mode: 'tone' | 'readability', payloadExtras: Record<string, unknown>): Promise<RewriteApiResponse> => {
       const auth = formatCommonAuth();
       const companyContext = await loadCompanyContextLines();
       const response = await fetch('/api/drafts/rewrite', {
@@ -267,33 +241,13 @@ export function AIToolbox(props: AIToolboxProps) {
       try {
         const result = await runRewrite('tone', { tone: `${preset.label} — ${preset.description}` });
         if (result.updatedDraft) {
-          onApplyDraft(result.updatedDraft, result.summary ?? `Rewritten in a ${preset.label} tone.`);
+          onApplyDraft(result.updatedDraft, result.summary ?? `Rewritten in a ${preset.label} tone.`, 'Tone');
           setNotice({ tone: 'success', message: `Applied "${preset.label}" tone.` });
         }
       } catch (error) {
         setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Tone rewrite failed.' });
       } finally {
         setToneRunning(null);
-      }
-    },
-    [onApplyDraft, requireApiKey, requireDraft, runRewrite],
-  );
-
-  const handleSentimentPreset = useCallback(
-    async (preset: { key: string; label: string; description: string }) => {
-      if (!requireDraft() || !requireApiKey()) return;
-      setNotice(null);
-      setSentimentRunning(preset.key);
-      try {
-        const result = await runRewrite('sentiment', { sentiment: `${preset.label} — ${preset.description}` });
-        if (result.updatedDraft) {
-          onApplyDraft(result.updatedDraft, result.summary ?? `Rewritten with ${preset.label} sentiment.`);
-          setNotice({ tone: 'success', message: `Applied "${preset.label}" sentiment.` });
-        }
-      } catch (error) {
-        setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Sentiment rewrite failed.' });
-      } finally {
-        setSentimentRunning(null);
       }
     },
     [onApplyDraft, requireApiKey, requireDraft, runRewrite],
@@ -311,7 +265,7 @@ export function AIToolbox(props: AIToolboxProps) {
         fleschTarget: targetComplexity.fleschTarget,
       });
       if (result.updatedDraft) {
-        onApplyDraft(result.updatedDraft, result.summary ?? `Rewritten at ${targetComplexity.label} reading level.`);
+        onApplyDraft(result.updatedDraft, result.summary ?? `Rewritten at ${targetComplexity.label} reading level.`, 'Readability');
         setNotice({ tone: 'success', message: `Rewritten for ${targetComplexity.label} (target Flesch ${targetComplexity.fleschTarget}).` });
       }
     } catch (error) {
@@ -321,60 +275,51 @@ export function AIToolbox(props: AIToolboxProps) {
     }
   }, [onApplyDraft, requireApiKey, requireDraft, runRewrite, targetComplexity]);
 
-  const buildPersonaList = useCallback((): Array<{ id: string; name: string; description: string }> => {
-    const extras = chunkPersonaInputs(personaRows);
-    const base = includeDefaults ? DEFAULT_PERSONAS : [];
-    const merged = [...base, ...extras];
-    const seen = new Set<string>();
-    return merged.filter((entry) => {
-      const key = entry.name.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }, [includeDefaults, personaRows]);
-
   const handlePersonas = useCallback(async () => {
     if (!requireDraft() || !requireApiKey()) return;
-    const personas = buildPersonaList();
-    if (personas.length === 0) {
-      setNotice({ tone: 'error', message: 'Add at least one persona name or enable the default personas.' });
+    const trimmedName = personaName.trim();
+    const trimmedDescription = personaDescription.trim();
+    if (!trimmedName) {
+      setNotice({ tone: 'error', message: 'Add a persona name before running the rewrite.' });
       return;
     }
     setNotice(null);
     setPersonasRunning(true);
-    setPersonaVariants([]);
-    setAppliedPersonaId(null);
     try {
       const auth = formatCommonAuth();
       const companyContext = await loadCompanyContextLines();
       const response = await fetch('/api/drafts/personas', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...auth, draft, personas, companyContext }),
+        body: JSON.stringify({
+          ...auth,
+          draft,
+          personas: [
+            {
+              id: 'persona-target',
+              name: trimmedName,
+              description: trimmedDescription,
+            },
+          ],
+          companyContext,
+        }),
       });
       const payload = (await response.json()) as PersonasApiResponse;
       if (!response.ok || !payload.variants) {
         throw new Error(payload.error ?? 'Persona generation failed.');
       }
-      setPersonaVariants(payload.variants);
-      onPersonaVariantsGenerated?.(payload.variants);
-      setNotice({ tone: 'success', message: `Generated ${payload.variants.length} persona variants.` });
+      const variant = payload.variants[0];
+      if (!variant?.draft) {
+        throw new Error('AI did not return a persona rewrite.');
+      }
+      onApplyDraft(variant.draft, `Applied ${variant.name} persona rewrite.`, 'Persona');
+      setNotice({ tone: 'success', message: `Applied the ${variant.name} persona rewrite.` });
     } catch (error) {
       setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Persona generation failed.' });
     } finally {
       setPersonasRunning(false);
     }
-  }, [buildPersonaList, draft, onPersonaVariantsGenerated, requireApiKey, requireDraft]);
-
-  const handleApplyPersona = useCallback(
-    (variant: PersonaVariant) => {
-      onApplyDraft(variant.draft, `Applied ${variant.name} persona variant.`);
-      setAppliedPersonaId(variant.id);
-      setNotice({ tone: 'success', message: `Loaded the "${variant.name}" persona draft into the editor.` });
-    },
-    [onApplyDraft],
-  );
+  }, [draft, onApplyDraft, personaDescription, personaName, requireApiKey, requireDraft]);
 
   const handleHeadlines = useCallback(async () => {
     if (!requireDraft() || !requireApiKey()) return;
@@ -424,7 +369,7 @@ export function AIToolbox(props: AIToolboxProps) {
       if (!inserted) {
         nextLines.unshift(`# ${variant.text}`, '');
       }
-      onApplyDraft(nextLines.join('\n'), `Replaced headline with variant ${variant.variant}.`);
+      onApplyDraft(nextLines.join('\n'), `Replaced headline with variant ${variant.variant}.`, 'Headline');
       setNotice({ tone: 'success', message: `Applied headline variant ${variant.variant}.` });
     },
     [draft, onApplyDraft],
@@ -484,7 +429,7 @@ export function AIToolbox(props: AIToolboxProps) {
       ? ['', '## Sources', ...(researchResult.sources ?? []).map((entry, index) => `[${index + 1}] [${entry.title}](${entry.url})`)].join('\n')
       : '';
     const next = `${draft.trim()}\n\n## Research brief\n${researchResult.briefMarkdown.trim()}${sourcesBlock}\n`;
-    onApplyDraft(next, 'Appended research brief and sources to the draft.');
+    onApplyDraft(next, 'Appended research brief and sources to the draft.', 'Research');
     setNotice({ tone: 'success', message: 'Research brief appended to the draft.' });
   }, [draft, onApplyDraft, researchResult]);
 
@@ -499,7 +444,7 @@ export function AIToolbox(props: AIToolboxProps) {
         });
         return;
       }
-      onApplyDraft(next, `Applied plagiarism rewrite for: "${flag.passage.slice(0, 60)}${flag.passage.length > 60 ? '…' : ''}"`);
+      onApplyDraft(next, `Applied plagiarism rewrite for: "${flag.passage.slice(0, 60)}${flag.passage.length > 60 ? '…' : ''}"`, 'Plagiarism');
       setAppliedFlagKeys((previous) => ({ ...previous, [flagKey]: true }));
       setPlagiarism((previous) => {
         if (!previous) return previous;
@@ -563,7 +508,7 @@ export function AIToolbox(props: AIToolboxProps) {
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="text-sm font-semibold text-slate-900">AI Content Tools</h3>
-          <p className="text-xs text-slate-500">Tone, readability, persona variants, A/B headlines, research, plagiarism.</p>
+          <p className="text-xs text-slate-500">Tone, readability, persona rewrite, A/B headlines, research, plagiarism.</p>
         </div>
         {!hasApiKeyConfigured ? (
           <a href="/settings" className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 hover:bg-amber-200">
@@ -574,7 +519,7 @@ export function AIToolbox(props: AIToolboxProps) {
 
       <div className="mb-3 flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1 text-xs font-medium">
         {([
-          ['tone', 'Tone & sentiment'],
+          ['tone', 'Tone'],
           ['readability', 'Readability'],
           ['personas', 'Personas'],
           ['headlines', 'A/B headlines'],
@@ -613,24 +558,6 @@ export function AIToolbox(props: AIToolboxProps) {
                     {toneRunning === preset.key ? <Spinner size="sm" label={`Applying ${preset.label}…`} /> : preset.label}
                   </p>
                   <p className="text-[11px] text-slate-500">{preset.description}</p>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-600">Sentiment shift</h4>
-            <div className="flex flex-wrap gap-2">
-              {SENTIMENT_PRESETS.map((preset) => (
-                <button
-                  key={preset.key}
-                  type="button"
-                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700 hover:border-emerald-300 hover:bg-emerald-50 disabled:opacity-50"
-                  onClick={() => void handleSentimentPreset(preset)}
-                  disabled={sentimentRunning !== null || !hasApiKeyConfigured}
-                  title={preset.description}
-                >
-                  {sentimentRunning === preset.key ? <Spinner size="sm" label={`Applying ${preset.label}…`} /> : preset.label}
                 </button>
               ))}
             </div>
@@ -684,55 +611,25 @@ export function AIToolbox(props: AIToolboxProps) {
 
       {activeTool === 'personas' ? (
         <div className="space-y-3">
-          <label className="flex items-center gap-2 text-xs text-slate-700">
-            <input
-              type="checkbox"
-              checked={includeDefaults}
-              onChange={(event) => setIncludeDefaults(event.target.checked)}
-              className="h-3.5 w-3.5 rounded border-slate-300"
-            />
-            Include the default CMO / Founder / IC personas
-          </label>
-          <div className="space-y-2">
-            {personaRows.map((row, index) => (
-              <div key={index} className="grid gap-2 rounded-lg border border-slate-200 p-2 sm:grid-cols-[1fr_2fr_auto]">
-                <input
-                  className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                  placeholder="Persona name"
-                  value={row.name}
-                  onChange={(event) =>
-                    setPersonaRows((previous) =>
-                      previous.map((entry, entryIndex) => (entryIndex === index ? { ...entry, name: event.target.value } : entry)),
-                    )
-                  }
-                />
-                <input
-                  className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                  placeholder="Short persona description"
-                  value={row.description}
-                  onChange={(event) =>
-                    setPersonaRows((previous) =>
-                      previous.map((entry, entryIndex) => (entryIndex === index ? { ...entry, description: event.target.value } : entry)),
-                    )
-                  }
-                />
-                <button
-                  type="button"
-                  className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                  onClick={() => setPersonaRows((previous) => previous.filter((_, entryIndex) => entryIndex !== index))}
-                  disabled={personaRows.length <= 1}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              className="rounded-md border border-dashed border-slate-300 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50"
-              onClick={() => setPersonaRows((previous) => [...previous, { name: '', description: '' }])}
-            >
-              + Add another persona
-            </button>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="space-y-1 text-xs text-slate-700">
+              <span className="font-semibold uppercase tracking-wide text-slate-500">Persona</span>
+              <input
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800"
+                placeholder="e.g. CMO"
+                value={personaName}
+                onChange={(event) => setPersonaName(event.target.value)}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-slate-700">
+              <span className="font-semibold uppercase tracking-wide text-slate-500">Persona brief</span>
+              <input
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800"
+                placeholder="What this reader cares about"
+                value={personaDescription}
+                onChange={(event) => setPersonaDescription(event.target.value)}
+              />
+            </label>
           </div>
           <button
             type="button"
@@ -740,34 +637,11 @@ export function AIToolbox(props: AIToolboxProps) {
             onClick={() => void handlePersonas()}
             disabled={personasRunning || !hasApiKeyConfigured}
           >
-            {personasRunning ? <Spinner size="sm" label="Generating personas…" /> : 'Generate persona variants'}
+            {personasRunning ? <Spinner size="sm" label="Rewriting for persona…" /> : 'Rewrite for this persona'}
           </button>
-
-          {personaVariants.length > 0 ? (
-            <div className="space-y-2">
-              {personaVariants.map((variant) => (
-                <div key={variant.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-semibold text-slate-900">{variant.name}</p>
-                      <p className="text-[11px] text-slate-500">{variant.description}</p>
-                    </div>
-                    <button
-                      type="button"
-                      className={`rounded-md px-2.5 py-1 text-[11px] font-semibold ${
-                        appliedPersonaId === variant.id ? 'bg-emerald-200 text-emerald-900' : 'bg-emerald-700 text-white hover:bg-emerald-800'
-                      }`}
-                      onClick={() => handleApplyPersona(variant)}
-                    >
-                      {appliedPersonaId === variant.id ? 'Applied' : 'Load into editor'}
-                    </button>
-                  </div>
-                  <p className="mt-2 text-[11px] italic text-slate-600">Pitch shift: {variant.pitchAdjustment || '—'}</p>
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg bg-white p-2 text-[11px] text-slate-700">{variant.draft}</pre>
-                </div>
-              ))}
-            </div>
-          ) : null}
+          <p className="text-[11px] text-slate-500">
+            Applies one persona-specific rewrite directly into the editor without creating extra variants or tabs.
+          </p>
         </div>
       ) : null}
 

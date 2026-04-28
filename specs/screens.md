@@ -78,16 +78,17 @@ This document describes the main screens required for the Marketing Dashboard, b
 **Components:**
 - Rich text editor
 - Mid-draft prompt bar (for iterative editing)
-- Tone/sentiment tuning controls
+- Tone tuning controls
 - Readability/SEO scoring panel
-- Persona targeting options
+- Single-persona rewrite control
 - A/B headline generator
 - Plagiarism/citation checker
+- Right-side AI change timeline with restore actions
 - Workflow breadcrumb that includes the next Multi-Channel Adaptation step
 - Save, **Adapt for Platforms**, submit for review, or schedule buttons
 **Main Actions:**
 - Edit content
-- Tune tone/sentiment
+- Tune tone
 - Check SEO/readability
 - Save/submit/schedule
 - Store draft handoff context and route to `/adapt/<ideaId>?angleId=<angleId>` when Adapt for Platforms is clicked
@@ -102,6 +103,8 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Platform selector for LinkedIn, X/Twitter, Medium, Newsletter, and Blog
 - Explicit Generate action for the active platform (calls AI adaptation endpoint)
 - Platform-specific editor where only the active tab's copy is edited
+- Persona rewrites apply directly to the active platform editor without creating extra persona tabs
+- Right-side AI change timeline for applied AI edits with restore actions
 - Prompt-template resolver under `src/lib/prompts/platforms` with concise per-platform rules (LinkedIn, X/Twitter, Medium, Newsletter, Blog)
 - Visible autosave/manual-save status for adaptation persistence
 - AI chat for editing/adapting the currently active platform version
@@ -113,6 +116,7 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Generate platform-specific copy from the source draft using AI prompt rules
 - Save/revisit retained platform adaptations
 - Run analysis tools on the active platform copy
+- Restore previous AI-applied platform snapshots
 - Preview and approve
 
 ---

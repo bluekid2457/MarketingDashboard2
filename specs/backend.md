@@ -87,7 +87,7 @@ Copy `backend/.env.example` → `backend/.env` before running.
 ### Other Next.js Route Handlers receiving `companyContext`
 - `POST /api/drafts/adapt` — appends a "Company context" block to the platform adaptation prompt so adapted copy preserves product references and brand voice.
 - `POST /api/drafts/chat` — appends a "Company context" block to the system prompt before the current draft so chat rewrites stay on-brand.
-- `POST /api/drafts/rewrite` — appends a "Company context" block to the system prompt for tone, sentiment, and readability rewrites.
+- `POST /api/drafts/rewrite` — appends a "Company context" block to the system prompt for tone and readability rewrites.
 - `POST /api/drafts/personas` — appends a "Company context" block to the user prompt so each persona variant stays consistent with the company's product/brand voice.
 - `POST /api/drafts/headlines` — appends a "Company context" block to the user prompt so headline variants ground product references and brand voice.
 - `POST /api/drafts/research` — appends a "Company context" block to the synthesis prompt so the brief biases toward findings relevant to the company's industry/audience/product. The DuckDuckGo search query itself is unchanged.

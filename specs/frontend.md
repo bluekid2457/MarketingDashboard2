@@ -387,13 +387,13 @@ Implementation note:
 ### Screen 5b — Storyboard Editor (`/storyboard/[id]`)
 **Route:** `src/app/(app)/storyboard/[id]/page.tsx`
 **Pattern:** Client component using `useParams()` and query `angleId`; keeps storyboard generation/save flow while supporting both inline-edit and chat-driven revision flows.
-**Layout Notes:** Single editor workspace with one source-of-truth textarea, a floating in-place inline AI editor, and an in-editor sentence-diff stack for AI chat proposals.
+**Layout Notes:** Single editor workspace with one source-of-truth textarea, a floating in-place inline AI editor, an in-editor sentence-diff stack for AI chat proposals, and a right-side AI change timeline for rollback.
 **Sections:**
 1. Storyboard content is edited in a textarea (`ref={editorRef}`); generation, debounced autosave (2 s), manual save, source extraction, and adaptation handoff behavior remain intact.
 2. Selection capture uses textarea selection offsets (`selectionStart`/`selectionEnd`) and also computes an approximate in-editor anchor point so prompt/diff controls float at the current edit location.
 3. Inline AI editing keeps the textarea editable at all times; users can continue manual edits while a pending AI proposal is visible.
 4. A floating `InlineEditPanel` renders over the editor near the active selection, containing instruction input + propose action and contextual `Keep`/`Undo` controls for pending proposals.
-5. Pending proposals render in-place diff snippets with red strike-through (`bg-rose-100 text-rose-700 line-through`) for original text and green highlight (`bg-emerald-100 text-emerald-800`) for suggested text; no separate revision-history/change-log section is displayed.
+5. Pending proposals render in-place diff snippets with red strike-through (`bg-rose-100 text-rose-700 line-through`) for original text and green highlight (`bg-emerald-100 text-emerald-800`) for suggested text; separately, a right-side AI change timeline records applied AI mutations (generation, toolbox rewrites, kept chat diffs, accepted inline edits) and lets the user restore any captured snapshot.
 6. No-op AI proposals are handled explicitly and displayed as `No changes suggested.` in the floating panel.
 7. Storyboard AI chat is available again through `DraftChatPanel`; chat requests use `POST /api/drafts/chat` with current draft context and conversation history.
 8. When chat returns `<UPDATED_DRAFT>`, the page computes sentence/span diffs between current text and AI output, without replacing the entire document.
@@ -407,13 +407,13 @@ Implementation note:
 ### Screen 6 — Multi-Channel Adaptation (`/adapt/[id]`)
 **Route:** `src/app/(app)/adapt/[id]/page.tsx`
 **Pattern:** Client component using `useParams()` plus query `angleId` to resolve the draft-to-adapt handoff.
-**Layout Notes:** Platform generation + tabbed editor workspace; each platform editor supports floating inline edit controls and an embedded AI chat panel that emits sentence-level in-editor diffs.
+**Layout Notes:** Platform generation + tabbed editor workspace; each platform editor supports floating inline edit controls, an embedded AI chat panel that emits sentence-level in-editor diffs, and a right-side AI timeline that restores prior AI-applied states for the active platform.
 **Sections:**
 1. Uses `localStorage['adapt_draft_context']` as a fast-path when it matches the route (`ideaId` + `angleId`). If local context is missing, invalid, or route-mismatched, the page falls back to Firebase lookups (`users/{uid}/ideas/{ideaId}`, `users/{uid}/ideas/{ideaId}/workflow/angles`, and `users/{uid}/drafts/{ideaId}_{angleId}`) to rebuild a valid adaptation context instead of hard-failing immediately.
 2. If the storyboard draft document is missing during Firebase fallback resolution, Adapt builds a deterministic scaffold draft from idea + selected angle summary/sections so platform generation remains usable.
 3. Uses Firestore `users/{uid}/adaptations/{ideaId}_{angleId}` to load previously saved adaptation state for the signed-in user and merge saved platform copy over the draft-seeded defaults.
 4. Seeds `linkedin`, `twitter`, `medium`, `newsletter`, and `blog` platform editors from the current draft content when no adaptation doc exists yet.
-5. Platform tab buttons are fully stateful; clicking a tab changes the active platform and swaps the center editor/preview to that platform only. The optimization panel remembers the last selected analysis per platform, so revisiting a platform shows its previously generated result panel again, while platforms with no completed analysis still render the empty/instruction state.
+5. Platform tab buttons are fully stateful; clicking a tab changes the active platform and swaps the center editor/preview to that platform only. Only platform tabs are rendered now; persona rewrites apply directly into the active platform editor and do not create extra tabs or side variants.
 6. Editing updates only the currently active platform text. The textarea is disabled (`disabled={isAdaptationLoading}`) while the Firestore adaptation document is still being fetched, preventing any user input from being silently overwritten by the async load.
 7. Each active platform exposes an explicit `Generate <Platform>` button that calls `POST /api/drafts/adapt` using the original draft source (`adapt_draft_context.draftContent`) plus platform-specific prompt rules; the API route aborts provider calls after 5 minutes (300 seconds) and returns HTTP 504 with a timeout-specific error, while the client keeps a slightly longer local `AbortController` guard (~302 seconds) so the normal slow-provider path still surfaces the server timeout response first. Hung requests still clear the generating spinner, timeout/failure feedback is shown inline near the editor controls, and healthy providers still replace the active platform copy with the returned AI output.
 8. Platform text plus `activePlatform` auto-save to Firestore with a 1.5 s debounce; visible save status appears in the page header, and the "Save as Draft" action triggers an immediate Firestore write.
@@ -421,16 +421,18 @@ Implementation note:
 10. Chat `<UPDATED_DRAFT>` output is converted to sentence/span diffs for the active platform instead of replacing the full textarea value.
 11. Pending chat diffs render in the active platform editor with red old text and green new text; `Keep`/`Undo` actions are scoped to a single diff entry.
 12. Keeping one diff applies only that span, preserves surrounding manual edits, and rebases or conflict-marks remaining pending diffs for that platform.
-13. Optimization tools call `POST /api/drafts/analyze` against the active platform text and render visible result panels for:
+13. AI Content Tools on Adapt apply directly to the active platform editor. Tone, readability, research, plagiarism rewrites, and persona rewrites all update the current platform copy in place; the persona UI accepts one persona target at a time and behaves like the tone presets rather than generating multiple variants.
+14. Optimization tools call `POST /api/drafts/analyze` against the active platform text and render visible result panels for:
    - `📈 SEO Optimizer`
    - `🔍 AI Check` (backed by `type='plagiarism'`)
    - `🔗 Source Check`
    When a configured non-Ollama AI key exists, the route keeps using the existing AI-backed prompt/call/parse flow. When the active provider is non-Ollama and no key is configured, the route returns deterministic, schema-compatible fallback outputs per tool based on the currently active platform copy instead of surfacing a shared missing-key failure.
-14. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content.
-15. Right-hand trends sidebar consumes live `/api/trends` data and shows truthful loading, error, or empty states instead of placeholder topics/articles.
-16. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; the primary completion CTA saves the current adaptation, preserves exact `ideaId` + `angleId` workflow context, and routes directly to `/publish`.
-17. The Adapt editor shares Storyboard inline editing UX: floating in-place prompt/diff controls anchored near current selection, red/green inline diff preview in the floating panel, and direct textarea editability while AI proposals are pending.
-18. Adapt inline editing and chat preview avoid duplicate revised-text surfaces by using the same active textarea as the only authoritative editing surface.
+15. The active platform editor also shows a right-side AI timeline that records applied AI changes from generation, toolbox actions, chat-diff keeps, and accepted inline edits; selecting a timeline item restores that active-platform snapshot.
+16. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content.
+17. Right-hand trends sidebar consumes live `/api/trends` data and shows truthful loading, error, or empty states instead of placeholder topics/articles.
+18. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; the primary completion CTA saves the current adaptation, preserves exact `ideaId` + `angleId` workflow context, and routes directly to `/publish`.
+19. The Adapt editor shares Storyboard inline editing UX: floating in-place prompt/diff controls anchored near current selection, red/green inline diff preview in the floating panel, and direct textarea editability while AI proposals are pending.
+20. Adapt inline editing and chat preview avoid duplicate revised-text surfaces by using the same active textarea as the only authoritative editing surface.
 
 ---
 
@@ -568,8 +570,8 @@ TEST_MARKER
 - `/api/drafts/inline-edit` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, selectedText?, instruction, companyContext? }` and supports two response modes from a single endpoint: selected-text mode returns `{ updatedText, changeSummary, provider }`, while no-selection mode returns `{ suggestions: [{ beforeText, afterText, changeSummary }], provider }` with up to three validated suggestions.
 - `/api/drafts/chat` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, messages[], userMessage, companyContext? }`, sends the full draft + chat history as context to the AI, logs the assembled prompt plus raw provider response to the server console, and returns `{ reply, updatedDraft | null, provider }`. The AI wraps full draft rewrites in `<UPDATED_DRAFT>…</UPDATED_DRAFT>` tags which the route parses and returns separately from the conversational reply.
 - `/api/drafts/analyze` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, type: 'seo' | 'plagiarism' | 'sources', companyContext? }`, runs type-specific analysis prompts, logs the prompt and raw provider response to the server console, robustly parses the AI's JSON response (code-fence fallback included), and returns `{ type, result, provider }`. For non-Ollama providers without an API key, the route returns deterministic per-tool fallback analysis derived from the submitted draft text while preserving the same response schema expected by the Adapt page UI. The optional `companyContext` is only injected for `type: 'seo'` (it biases primary/secondary keywords, meta description, and title suggestions toward the company's product/industry/audience); `plagiarism` and `sources` ignore it because their pattern matching does not benefit from brand framing.
-- `/api/drafts/rewrite` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, mode: 'tone'|'sentiment'|'readability', tone?, sentiment?, complexityLabel?, complexityDescription?, audienceHint?, fleschTarget?, companyContext? }`. The system prompt appends a "Company context" block (preserve product references and brand voice) when `companyContext` is non-empty.
-- `/api/drafts/personas` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, personas[], companyContext? }`. The user prompt appends a "Company context" block so persona variants stay consistent with the company's product references and brand voice.
+- `/api/drafts/rewrite` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, mode: 'tone'|'readability', tone?, complexityLabel?, complexityDescription?, audienceHint?, fleschTarget?, companyContext? }`. The system prompt appends a "Company context" block (preserve product references and brand voice) when `companyContext` is non-empty.
+- `/api/drafts/personas` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, personas[], companyContext? }`. The user prompt appends a "Company context" block so persona rewrites stay consistent with the company's product references and brand voice. The current Storyboard/Adapt UI sends one persona target at a time and applies the first returned rewrite directly into the active editor.
 - `/api/drafts/headlines` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, topic?, audience?, count?, companyContext? }`. The user prompt appends a "Company context" block to ground headline product references and brand voice.
 - `/api/drafts/research` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, topic?, audience?, draft?, query?, companyContext? }`. The user prompt appends a "Company context" block so the brief biases toward findings that fit the company's industry, audience, and product. The DuckDuckGo web-search query itself is NOT modified by company context — only the synthesis prompt is.
 - `/api/drafts/plagiarism` does NOT accept `companyContext`. The route runs a verbatim-quote web search plus an AI heuristic review of the draft text; brand framing has no effect on either pass and would only add prompt noise.
@@ -578,7 +580,7 @@ TEST_MARKER
 
 **Client wiring for `companyContext`:**
 - `src/lib/useInlineEdit.ts` (used by Storyboard and Adapt) loads `companyProfileToContextLines(loadCompanyProfile(null))` (cache-only) and passes `companyContext` on each `/api/drafts/inline-edit` call.
-- `src/components/AIToolbox.tsx` (mounted on Storyboard) loads the cached profile and passes `companyContext` on `/api/drafts/rewrite`, `/api/drafts/personas`, `/api/drafts/headlines`, and `/api/drafts/research`.
+- `src/components/AIToolbox.tsx` (mounted on Storyboard and Adapt) loads the cached profile and passes `companyContext` on `/api/drafts/rewrite`, `/api/drafts/personas`, `/api/drafts/headlines`, and `/api/drafts/research`.
 - Storyboard page (`src/app/(app)/storyboard/[id]/page.tsx`) loads the profile via `loadCompanyProfile(currentUid)` and passes `companyContext` on `/api/drafts` (initial generation) and `/api/drafts/chat` (chat assistant).
 - Adapt page (`src/app/(app)/adapt/[id]/page.tsx`) loads the profile via `loadCompanyProfile(currentUid)` and passes `companyContext` on `/api/drafts/adapt` (per-platform generation), `/api/drafts/analyze` (SEO), and `/api/drafts/chat` (per-platform chat).
 - Angles page (`src/app/(app)/angles/page.tsx`) loads the profile via `loadCompanyProfile(currentUid)` and passes `companyContext` on `/api/angles` for both initial sequential generation and refinement requests.

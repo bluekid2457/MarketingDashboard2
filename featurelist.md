@@ -18,7 +18,7 @@ Idea Development
 Content Generation
         ✅ Full draft generation from selected angle
         ❌ Iterative editing with mid-draft prompts — note: PARTIAL; DraftChatPanel exists but AI chat fails silently when no API key set (TODO.md P0)
-        ❌ Tone and sentiment tuning without full rewrites — note: depends on broken chat panel
+        ❌ Tone tuning without full rewrites — note: PARTIAL; tone presets are available in AI Content Tools
         ❌ Readability scoring with complexity dial
         ❌ Multiple persona targeting, generating different versions of the same piece for different audiences
         ❌ A/B headline variants generated automatically
