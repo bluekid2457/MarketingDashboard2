@@ -7,7 +7,7 @@ An AI-powered marketing content management dashboard built with **Next.js 14**, 
 | Layer     | Technology                          |
 |-----------|--------------------------------------|
 | Frontend  | Next.js 14, React 18, TypeScript, Tailwind CSS, Zustand |
-| Backend   | FastAPI, Python 3.10+, Pydantic      |
+| Backend   | FastAPI, Python 3.10+, Pydantic, Firebase Admin, Fernet encryption |
 | Database  | Firebase (Firestore)                 |
 
 ---
@@ -99,6 +99,19 @@ The API will be available at **http://localhost:8000**.
 Interactive docs: **http://localhost:8000/docs**  
 Health check: **http://localhost:8000/health**
 
+#### Provider auth foundation
+
+The backend now includes a provider-connection layer for future direct publishing:
+
+- `POST /api/v1/auth/linkedin/start` returns a LinkedIn OAuth URL for a specific app user.
+- `GET /api/v1/auth/linkedin/callback` completes the LinkedIn OAuth exchange and stores a publish-capable connection.
+- `GET /api/v1/integrations/providers` lists supported provider capabilities.
+- `GET /api/v1/integrations/status?userId=<uid>` lists connection state for LinkedIn, X/Twitter, Instagram, Facebook, WordPress, Ghost, and Substack.
+- `POST /api/v1/integrations/{provider}/tokens` stores encrypted tokens for providers that are not wired to OAuth yet.
+- `POST /api/v1/integrations/{provider}/disconnect` removes the stored secret and marks the provider disconnected.
+
+LinkedIn is the first provider with a full OAuth flow. Other providers are registry-backed so the app can store auth material now and add publish execution later without changing the storage model.
+
 ---
 
 ## Environment Variables
@@ -109,8 +122,23 @@ Copy `backend/.env.example` to `backend/.env` and update values:
 SECRET_KEY=your-secret-key-here
 ENCRYPTION_KEY=your-encryption-key-here
 FRONTEND_URL=http://localhost:3000
+BACKEND_URL=http://localhost:8000
 DEBUG=false
+
+FIREBASE_PROJECT_ID=your-project-id
+# FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+# FIREBASE_CREDENTIALS_PATH=C:/path/to/service-account.json
+# FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxx@your-project.iam.gserviceaccount.com
+# FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+
+LINKEDIN_CLIENT_ID=your-linkedin-client-id
+LINKEDIN_CLIENT_SECRET=your-linkedin-client-secret
+# Optional override. Defaults to http://localhost:8000/api/v1/auth/linkedin/callback
+# LINKEDIN_REDIRECT_URI=http://localhost:8000/api/v1/auth/linkedin/callback
+LINKEDIN_SCOPES="openid profile email w_member_social"
 ```
+
+The provider auth layer stores browser-safe connection summaries under `users/{uid}/integrationConnections/{provider}` and keeps encrypted token material in the backend-only `integrationSecrets` collection.
 
 ---
 

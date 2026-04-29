@@ -38,19 +38,20 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ## 3. Idea Input & Backlog Screen (IdeaScreen.png)
 **Purpose:** Submit new ideas, view and manage idea backlog.
+**Layout:** Single-column, no sidebar.
 **Components:**
-- Free-form idea input box
-- Optional dropdowns: tone, audience, format
-- List/table of ideas with relevance/timeliness scores. 
-- Sort/filter controls
-- Trend detection panel (shows trending topics) As well as ability to click into the articles that are relevant.
-- Competitor content panel (shows tracked competitor posts/gaps)
-- Selected-idea card with a Generate Angles button that routes to `/angles?ideaId=<ideaDocId>`
+- Header card: breadcrumb `CAMPAIGNS · IDEAS`, `Idea Backlog` title, subtitle, stats row (backlog count · strong-rated count · last scored).
+- `WorkflowStepper`.
+- Input card: single-line text input, pill selects for Tone / Audience / Format (`Any|Article|Post|Thread|Newsletter|Video Script`), "Score only" outline button (score without AI rationale), "Add & score" primary button (full AI flow).
+- Filter tabs row: `All`, `Strong`, `Moderate`, `Weak`, `No angles yet` — each shows count. Sort dropdown: `Score high → low`, `Newest`, `Oldest`, `Topic A-Z`.
+- Idea cards (replaces table): rounded-2xl white cards each with a color-coded 56×56 score circle (emerald/amber/rose/slate), tone+audience pills + date + live signals count, bold title, secondary topic line, "Open {N} angles →" button, "..." dropdown (Edit title / Delete).
+- Per-card AI rationale section (`AI RATIONALE` pill + reason text) and "HOW TO MAKE IT STRONGER" improvement bullets.
 **Main Actions:**
-- Submit/edit/delete ideas
-- Sort/filter backlog
-- View trends and competitor analysis
-- Trigger angles generation flow for the selected idea
+- Submit idea with full AI scoring or score-only path
+- Filter by score label or no-angles status
+- Sort backlog
+- Inline title edit / delete per card
+- Open angles workflow from any card
 
 ---
 

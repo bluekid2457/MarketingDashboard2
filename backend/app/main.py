@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.routers.integrations import router as integrations_router
+from app.routers.linkedin import router as linkedin_router
 
 app = FastAPI(
     title="Marketing Dashboard API",
@@ -25,6 +27,5 @@ async def health_check():
     return {"status": "healthy"}
 
 
-# Router inclusion placeholder
-# from app.routers import some_router
-# app.include_router(some_router.router, prefix="/api/v1")
+app.include_router(linkedin_router, prefix="/api/v1")
+app.include_router(integrations_router, prefix="/api/v1")

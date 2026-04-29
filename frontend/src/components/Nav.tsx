@@ -2,7 +2,9 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { version as appVersion } from '../../package.json';
+import packageJson from '../../package.json';
+
+const appVersion = typeof packageJson.version === 'string' ? packageJson.version : '0.0.0';
 
 const navLinks = [
   { href: '/dashboard', label: 'Overview', icon: '⊞' },

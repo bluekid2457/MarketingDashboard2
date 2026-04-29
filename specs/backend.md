@@ -12,6 +12,9 @@ This document defines the requirements, architecture, and key behaviors for the 
 - **Config**: pydantic-settings 2.2.1 (reads from `.env`)
 - **Validation**: Pydantic 2.7.1
 - **Env loading**: python-dotenv 1.0.1
+- **HTTP client**: httpx 0.27.0
+- **Encryption**: cryptography 42.0.8 (Fernet-compatible token encryption)
+- **Firebase Admin**: firebase-admin 6.5.0
 
 ---
 
@@ -26,25 +29,136 @@ backend/
     main.py                 # FastAPI app, CORS, /health endpoint
     config.py               # Settings via pydantic-settings
     routers/
-      __init__.py           # router registration (empty at init)
+      __init__.py           # router package
+      linkedin.py           # LinkedIn OAuth start/callback endpoints
+      integrations.py       # Provider registry + status/token/disconnect endpoints
+    services/
+      encryption.py         # Fernet-compatible token encryption helper
+      firebase_service.py   # Firebase Admin / Firestore lazy initialization
+      provider_registry.py  # Shared provider capability registry
+      integration_connection_service.py  # Firestore-backed connection + secret storage
+      linkedin_oauth_service.py          # LinkedIn OAuth exchange + userinfo persistence
 ```
 
 ---
 
 ## Environment Variables
 
-| Variable         | Default                   | Description              |
-|------------------|---------------------------|--------------------------|
-| `SECRET_KEY`     | `changeme`                | App secret key           |
-| `ENCRYPTION_KEY` | `changeme`                | Encryption key           |
-| `FRONTEND_URL`   | `http://localhost:3000`   | Allowed CORS origin      |
-| `DEBUG`          | `false`                   | Debug mode               |
+| Variable | Default | Description |
+|---|---|---|
+| `SECRET_KEY` | `changeme` | App secret key fallback used when deriving encryption material in development |
+| `ENCRYPTION_KEY` | `changeme` | Primary token-encryption secret |
+| `FRONTEND_URL` | `http://localhost:3000` | Allowed CORS origin and OAuth redirect base |
+| `BACKEND_URL` | `http://localhost:8000` | Backend origin used to derive the default LinkedIn callback URL |
+| `DEBUG` | `false` | Debug mode |
+| `FIREBASE_PROJECT_ID` | unset | Firebase project id for Admin SDK initialization |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | unset | Full service-account JSON blob for Firebase Admin |
+| `FIREBASE_CREDENTIALS_PATH` | unset | Path to a Firebase service-account JSON file |
+| `FIREBASE_CLIENT_EMAIL` | unset | Service-account email when composing Firebase credentials from individual fields |
+| `FIREBASE_PRIVATE_KEY` | unset | Service-account private key when composing Firebase credentials from individual fields |
+| `LINKEDIN_CLIENT_ID` | unset | LinkedIn app client id |
+| `LINKEDIN_CLIENT_SECRET` | unset | LinkedIn app client secret |
+| `LINKEDIN_REDIRECT_URI` | `BACKEND_URL + /api/v1/auth/linkedin/callback` | Optional explicit LinkedIn callback URL override |
+| `LINKEDIN_SCOPES` | `openid profile email w_member_social` | Scopes requested during LinkedIn OAuth |
 
 Copy `backend/.env.example` → `backend/.env` before running.
 
 ---
 
 ## Endpoints
+
+### `GET /health`
+- **Tags**: Health
+- **Response**: `{"status": "healthy"}`
+- **Auth**: None
+- **Purpose**: Service liveness check
+
+### `POST /api/v1/auth/linkedin/start`
+- **Location**: `backend/app/routers/linkedin.py`
+- **Purpose**: Start a publish-capable LinkedIn OAuth flow for a specific app user.
+- **Request schema**:
+  - `userId: string` (required Firebase app user id)
+  - `redirectAfter?: string` (optional frontend-relative path; defaults to `/settings`)
+- **Behavior**:
+  - Validates LinkedIn client configuration.
+  - Generates a CSRF-safe OAuth state token.
+  - Stores hashed state metadata in Firestore under `integrationAuthStates/{sha256(state)}`.
+  - Returns a LinkedIn authorization URL requesting `LINKEDIN_SCOPES`.
+- **Response shape**:
+  - `{ provider: 'linkedin', authorizeUrl: string, scopes: string[] }`
+
+### `GET /api/v1/auth/linkedin/callback`
+- **Location**: `backend/app/routers/linkedin.py`
+- **Purpose**: Complete the LinkedIn OAuth exchange and persist the member connection.
+- **Query params**:
+  - `code?: string`
+  - `state?: string`
+  - `error?: string`
+  - `error_description?: string`
+- **Behavior**:
+  - Validates and consumes the stored OAuth state.
+  - Exchanges the code for access/refresh/id tokens.
+  - Calls `https://api.linkedin.com/v2/userinfo` to resolve the member identity.
+  - Persists a public connection summary under `users/{uid}/integrationConnections/linkedin`.
+  - Persists encrypted token material under backend-only `integrationSecrets/{uid__linkedin}`.
+  - Redirects back to the frontend with `integration=linkedin` and a `status` query parameter.
+
+### `GET /api/v1/integrations/providers`
+- **Location**: `backend/app/routers/integrations.py`
+- **Purpose**: Return the provider registry used by the backend integration layer.
+- **Behavior**:
+  - Lists current provider definitions for LinkedIn, X/Twitter, Instagram, Facebook, WordPress, Ghost, and Substack.
+  - Exposes auth capabilities (`authTypes`), publish capabilities, and content-type support.
+
+### `GET /api/v1/integrations/status`
+- **Location**: `backend/app/routers/integrations.py`
+- **Purpose**: List connection state for every registered provider for a specific app user.
+- **Query params**:
+  - `userId: string` (required)
+- **Response shape**:
+  - `{ connections: Array<ProviderConnectionSummary> }`
+- **Behavior**:
+  - Merges the static provider registry with any saved Firestore docs.
+  - Returns `status: 'not_connected'` for providers without a saved connection.
+
+### `GET /api/v1/integrations/{provider}/status`
+- **Location**: `backend/app/routers/integrations.py`
+- **Purpose**: Return one provider connection summary for a user.
+- **Query params**:
+  - `userId: string` (required)
+
+### `POST /api/v1/integrations/{provider}/tokens`
+- **Location**: `backend/app/routers/integrations.py`
+- **Purpose**: Persist tokens for providers that are not wired to OAuth yet, while reusing the same encrypted-storage model as LinkedIn.
+- **Request schema**:
+  - `userId: string` (required)
+  - `authType: string` (default `oauth2`)
+  - `accessToken?: string`
+  - `refreshToken?: string`
+  - `idToken?: string`
+  - `tokenType?: string`
+  - `expiresAtMs?: number`
+  - `expiresIn?: number`
+  - `scopes?: string[]`
+  - `accountId?: string`
+  - `accountUrn?: string`
+  - `displayName?: string`
+  - `email?: string`
+  - `pictureUrl?: string`
+  - `metadata?: object`
+- **Behavior**:
+  - Rejects requests that provide no token values.
+  - Saves a browser-safe summary doc under `users/{uid}/integrationConnections/{provider}`.
+  - Saves encrypted token material under `integrationSecrets/{uid__provider}`.
+
+### `POST /api/v1/integrations/{provider}/disconnect`
+- **Location**: `backend/app/routers/integrations.py`
+- **Purpose**: Remove stored token material while preserving a disconnected status summary.
+- **Request schema**:
+  - `userId: string` (required)
+- **Behavior**:
+  - Deletes the backend-only secret document.
+  - Marks the public connection summary as `status: 'disconnected'`.
 
 ### `POST /api/drafts/inline-edit` (Next.js Route Handler)
 - **Location**: `frontend/src/app/api/drafts/inline-edit/route.ts`
@@ -103,12 +217,6 @@ Copy `backend/.env.example` → `backend/.env` before running.
 - Always optional `string[]` in the request body.
 - Each entry is a pre-formatted `"Field label: value"` line produced by `companyProfileToContextLines(profile)` in `frontend/src/lib/companyProfile.ts`.
 - Server routes normalize the array (drop non-strings, trim, drop empties) and skip injection when the resulting list is empty, so the prompt is unchanged for users who have not filled in a Company Profile.
-
-### `GET /health`
-- **Tags**: Health
-- **Response**: `{"status": "healthy"}`
-- **Auth**: None
-- **Purpose**: Service liveness check
 
 ### `POST /api/angles/persist` (Next.js Route Handler)
 - **Location**: `frontend/src/app/api/angles/persist/route.ts`
@@ -184,5 +292,8 @@ API available at `http://localhost:8000`. Interactive docs at `http://localhost:
 - All secrets via environment variables — never hardcoded
 - CORS restricted to known frontend origins
 - All endpoints return structured JSON
-- Future: rate limiting, OAuth/token auth for third-party platforms
+- LinkedIn and manual provider tokens are encrypted before being stored in Firestore.
+- Browser-safe connection summaries live under `users/{uid}/integrationConnections/{provider}`.
+- Encrypted secrets live under backend-only `integrationSecrets/{uid__provider}` so they are not readable through the existing `/users/{uid}/**` Firestore rule.
+- Future: rate limiting and backend-issued auth for provider-management endpoints
 

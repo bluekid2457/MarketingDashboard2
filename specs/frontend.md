@@ -45,7 +45,7 @@ This table centralizes the current frontend `(TODO)` items for quick planning an
 | Settings & Compliance | Brand Voice Editor | TODO |
 | Settings & Compliance | Compliance Flags | TODO |
 | Settings & Compliance | Audit Log Viewer | TODO |
-| Settings & Compliance | Integration Connectors | TODO |
+| Settings & Compliance | Integration Connectors | PARTIAL |
 | Error & Notifications | Error Messages | DONE |
 | Error & Notifications | Success / Warning Notifications | DONE |
 | Error & Notifications | System Alerts | DONE |
@@ -289,27 +289,23 @@ Note: `(TODO)` marks features that are currently not functional and still need i
 
 ---
 
-### Screen 3 — Idea Input & Backlog (`/ideas`)
+### Screen 3 — Idea Backlog (`/ideas`)
 **Route:** `src/app/(app)/ideas/page.tsx`
-**Layout Notes:** Header summary + Firestore-backed form and backlog table on the left, live trends/articles sidebar on the right.
+**Layout Notes:** Full-width single-column layout — no sidebar. Top-to-bottom: header card → WorkflowStepper → input card → filter tabs + sort → idea cards.
 **Sections:**
-1. New Idea form with textarea + tone/audience selectors (no format selector at idea-entry time)
-2. Client-side validation, submit loading state, and inline save success/error states
-3. Firestore list-load and add-doc save waits render spinner indicators
-4. Firestore-backed ideas table scoped to the signed-in user
-5. Functional sort and filter controls (sort by newest/oldest/topic/rating, filter by tone only); default sort is rating high-to-low
-6. User-selected sort preference is persisted in browser session storage and restored when returning to `/ideas` within the same session
-7. On sign-out, Ideas sort preference is cleared from session storage and the sort resets to the rating default
-8. New ideas persist relevance metadata (`score`, `label`, `reason`, `scoredAtMs`) so rating sort is deterministic for equal scores
-9. Rating column shows an explicit `Unscored` status when relevance metadata is missing; unscored entries are sorted last in rating sort
-10. Backlog table intentionally omits a `Format` column; content format selection is deferred to later workflow steps
-11. New ideas persist `format: 'Unspecified'` for backward-compatible data shape while format input is removed from the UI
-12. Idea save flow keeps deterministic score/label calculation, then requests AI rationale through `POST /api/ideas/rationale` and persists AI-generated explanation when available
-13. Rationale response includes both score reasoning and concrete improvement guidance; when provider config/API calls are unavailable, deterministic fallback reasoning and tips are persisted instead
-14. Personal/company context is included in rationale prompts when available from existing user-profile fields; when absent, rationale still resolves with idea-only context
-15. Backlog rows support inline title editing (`Edit Title` -> `Save`/`Cancel`) and persist renamed titles to Firestore (`title` field) without altering the underlying `topic`
-16. Legacy idea docs without `title`, `improvements`, or rationale `source` render safely via backward-compatible defaults
-17. Live trend snapshot and right-hand articles panel sourced from `/api/trends`
+1. Header card: breadcrumb (`CAMPAIGNS · IDEAS`), page title (`Idea Backlog`), subtitle, and stats row showing total backlog count, strong-rated count, and last-scored time label (derived per render from `relevance.scoredAtMs`).
+2. `<WorkflowStepper />` unchanged.
+3. Input card: single `<input type="text">` (one-sentence topic), three pill-style inline `<select>` dropdowns (Tone, Audience, Format — options `['Any','Article','Post','Thread','Newsletter','Video Script']`, default `'Any'`), "Score only" outline button (runs `submitIdea(true)` — skips `generateIdeaRationale`, uses `scoreIdeaTopic` + `buildFallbackRationale` only), and "Add & score" primary button (existing full AI flow). `format` state value is saved alongside `tone`/`audience` in the Firestore `addDoc` payload.
+4. Filter tabs: pill buttons for `All`, `Strong`, `Moderate`, `Weak`, `No angles yet` — each showing a count. `No angles yet` = ideas where `!draftMap.has(idea.id) && !adaptMap.has(idea.id)`. `draftMap` (`Map<string, string>`, ideaId → angleId) is populated from `users/{uid}/drafts`; `adaptMap` (`Map<string, string>`, ideaId → angleId) from `users/{uid}/adaptations` — both fetched on `currentUser` change via `getDocs` with `Promise.all`; empty Maps used on error.
+5. Sort dropdown on filter row (right): `Score high → low` (default), `Newest`, `Oldest`, `Topic A-Z`. `ratingFilter` state replaces the old `toneFilter`; `visibleIdeas` memo filters by rating label or no-draft/adapt status.
+6. Idea cards (replaces table): each idea is a rounded-2xl white card with a 56×56 px color-coded score circle (emerald=Strong, amber=Moderate, rose=Weak, slate=unscored), tone/audience pills + date + live signals count in the tag row, bold title, secondary topic line when title differs, and a right-column button group: (a) "Go to Adapt →" (dark-green filled) if `adaptMap` has the idea; (b) "Open Storyboard →" (dark-green filled) if `draftMap` has the idea but not `adaptMap`; (c) "Open angles →" — dark-green filled when no draft/adapt exists, otherwise outlined emerald — always present. A "..." dropdown menu with "Edit title" and "Delete" remains.
+7. Inline title editing: when active for a card, the right column shows the text input + Save/Cancel inline (no separate row).
+8. AI Rationale section below the top row (when `idea.relevance` exists): green `AI RATIONALE` pill + reason text.
+9. "HOW TO MAKE IT STRONGER" improvement bullets section (when `idea.relevance.improvements.length > 0`).
+10. User-selected sort preference persisted in session storage; cleared on sign-out.
+11. Legacy idea docs without `title`, `improvements`, or rationale `source` render safely via backward-compatible defaults.
+12. Trends data still fetched (`/api/trends`) and used for live signals count shown per card; trends sidebar panel removed.
+13. `openMenuIdeaId` state tracks which card's "..." dropdown is open; only one open at a time.
 
 ---
 
@@ -389,7 +385,7 @@ Implementation note:
 **Pattern:** Client component using `useParams()` and query `angleId`; keeps storyboard generation/save flow while supporting both inline-edit and chat-driven revision flows.
 **Layout Notes:** Single editor workspace with one source-of-truth textarea, a floating in-place inline AI editor, an in-editor sentence-diff stack for AI chat proposals, and a right-side AI change timeline for rollback.
 **Sections:**
-1. Storyboard content is edited in a textarea (`ref={editorRef}`); generation, debounced autosave (2 s), manual save, source extraction, and adaptation handoff behavior remain intact.
+1. Storyboard content is edited in a textarea (`ref={editorRef}`); generation, debounced autosave (2 s), manual save, source extraction, and adaptation handoff behavior remain intact. Initial draft generation now grounds citations against live DuckDuckGo search results derived from the selected idea/angle context and rewrites the final `## Sources` block to those vetted URLs instead of returning model-invented links.
 2. Selection capture uses textarea selection offsets (`selectionStart`/`selectionEnd`) and also computes an approximate in-editor anchor point so prompt/diff controls float at the current edit location.
 3. Inline AI editing keeps the textarea editable at all times; users can continue manual edits while a pending AI proposal is visible.
 4. A floating `InlineEditPanel` renders over the editor near the active selection, containing instruction input + propose action and contextual `Keep`/`Undo` controls for pending proposals.
@@ -503,15 +499,35 @@ Draft Queue behavior details:
 
 ### Screen 11 — Settings & Compliance (`/settings`)
 **Route:** `src/app/(app)/settings/page.tsx`
-**Layout Notes:** Two-column compliance/settings cards with full-width security section.
+**Layout Notes:** Two-column compliance/settings cards with full-width company, integration, AI, and security sections.
 **Sections:**
 1. Brand Voice Editor (TODO)
 2. Compliance Flags (TODO)
 3. Audit Log Viewer (TODO)
-4. Integration Connectors (TODO)
+4. Integration Connectors
 5. Security Settings
 6. **AI API Keys** (`lg:col-span-2`) — select active provider (OpenAI / Gemini / Claude / Local Ollama); provider key inputs plus Ollama base URL and model; Save button calls `saveAIConfig` and shows "Saved!" toast; config loaded via `useEffect` from `loadAIConfig()` in `src/lib/aiConfig.ts`
 7. Sign out action (Firebase `signOut`) from the Session section with spinner feedback while logout is in progress
+
+**Integration Connectors behavior:**
+- Settings loads provider connection summaries for the signed-in Firebase user from the FastAPI backend via `GET {NEXT_PUBLIC_API_URL}/api/v1/integrations/status?userId={uid}`.
+- The section explains that LinkedIn automatic-posting authorization is saved per user, not shared across all dashboard users.
+- LinkedIn card behavior:
+  - shows a status badge (`Connected`, `Disconnected`, or `Not connected`)
+  - shows saved account metadata such as display name/email, scopes, connected timestamp, token-expiry timestamp, and publish identity URN when present
+  - shows `Connect LinkedIn` when no active connection exists; clicking it calls `POST {NEXT_PUBLIC_API_URL}/api/v1/auth/linkedin/start` with `{ userId, redirectAfter: '/settings' }` and redirects the browser to the backend-generated LinkedIn OAuth URL
+  - shows `Disconnect LinkedIn` when connected; clicking it calls `POST {NEXT_PUBLIC_API_URL}/api/v1/integrations/linkedin/disconnect`
+- After LinkedIn OAuth returns to `/settings?integration=linkedin&status=...`, the page shows a success/error notice and then removes the query string with `router.replace('/settings')`.
+- The section includes explicit setup guidance for:
+  - each end user: sign in, open Settings, click Connect LinkedIn, approve permissions, confirm the Connected badge
+  - the app owner: configure the LinkedIn developer app, backend callback URL, backend env vars, and `NEXT_PUBLIC_API_URL`
+- Other providers from the backend registry are rendered as informational cards so users can see future provider slots even though their dedicated UI connect flows remain TODO.
+
+**Integration Client Library:** `src/lib/integrations.ts`
+- `getBackendApiBaseUrl()` — resolves `NEXT_PUBLIC_API_URL` and falls back to `http://localhost:8000` in development.
+- `listIntegrationConnections(userId)` — fetches provider connection summaries from the FastAPI backend.
+- `startLinkedInConnection(userId, redirectAfter?)` — requests the backend-generated LinkedIn OAuth URL.
+- `disconnectIntegration(provider, userId)` — disconnects a saved provider connection.
 
 **AI Config Library:** `src/lib/aiConfig.ts`
 - `AIProvider = 'openai' | 'gemini' | 'claude' | 'ollama'`
@@ -565,7 +581,7 @@ TEST_MARKER
 - `/api/angles` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, idea, count, selectedAngleId?, refinementPrompt?, companyContext? }`, calls OpenAI (`gpt-4o-mini`), Gemini (tries `gemini-2.0-flash`, then `gemini-2.0-flash-lite`, then `gemini-1.5-flash-latest`), Claude (`claude-3-5-haiku-latest`), or local Ollama (`/api/generate`), robustly parses JSON output (including fenced JSON fallback), validates angle schema, and returns structured `angles[]` or typed errors.
 - `/api/angles` degrades gracefully: when provider calls fail or model output cannot be parsed, the route returns deterministic fallback angles (HTTP 200) with an `error` message describing the provider failure, so the UI does not hard-fail with a 502.
 - In `src/app/api/angles/route.ts`, Ollama calls are routed through `fetchOllama(apiKey, prompt, baseUrl, model)`; both `baseUrl` and `model` are required in the helper signature to keep request logging, validation, and request construction type-safe.
-- `/api/drafts` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, idea, angle, companyContext? }`, builds a long-form draft prompt from selected idea + angle outline, calls the configured AI provider, and returns `{ draft, provider, promptUsed?, modelText?, citationValidation }` on success. If the provider call fails, the route now returns HTTP 200 with a deterministic fallback markdown draft (intro + section scaffold + conclusion + sources) and observability metadata `{ source: 'fallback', fallbackReason }` while preserving the same client-facing `draft` and `provider` fields.
+- `/api/drafts` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, idea, angle, companyContext? }`, builds a long-form draft prompt from selected idea + angle outline, runs a live DuckDuckGo grounding search using the idea topic + angle title + audience, and only approves citations that map to that retrieved source list. After the provider responds, the route rewrites the trailing `## Sources` section from the approved URLs and strips unsupported citation markers so model-invented links do not reach the client. The response returns `{ draft, provider, promptUsed?, modelText?, citationValidation, searchProvider?, searchQuery? }` on success. If the provider call fails, the route still returns HTTP 200 with a deterministic fallback markdown draft plus observability metadata `{ source: 'fallback', fallbackReason }`, and when live grounding sources are available the fallback sources block also uses those retrieved URLs.
 - `/api/drafts/adapt` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, platform, sourceDraft, currentPlatformDraft?, companyContext? }`, resolves platform-specific prompt rules from `src/lib/prompts/platforms/*`, calls the configured AI provider, aborts the provider request after 5 minutes (300 seconds), and normalizes abort-like runtime error shapes back into the timeout response path so client-visible timeouts consistently return a JSON error with HTTP 504 instead of a generic HTTP 502 provider failure. Successful calls still return `{ platform, generatedContent, provider }`, and the route does not emit fallback/dummy adaptation text when AI generation fails.
 - `/api/drafts/inline-edit` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, selectedText?, instruction, companyContext? }` and supports two response modes from a single endpoint: selected-text mode returns `{ updatedText, changeSummary, provider }`, while no-selection mode returns `{ suggestions: [{ beforeText, afterText, changeSummary }], provider }` with up to three validated suggestions.
 - `/api/drafts/chat` accepts `{ provider, apiKey, ollamaBaseUrl?, ollamaModel?, draft, messages[], userMessage, companyContext? }`, sends the full draft + chat history as context to the AI, logs the assembled prompt plus raw provider response to the server console, and returns `{ reply, updatedDraft | null, provider }`. The AI wraps full draft rewrites in `<UPDATED_DRAFT>…</UPDATED_DRAFT>` tags which the route parses and returns separately from the conversational reply.

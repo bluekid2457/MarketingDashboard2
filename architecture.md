@@ -10,18 +10,17 @@ Marketing Dashboard is a full-stack application with three runtime layers:
 
 Project folders:
 
-- `frontend`: UI, client state, backend API client wrappers, and `/api/ai/*` provider adapters.
-- `backend`: FastAPI routes and service layer.
-- `supabase`: bootstrap schema + additive migrations.
+- `frontend`: UI, client state, and Next.js route handlers for AI flows.
+- `backend`: FastAPI routes and service layer for provider auth and future direct publishing.
 
 ## 2. High-Level Runtime Flow
 
 There are two primary request paths from the browser:
 
-1. Frontend -> FastAPI backend (`/api/v1/*`) for auth, connect, credentials, integration status, and publish operations.
+1. Frontend -> FastAPI backend (`/api/v1/*`) for provider auth start/callback, encrypted token storage, integration status, and future publish operations.
 2. Frontend -> Next.js API routes (`/api/ai/*`) for AI generation (outline, draft, posts, image), then provider SDK/HTTP calls.
 
-Backend persistence is centralized in `FirebaseService`, which calls Firebase Firestore/Realtime Database endpoints using service credentials.
+Backend persistence is centralized in a Firebase Admin-backed service layer that writes browser-safe connection summaries and backend-only encrypted token secrets to Firestore.
 
 ## 3. Backend Architecture
 
@@ -31,138 +30,97 @@ Backend persistence is centralized in `FirebaseService`, which calls Firebase Fi
   - Registers CORS using configured origins.
   - Mounts all routers under `/api/v1` and exposes `/health`.
 - `backend/app/config.py`
-  - Loads environment configuration for Supabase, JWT, encryption, OAuth, and frontend callback URLs.
+  - Loads environment configuration for encryption, Firebase Admin, LinkedIn OAuth, and frontend/backend callback URLs.
 
 ### 3.2 Route Modules and Endpoints
-
-- `auth.py` (`/api/v1/auth`)
-  - `POST /login`
-  - `POST /signup`
-  - `GET /me`
-  - `POST /logout`
-
-- `connect.py` (`/api/v1/connect`)
-  - `POST /start`
-  - `POST /close`
-  - `GET /status`
 
 - `linkedin.py`
   - `POST /api/v1/auth/linkedin/start`
   - `GET /api/v1/auth/linkedin/callback`
-  - `GET /api/v1/integrations/linkedin/status`
-  - `POST /api/v1/integrations/linkedin/disconnect`
-  - `POST /api/v1/integrations/linkedin/playwright/start`
-  - `POST /api/v1/integrations/linkedin/playwright/complete`
 
-- `facebook.py` (`/api/v1/auth`)
-  - `POST /facebook/start`
-  - `POST /facebook/callback`
+- `integrations.py`
+  - `GET /api/v1/integrations/providers`
+  - `GET /api/v1/integrations/status`
+  - `GET /api/v1/integrations/{provider}/status`
+  - `POST /api/v1/integrations/{provider}/tokens`
+  - `POST /api/v1/integrations/{provider}/disconnect`
 
-- `credentials.py` (`/api/v1/credentials`)
-  - `POST /store`
-  - `GET /providers`
-  - `GET /{provider}`
-  - `DELETE /{provider}`
-
-- `content.py` (`/api/v1/content`)
-  - `GET /platforms`
-  - `GET /platforms/{platform}`
-  - `POST /generate-prompt`
-
-- `articles.py` (`/api/v1/articles`)
-  - `POST /{article_id}/publish` (approval-first flow; LinkedIn compose prefill in no-submit mode)
-  - `GET /saved-posts`
-  - `PATCH /saved-posts/{saved_post_id}`
-  - `POST /{article_id}/publish-facebook` (approval mode or direct Graph API publish)
+This is the current provider-auth foundation for future direct publishing. The publish job runner and provider-specific posting endpoints are still a later layer on top of these routes.
 
 ### 3.3 Service Layer Responsibilities
 
-- `auth_service.py`: password hashing (PBKDF2), JWT issue/verify, auth context extraction.
-- `encryption.py`: Fernet encryption/decryption helper.
-- `supabase_service.py`: all database IO and compatibility handling for schema drift.
-- `linkedin_oauth_service.py`: LinkedIn OAuth state, token exchange, profile fetch, connection persistence.
-- `facebook_oauth_service.py`: Facebook OAuth start/callback orchestration.
-- `facebook_api_service.py`: Facebook Graph API posting and managed-pages lookup.
-- `credentials_service.py`: encrypted website credential CRUD.
-- `prompt_service.py` and `content_generation.py`: platform prompt retrieval/composition for backend prompt endpoints.
+- `encryption.py`: derives a Fernet-compatible key from `ENCRYPTION_KEY` and encrypts/decrypts provider secrets.
+- `firebase_service.py`: lazily initializes Firebase Admin / Firestore using service-account env vars or application default credentials.
+- `provider_registry.py`: defines the provider capability model used by LinkedIn, X/Twitter, Instagram, Facebook, WordPress, Ghost, and Substack.
+- `integration_connection_service.py`: stores public connection summaries, backend-only encrypted token docs, and OAuth state records.
+- `linkedin_oauth_service.py`: generates LinkedIn authorization URLs, exchanges codes for tokens, fetches LinkedIn `userinfo`, and persists the member connection for future posting.
 
 ### 3.4 Security Model
 
-- Password storage: PBKDF2-SHA256 hash in `app_auth_users.password_hash`.
-- Session auth: HS256 JWT with `sub`, `email`, `iat`, `exp`, `jti`.
-- Encryption at rest:
-  - OAuth tokens (`oauth_tokens.access_token_enc`, `refresh_token_enc`)
-  - Website credentials (`website_credentials.username_enc`, `password_enc`)
-- Fernet key source: `ENCRYPTION_KEY` with `SECRET_KEY`-based fallback in development paths.
+- OAuth state is stored server-side and consumed exactly once on callback.
+- Provider tokens are encrypted at rest using a Fernet-compatible key derived from `ENCRYPTION_KEY`.
+- Browser-safe connection summaries live under `users/{uid}/integrationConnections/{provider}`.
+- Encrypted secrets live under backend-only `integrationSecrets/{uid__provider}`.
+- The current provider-management endpoints rely on explicit `userId` request fields; backend-issued auth is still a follow-up hardening step.
 
-## 4. Connect and Browser Session Subsystem
+## 4. Provider Connection Storage
 
-The `/connect` layer is provider-agnostic (`linkedin`, `facebook`) and uses `app_platform_sessions` as the session source of truth.
+The current backend implements a provider-agnostic auth storage layer that future publish workers can read from.
 
-### 4.1 Session Model
+### 4.1 Public Connection Summaries
 
-`app_platform_sessions` stores versioned provider sessions with:
+`users/{uid}/integrationConnections/{provider}` stores browser-safe metadata such as:
 
-- lifecycle status (`pending`, `connected`, `failed`, `disconnected`)
-- active flag (`is_active`)
-- close-control telemetry (`close_requested_at`, `closed_at`, `closed_by_user`)
-- auth telemetry (`auth_state`, `auth_state_checked_at`, `reusable_session_available`)
-- artifact metadata (`capture_mode`, `artifact_type`)
+- `status` (`not_connected`, `connected`, `disconnected`)
+- `authType`
+- `accountId`
+- `accountUrn`
+- `displayName`
+- `email`
+- `pictureUrl`
+- `scopes`
+- `tokenExpiresAtMs`
+- `hasRefreshToken`
+- provider metadata (for example LinkedIn `publishAuthorUrn`)
 
-### 4.2 Connect Start Behavior
+### 4.2 Secret Storage
 
-`POST /api/v1/connect/start` executes:
+`integrationSecrets/{uid__provider}` stores encrypted secrets such as:
 
-1. Validate provider and optional stored-credential requirement.
-2. Ensure app user exists in `app_users`.
-3. Reuse active runtime capture when one is already in progress.
-4. Reuse pending session when valid.
-5. Reuse persisted authenticated session metadata when available.
-6. Create a new session row when reuse does not apply.
-7. Launch browser flow:
-   - manual login capture (`launch_login_capture`), or
-   - credential-based login (`launch_credential_login`) if encrypted credentials were requested.
+- `accessTokenEnc`
+- `refreshTokenEnc`
+- `idTokenEnc`
+- `tokenType`
+- `scope`
+- `expiresAtMs`
 
-### 4.3 Close and Status
+### 4.3 OAuth State Storage
 
-- `POST /api/v1/connect/close` marks close requested in DB and signals runtime control state.
-- `GET /api/v1/connect/status` merges session row + oauth connection + reusable metadata to return:
-  - connection state,
-  - close controls (`close_available`, `close_requested`),
-  - auth/session reuse fields.
+`integrationAuthStates/{sha256(state)}` stores temporary OAuth state metadata:
 
-### 4.4 Compose Control
-
-For LinkedIn compose prefill (`/articles/{article_id}/publish`), runtime controls prevent duplicate active compose automation. If a compose window is already active, compose launch is skipped and posts are still persisted for approval.
+- `provider`
+- `userId`
+- `redirectAfter`
+- `createdAtMs`
+- `expiresAtMs`
 
 ## 5. Integration Workflows
 
 ### 5.1 LinkedIn OAuth
 
-1. Authenticated user starts via `POST /api/v1/auth/linkedin/start`.
-2. Backend stores hashed state in `oauth_states` with expiry.
-3. LinkedIn callback hits `GET /api/v1/auth/linkedin/callback`.
-4. Backend validates state, exchanges code, fetches profile.
-5. Backend upserts `oauth_connections` and stores encrypted tokens in `oauth_tokens`.
-6. Callback redirects to frontend callback URL with status query params.
+1. Frontend or a future backend client calls `POST /api/v1/auth/linkedin/start` with `userId`.
+2. Backend stores hashed state in `integrationAuthStates` with expiry and returns a LinkedIn OAuth URL.
+3. LinkedIn redirects the browser to `GET /api/v1/auth/linkedin/callback`.
+4. Backend validates and consumes the state, exchanges the code for tokens, and calls `https://api.linkedin.com/v2/userinfo`.
+5. Backend persists a publish-ready LinkedIn connection summary including `publishAuthorUrn = urn:li:person:{sub}`.
+6. Backend stores encrypted LinkedIn access/refresh/id tokens in `integrationSecrets`.
+7. Callback redirects to the frontend settings route with `integration=linkedin` and `status=connected|error`.
 
-### 5.2 Facebook OAuth and API Posting
+### 5.2 Multi-Provider Foundation
 
-1. Frontend starts with `POST /api/v1/auth/facebook/start`.
-2. Frontend callback page calls `POST /api/v1/auth/facebook/callback`.
-3. Backend persists connection/token data using OAuth service.
-4. Publishing path (`POST /api/v1/articles/{article_id}/publish-facebook`):
-   - `dry_run_no_submit=true`: save approval item only.
-   - `dry_run_no_submit=false`: publish via Graph API and persist published record metadata.
-
-
-- launches visible Chromium with anti-detection context options,
-- injects stealth script,
-- validates authenticated state via URL + cookies,
-- captures profile metadata and encrypted storage state,
-- updates session rows and integration logs.
-
-LinkedIn additionally supports compose prefill automation with no-submit enforcement for approval-first workflows.
+- The provider registry already reserves connection slots for LinkedIn, X/Twitter, Instagram, Facebook, WordPress, Ghost, and Substack.
+- Providers without OAuth wiring yet can still store tokens through `POST /api/v1/integrations/{provider}/tokens`.
+- This keeps the connection schema stable before direct publishing endpoints and scheduled workers are added.
 
 ## 6. Frontend Architecture
 
