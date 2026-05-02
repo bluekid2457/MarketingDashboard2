@@ -20,6 +20,7 @@ import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { useInlineEdit, type InlineSelection } from '@/lib/useInlineEdit';
 import { setWorkflowContext } from '@/lib/workflowContext';
 import WorkflowStepper from '@/components/WorkflowStepper';
+import DocumentContextHeader from '@/components/DocumentContextHeader';
 
 type IdeaRecord = {
   id: string;
@@ -1307,7 +1308,7 @@ export default function AdaptPage() {
     <div className="space-y-5">
       <div className="page-header">
         <h1>Platform Adaptation</h1>
-        <p className="breadcrumb mt-1">Angles {'->'} Storyboard {'->'} Adapt (Active) {'->'} Review {'->'} Schedule</p>
+        <p className="breadcrumb mt-1">Angles {'->'} Storyboard {'->'} Adapt (Active) {'->'} Review {'->'} Publish</p>
 
         {adaptContext ? (
           <div className="mt-2 flex flex-wrap items-center gap-4 text-sm" style={{ color: '#a7c9be' }}>
@@ -1345,6 +1346,11 @@ export default function AdaptPage() {
         ) : null}
       </div>
       <WorkflowStepper />
+      <DocumentContextHeader
+        ideaTopic={adaptContext?.idea.topic ?? ''}
+        angleTitle={adaptContext?.selectedAngle.title ?? ''}
+        activeStep="adapt"
+      />
 
       {contextError ? (
         <section className="surface-card p-5">

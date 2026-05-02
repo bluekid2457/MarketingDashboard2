@@ -1181,7 +1181,7 @@ export default function AnglesPage() {
       <div className="min-w-0 flex-1 space-y-5">
         <div className="page-header">
           <h1>
-            Select AI Angles &amp; Outlines for: {idea ? idea.topic : 'Your Selected Idea'}
+            Select AI Angle &amp; Outline for: {idea ? idea.topic : 'Your Selected Idea'}
           </h1>
           <div className="mt-2 flex flex-wrap gap-4 text-sm" style={{ color: '#a7c9be' }}>
             <span>Idea: <span className="font-semibold text-white">{idea?.topic ?? 'Not selected yet'}</span></span>

@@ -910,7 +910,7 @@ export default function IdeasPage() {
   return (
     <div className="min-w-0 flex-1 space-y-5">
       <div className="rounded-2xl border bg-white shadow-sm p-6">
-        <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-slate-400">CAMPAIGNS · IDEAS</p>
+        <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-slate-400">PIPELINE · IDEAS</p>
         <h1 className="text-2xl font-bold text-slate-900">Idea Backlog</h1>
         <p className="mt-1 text-sm text-slate-500">
           Drop a one-sentence topic. We&apos;ll score relevance against today&apos;s trend signals and surface the strongest angles.
@@ -1154,10 +1154,9 @@ export default function IdeasPage() {
                               router.push(`/adapt/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(adaptMap.get(idea.id)!)}`);
                             }}
                           >
-                            Go to Adapt →
+                            Resume in Adapt →
                           </button>
-                        ) : null}
-                        {hasDraft && !hasAdapt ? (
+                        ) : hasDraft ? (
                           <button
                             type="button"
                             className="rounded-xl px-4 py-1.5 text-xs font-bold text-white hover:opacity-90"
@@ -1167,29 +1166,37 @@ export default function IdeasPage() {
                               router.push(`/storyboard/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(draftMap.get(idea.id)!)}`);
                             }}
                           >
-                            Open Storyboard →
+                            Resume in Storyboard →
                           </button>
-                        ) : null}
-                        <button
-                          type="button"
-                          className={`rounded-xl px-4 py-1.5 text-xs font-bold hover:opacity-90 ${hasAdapt || hasDraft ? 'border border-emerald-700 text-emerald-700' : 'text-white'}`}
-                          style={hasAdapt || hasDraft ? {} : { background: '#1a7a5e' }}
-                          onClick={() => { void openAnglesForIdea(idea); }}
-                        >
-                          Open angles →
-                        </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rounded-xl px-4 py-1.5 text-xs font-bold text-white hover:opacity-90"
+                            style={{ background: '#1a7a5e' }}
+                            onClick={() => { void openAnglesForIdea(idea); }}
+                          >
+                            Open angles →
+                          </button>
+                        )}
                         <div className="relative">
                           <button
                             type="button"
                             className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-50"
                             onClick={() => setOpenMenuIdeaId(isMenuOpen ? null : idea.id)}
+                            aria-haspopup="menu"
+                            aria-expanded={isMenuOpen}
+                            aria-label="More actions"
                           >
                             ...
                           </button>
                           {isMenuOpen ? (
-                            <div className="absolute right-0 top-8 z-10 w-36 rounded-xl border border-slate-200 bg-white shadow-lg">
+                            <div
+                              role="menu"
+                              className="absolute right-0 top-8 z-10 w-44 rounded-xl border border-slate-200 bg-white shadow-lg"
+                            >
                               <button
                                 type="button"
+                                role="menuitem"
                                 className="block w-full px-4 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
                                 onClick={() => {
                                   setOpenMenuIdeaId(null);
@@ -1198,8 +1205,52 @@ export default function IdeasPage() {
                               >
                                 Edit title
                               </button>
+                              {hasAdapt ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    className="block w-full px-4 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                    onClick={() => {
+                                      setOpenMenuIdeaId(null);
+                                      void openAnglesForIdea(idea);
+                                    }}
+                                  >
+                                    Open angles
+                                  </button>
+                                  {hasDraft ? (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      className="block w-full px-4 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                      onClick={() => {
+                                        setOpenMenuIdeaId(null);
+                                        setWorkflowContext({ ideaId: idea.id, ideaTopic: idea.topic });
+                                        router.push(`/storyboard/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(draftMap.get(idea.id)!)}`);
+                                      }}
+                                    >
+                                      Open Storyboard
+                                    </button>
+                                  ) : null}
+                                </>
+                              ) : null}
+                              {hasDraft && !hasAdapt ? (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  className="block w-full px-4 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                  onClick={() => {
+                                    setOpenMenuIdeaId(null);
+                                    setWorkflowContext({ ideaId: idea.id, ideaTopic: idea.topic });
+                                    router.push(`/adapt/${encodeURIComponent(idea.id)}`);
+                                  }}
+                                >
+                                  Go to Adapt
+                                </button>
+                              ) : null}
                               <button
                                 type="button"
+                                role="menuitem"
                                 className="block w-full px-4 py-2 text-left text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
                                 onClick={() => {
                                   setOpenMenuIdeaId(null);

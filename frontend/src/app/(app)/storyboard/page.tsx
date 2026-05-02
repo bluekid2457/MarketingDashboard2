@@ -8,6 +8,7 @@ import { collection, deleteDoc, doc, onSnapshot, orderBy, query } from 'firebase
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { Spinner } from '@/components/Spinner';
 import { getWorkflowContext } from '@/lib/workflowContext';
+import { findOrphanStoryboards } from '@/lib/orphans';
 
 type StoryboardRecord = {
   id: string;
@@ -54,6 +55,7 @@ function getRecycleVerdict(updatedAtMs: number): RecycleVerdict {
 export default function StoryboardIndexPage() {
   const [uid, setUid] = useState<string | null>(null);
   const [records, setRecords] = useState<StoryboardRecord[]>([]);
+  const [orphanIds, setOrphanIds] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -111,6 +113,29 @@ export default function StoryboardIndexPage() {
     return unsub;
   }, [uid]);
 
+  // Debounced orphan detection: runs off the snapshot data (NOT inside the
+  // snapshot callback) so the existence checks do not block list rendering.
+  useEffect(() => {
+    if (!uid || records.length === 0) {
+      setOrphanIds(new Set());
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const orphans = await findOrphanStoryboards(uid);
+        if (cancelled) return;
+        setOrphanIds(new Set(orphans.map((entry) => entry.id)));
+      })();
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [uid, records]);
+
+  const visibleRecords = records.filter((record) => !orphanIds.has(record.id));
+
   const newStoryboardHref = ctx?.ideaId
     ? `/angles?ideaId=${encodeURIComponent(ctx.ideaId)}`
     : '/ideas';
@@ -149,7 +174,7 @@ export default function StoryboardIndexPage() {
         </div>
       ) : error ? (
         <p className="text-sm text-red-600">{error}</p>
-      ) : records.length === 0 ? (
+      ) : visibleRecords.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-300 px-6 py-12 text-center">
           <p className="text-slate-500">No storyboard items yet.</p>
           <Link
@@ -162,7 +187,7 @@ export default function StoryboardIndexPage() {
       ) : (
         <>
           {(() => {
-            const recyclable = records
+            const recyclable = visibleRecords
               .map((record) => ({ record, verdict: getRecycleVerdict(record.updatedAtMs) }))
               .filter((entry) => entry.verdict.tone !== 'fresh');
             if (recyclable.length === 0) return null;
@@ -194,7 +219,7 @@ export default function StoryboardIndexPage() {
           })()}
 
           <ul className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white shadow-sm">
-            {records.map((record) => {
+            {visibleRecords.map((record) => {
               const recycle = getRecycleVerdict(record.updatedAtMs);
               return (
                 <li key={record.id} className="flex items-center justify-between gap-2 px-5 py-4 hover:bg-slate-50">

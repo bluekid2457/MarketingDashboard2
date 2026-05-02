@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 
+import { PlaceholderCard } from '@/components/PlaceholderCard';
 import { Spinner } from '@/components/Spinner';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 
@@ -178,32 +179,34 @@ export default function ReviewPage() {
             </ul>
           ) : null}
 
-          <h3 className="mt-5 text-sm font-semibold text-slate-800">Inline Editor</h3>
-          <div className="mt-2 min-h-[180px] rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-500">
-            Open a storyboard item from the queue to edit and review the full content.
-          </div>
         </section>
 
         <div className="space-y-6">
-          <section className="surface-card p-6">
-            <h2 className="section-title">Version History</h2>
-            <p className="mt-2 muted-copy">Version snapshots are available in each storyboard&apos;s editor flow.</p>
-          </section>
-
-          <section className="surface-card p-6">
-            <h2 className="section-title">Approval Chain Controls</h2>
-            <p className="mt-2 muted-copy">Author &#8594; Editor &#8594; Legal &#8594; Client approver.</p>
-          </section>
-
-          <section className="surface-card p-6">
-            <h2 className="section-title">Comment / Suggestion Layer</h2>
-            <p className="mt-2 muted-copy">Threaded comments with mention support and resolution state.</p>
-          </section>
-
-          <section className="surface-card p-6">
-            <h2 className="section-title">Role-Based Access</h2>
-            <p className="mt-2 muted-copy">Restrict approval actions by role and workspace policy.</p>
-          </section>
+          <PlaceholderCard
+            title="Inline Editor"
+            description="Edit drafts inline before approving — currently you can open the storyboard editor from the queue."
+            previewKind="editor"
+          />
+          <PlaceholderCard
+            title="Version History"
+            description="Side-by-side diff of saved revisions with one-click restore."
+            previewKind="list"
+          />
+          <PlaceholderCard
+            title="Approval Chain Controls"
+            description="Multi-step approver routing for teams or agencies."
+            previewKind="list"
+          />
+          <PlaceholderCard
+            title="Comment / Suggestion Layer"
+            description="Drop comments and suggestion edits anchored to specific paragraphs."
+            previewKind="list"
+          />
+          <PlaceholderCard
+            title="Role-Based Access"
+            description="Separate drafting, approving, and publishing rights per workspace member."
+            previewKind="form"
+          />
         </div>
       </div>
     </div>

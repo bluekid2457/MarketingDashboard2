@@ -6,10 +6,19 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { collection, deleteField, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 
 import { Spinner } from '@/components/Spinner';
+import DocumentContextHeader from '@/components/DocumentContextHeader';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { findOrphanAdaptations } from '@/lib/orphans';
+import { getWorkflowContext, type WorkflowContext } from '@/lib/workflowContext';
 
-type PlatformKey = 'linkedin' | 'twitter';
+type PlatformKey = 'linkedin' | 'twitter' | 'medium' | 'newsletter' | 'blog';
+
+const PLATFORM_KEYS: readonly PlatformKey[] = ['linkedin', 'twitter', 'medium', 'newsletter', 'blog'] as const;
+
+function isPlatformKey(value: unknown): value is PlatformKey {
+  return typeof value === 'string' && (PLATFORM_KEYS as readonly string[]).includes(value);
+}
 
 type PlatformContent = Partial<Record<PlatformKey, string>>;
 
@@ -66,16 +75,21 @@ function parseAdaptationRecord(id: string, payload: Record<string, unknown>): Ad
   const rawPlatforms = payload.platforms;
   const platformsObject = rawPlatforms && typeof rawPlatforms === 'object' ? (rawPlatforms as Record<string, unknown>) : {};
 
+  const platforms: PlatformContent = {};
+  for (const key of PLATFORM_KEYS) {
+    const value = asTrimmedString(platformsObject[key]);
+    if (value) {
+      platforms[key] = value;
+    }
+  }
+
   return {
     id,
     ideaId: asTrimmedString(payload.ideaId),
     angleId: asTrimmedString(payload.angleId),
     ideaTopic: asTrimmedString(payload.ideaTopic),
     angleTitle: asTrimmedString(payload.angleTitle),
-    platforms: {
-      linkedin: asTrimmedString(platformsObject.linkedin),
-      twitter: asTrimmedString(platformsObject.twitter),
-    },
+    platforms,
   };
 }
 
@@ -98,9 +112,60 @@ function parseScheduledAtInputValue(value: string): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+const PLATFORM_LABELS: Record<PlatformKey, string> = {
+  linkedin: 'LinkedIn',
+  twitter: 'X / Twitter',
+  medium: 'Medium',
+  newsletter: 'Newsletter',
+  blog: 'Blog',
+};
+
 function formatPlatformLabel(platform: PlatformKey): string {
-  return platform === 'linkedin' ? 'LinkedIn' : 'X / Twitter';
+  return PLATFORM_LABELS[platform];
 }
+
+// Per-platform UI metadata used to render publish cards. Compose-URL handoff
+// only exists for LinkedIn / X — Medium / Newsletter / Blog cards offer
+// "Copy text" + "Schedule" because those platforms have no one-click intent URL.
+type PlatformCardMeta = {
+  badgeClassName: string;
+  description: string;
+  emptyPlaceholder: string;
+  copyButtonLabel: string;
+};
+
+const PLATFORM_CARD_META: Record<PlatformKey, PlatformCardMeta> = {
+  linkedin: {
+    badgeClassName: 'bg-blue-100 text-blue-800',
+    description: 'LinkedIn one-click handoff: we copy your content first, then open LinkedIn compose.',
+    emptyPlaceholder: 'No LinkedIn-ready content found yet. Generate platform copy in Adapt first.',
+    copyButtonLabel: 'Copy LinkedIn Text',
+  },
+  twitter: {
+    badgeClassName: 'bg-slate-900 text-white',
+    description: 'Opens X compose intent with your post text prefilled.',
+    emptyPlaceholder: 'No X/Twitter-ready content found yet. Generate platform copy in Adapt first.',
+    copyButtonLabel: 'Copy X Text',
+  },
+  medium: {
+    badgeClassName: 'bg-emerald-100 text-emerald-800',
+    description: 'Copy your Medium draft, then paste it into your Medium editor and schedule a reminder here.',
+    emptyPlaceholder: 'No Medium-ready content found yet. Generate platform copy in Adapt first.',
+    copyButtonLabel: 'Copy Medium Text',
+  },
+  newsletter: {
+    badgeClassName: 'bg-amber-100 text-amber-900',
+    description: 'Copy your newsletter copy, then paste it into your email tool. Schedule a reminder here.',
+    emptyPlaceholder: 'No Newsletter-ready content found yet. Generate platform copy in Adapt first.',
+    copyButtonLabel: 'Copy Newsletter Text',
+  },
+  blog: {
+    badgeClassName: 'bg-purple-100 text-purple-800',
+    description: 'Copy your blog draft, then paste it into your CMS. Schedule a reminder here.',
+    emptyPlaceholder: 'No Blog-ready content found yet. Generate platform copy in Adapt first.',
+    copyButtonLabel: 'Copy Blog Text',
+  },
+};
 
 export default function PublishPage() {
   const [currentUid, setCurrentUid] = useState<string | null>(null);
@@ -108,6 +173,7 @@ export default function PublishPage() {
   const [isAdaptationsLoading, setIsAdaptationsLoading] = useState(true);
 
   const [adaptations, setAdaptations] = useState<AdaptationRecord[]>([]);
+  const [orphanAdaptationIds, setOrphanAdaptationIds] = useState<Set<string>>(new Set());
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<PublishNotice | null>(null);
 
@@ -126,6 +192,11 @@ export default function PublishPage() {
   const [scheduledPosts, setScheduledPosts] = useState<ScheduledPostRecord[]>([]);
   const [plagiarismByKey, setPlagiarismByKey] = useState<Record<string, PlagiarismResult>>({});
   const [plagiarismRunningByKey, setPlagiarismRunningByKey] = useState<BooleanMap>({});
+  const [workflowContext, setWorkflowContextState] = useState<WorkflowContext | null>(null);
+
+  useEffect(() => {
+    setWorkflowContextState(getWorkflowContext());
+  }, []);
 
   const keyFor = useCallback((adaptationId: string, platform: PlatformKey): string => {
     return `${adaptationId}:${platform}`;
@@ -189,6 +260,32 @@ export default function PublishPage() {
     return unsubscribe;
   }, [currentUid, isAuthLoading]);
 
+  // Debounced orphan-adaptation detection runs off the snapshot data so the
+  // existence checks never block the initial render of the adaptations list.
+  useEffect(() => {
+    if (!currentUid || adaptations.length === 0) {
+      setOrphanAdaptationIds(new Set());
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const orphans = await findOrphanAdaptations(currentUid);
+        if (cancelled) return;
+        setOrphanAdaptationIds(new Set(orphans.map((entry) => entry.id)));
+      })();
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [currentUid, adaptations]);
+
+  const visibleAdaptations = useMemo(
+    () => adaptations.filter((entry) => !orphanAdaptationIds.has(entry.id)),
+    [adaptations, orphanAdaptationIds],
+  );
+
   useEffect(() => {
     if (!currentUid) {
       setScheduledPosts([]);
@@ -210,9 +307,7 @@ export default function PublishPage() {
             const rawPlatforms = Array.isArray(data.platforms)
               ? data.platforms
               : [];
-            const platforms = rawPlatforms
-              .map((entry) => (entry === 'linkedin' || entry === 'twitter' ? entry : null))
-              .filter((entry): entry is PlatformKey => entry !== null);
+            const platforms = rawPlatforms.filter(isPlatformKey);
 
             return {
               id: documentSnapshot.id,
@@ -517,8 +612,34 @@ export default function PublishPage() {
     return scheduledPosts.filter((item) => item.scheduledForMs >= nowMs).slice(0, 6);
   }, [scheduledPosts]);
 
+  // Show the persistent context header only when the user arrived from a single
+  // adaptation jump (Adapt's "Save and continue" CTA seeds workflow_context with
+  // an ideaId). Otherwise this page is a multi-adaptation library view.
+  const showContextHeader = Boolean(workflowContext?.ideaId);
+  const contextHeaderTopic = (() => {
+    if (!workflowContext) return '';
+    const fromContext = workflowContext.ideaTopic?.trim();
+    if (fromContext) return fromContext;
+    const match = adaptations.find((a) => a.ideaId === workflowContext.ideaId);
+    return match?.ideaTopic ?? '';
+  })();
+  const contextHeaderAngle = (() => {
+    if (!workflowContext) return '';
+    const match = adaptations.find(
+      (a) => a.ideaId === workflowContext.ideaId && (!workflowContext.angleId || a.angleId === workflowContext.angleId),
+    );
+    return match?.angleTitle ?? '';
+  })();
+
   return (
     <div className="space-y-6">
+      {showContextHeader ? (
+        <DocumentContextHeader
+          ideaTopic={contextHeaderTopic}
+          angleTitle={contextHeaderAngle}
+          activeStep="publish"
+        />
+      ) : null}
       <section className="surface-card p-6">
         <p className="text-xs font-bold uppercase tracking-[0.2em] text-teal-700">Screen 7</p>
         <h1 className="mt-2 text-3xl font-extrabold text-slate-900">Publishing and Scheduling</h1>
@@ -526,7 +647,7 @@ export default function PublishPage() {
           Schedule and publish any adaptation from your full library.
         </p>
 
-        <p className="mt-2 text-sm text-slate-600">Loaded adaptations: <span className="font-semibold text-slate-900">{adaptations.length}</span></p>
+        <p className="mt-2 text-sm text-slate-600">Loaded adaptations: <span className="font-semibold text-slate-900">{visibleAdaptations.length}</span></p>
 
         {notice ? <p className={`mt-4 rounded-xl border px-4 py-3 text-sm ${noticeColorClass}`}>{notice.message}</p> : null}
       </section>
@@ -545,40 +666,39 @@ export default function PublishPage() {
 
       {!isAuthLoading && !isAdaptationsLoading && !loadError ? (
         <>
-          {adaptations.length === 0 ? (
+          {visibleAdaptations.length === 0 ? (
             <section className="surface-card p-6">
               <p className="text-sm text-slate-600">No adaptations are available yet. Generate adaptations first, then schedule them here.</p>
             </section>
           ) : (
             <div className="space-y-6">
-              {adaptations.map((adaptation) => {
+              {visibleAdaptations.map((adaptation) => {
                 const articleTitle = adaptation.ideaTopic || adaptation.angleTitle || 'Untitled article';
                 const angleLabel = adaptation.angleTitle || 'Untitled angle';
                 const editAdaptationHref = adaptation.ideaId && adaptation.angleId
                   ? `/adapt/${encodeURIComponent(adaptation.ideaId)}?angleId=${encodeURIComponent(adaptation.angleId)}`
                   : null;
 
-                const linkedinKey = keyFor(adaptation.id, 'linkedin');
-                const twitterKey = keyFor(adaptation.id, 'twitter');
+                // Build the list of platform cards to render. A card is shown
+                // either when there is saved content for that platform OR when
+                // the user has clicked Edit (so they can paste fresh content
+                // into a previously-empty platform). Iterating the canonical
+                // PLATFORM_KEYS list ensures every platform supported by Adapt
+                // (linkedin, twitter, medium, newsletter, blog) gets a card.
+                const cardEntries = PLATFORM_KEYS.flatMap((platform) => {
+                  const text = asTrimmedString(adaptation.platforms[platform]);
+                  const cardKey = keyFor(adaptation.id, platform);
+                  const isEditingCard = Boolean(editingByKey[cardKey]);
+                  if (text.length === 0 && !isEditingCard) {
+                    return [];
+                  }
+                  return [{ platform, text, cardKey, isEditingCard }];
+                });
 
-                const linkedinText = asTrimmedString(adaptation.platforms.linkedin);
-                const twitterText = asTrimmedString(adaptation.platforms.twitter);
-
-                const isEditingLinkedin = Boolean(editingByKey[linkedinKey]);
-                const isEditingTwitter = Boolean(editingByKey[twitterKey]);
-                const isSavingLinkedin = Boolean(savingEditByKey[linkedinKey]);
-                const isSavingTwitter = Boolean(savingEditByKey[twitterKey]);
-                const isDeletingLinkedin = Boolean(deletingByKey[linkedinKey]);
-                const isDeletingTwitter = Boolean(deletingByKey[twitterKey]);
-                const isSchedulingLinkedin = Boolean(schedulingByKey[linkedinKey]);
-                const isSchedulingTwitter = Boolean(schedulingByKey[twitterKey]);
-
-                const showLinkedInCard = linkedinText.length > 0 || isEditingLinkedin;
-                const showTwitterCard = twitterText.length > 0 || isEditingTwitter;
-                const visibleCardCount = (showLinkedInCard ? 1 : 0) + (showTwitterCard ? 1 : 0);
+                const visibleCardCount = cardEntries.length;
 
                 return (
-                  <section key={adaptation.id} className="surface-card p-6">
+                  <section key={adaptation.id} className="surface-card p-6" data-testid={`publish-adaptation-${adaptation.id}`}>
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <h2 className="section-title">{articleTitle}</h2>
@@ -595,339 +715,197 @@ export default function PublishPage() {
                     </div>
 
                     <div className={`mt-4 grid gap-6 ${visibleCardCount > 1 ? 'lg:grid-cols-2' : 'lg:grid-cols-1'}`}>
-                      {showLinkedInCard ? (
-                        <section className="rounded-xl border border-slate-200 p-4">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <h3 className="font-semibold text-slate-900">{articleTitle}</h3>
-                              <p className="mt-1 text-xs text-slate-600">
-                                LinkedIn one-click handoff: we copy your content first, then open LinkedIn compose.
-                              </p>
+                      {cardEntries.map(({ platform, text, cardKey, isEditingCard }) => {
+                        const meta = PLATFORM_CARD_META[platform];
+                        const platformLabel = formatPlatformLabel(platform);
+                        const isSaving = Boolean(savingEditByKey[cardKey]);
+                        const isDeleting = Boolean(deletingByKey[cardKey]);
+                        const isScheduling = Boolean(schedulingByKey[cardKey]);
+                        const plagiarism = plagiarismByKey[cardKey];
+                        const cleared = isPlagiarismCleared(cardKey, text);
+                        const hasPublishHandoff = platform === 'linkedin' || platform === 'twitter';
+
+                        return (
+                          <section
+                            key={cardKey}
+                            className="rounded-xl border border-slate-200 p-4"
+                            data-testid={`publish-card-${platform}`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <h3 className="font-semibold text-slate-900">{articleTitle}</h3>
+                                <p className="mt-1 text-xs text-slate-600">{meta.description}</p>
+                              </div>
+                              <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${meta.badgeClassName}`}>
+                                {platformLabel}
+                              </span>
                             </div>
-                            <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-800">LinkedIn</span>
-                          </div>
 
-                          <textarea
-                            readOnly={!isEditingLinkedin}
-                            value={isEditingLinkedin ? (draftByKey[linkedinKey] ?? linkedinText) : linkedinText}
-                            className="mt-4 min-h-[200px] w-full rounded-xl border border-slate-300 bg-slate-50 p-3 text-sm text-slate-800"
-                            placeholder="No LinkedIn-ready content found yet. Generate platform copy in Adapt first."
-                            onChange={(event) => {
-                              setDraftByKey((previous) => ({ ...previous, [linkedinKey]: event.target.value }));
-                            }}
-                          />
+                            <textarea
+                              readOnly={!isEditingCard}
+                              value={isEditingCard ? (draftByKey[cardKey] ?? text) : text}
+                              className="mt-4 min-h-[200px] w-full rounded-xl border border-slate-300 bg-slate-50 p-3 text-sm text-slate-800"
+                              placeholder={meta.emptyPlaceholder}
+                              onChange={(event) => {
+                                setDraftByKey((previous) => ({ ...previous, [cardKey]: event.target.value }));
+                              }}
+                            />
 
-                          {(() => {
-                            const result = plagiarismByKey[linkedinKey];
-                            if (!result) {
-                              return (
-                                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                  Plagiarism check has not been run on this LinkedIn copy. Click &ldquo;Run plagiarism check&rdquo; before publishing or scheduling.
-                                </p>
-                              );
-                            }
-                            return (
+                            {plagiarism ? (
                               <p
                                 className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
-                                  result.verdict === 'clean'
+                                  plagiarism.verdict === 'clean'
                                     ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                                    : result.verdict === 'high-risk'
+                                    : plagiarism.verdict === 'high-risk'
                                     ? 'border-red-200 bg-red-50 text-red-700'
                                     : 'border-amber-200 bg-amber-50 text-amber-900'
                                 }`}
                               >
-                                Plagiarism: {result.verdict.replace('-', ' ')} (risk {result.riskScore}/100,{' '}
-                                {result.flags.length} flag{result.flags.length === 1 ? '' : 's'},{' '}
-                                {result.webMatches.length} web match{result.webMatches.length === 1 ? '' : 'es'}).
-                                {result.verdict === 'high-risk'
+                                Plagiarism: {plagiarism.verdict.replace('-', ' ')} (risk {plagiarism.riskScore}/100,{' '}
+                                {plagiarism.flags.length} flag{plagiarism.flags.length === 1 ? '' : 's'},{' '}
+                                {plagiarism.webMatches.length} web match{plagiarism.webMatches.length === 1 ? '' : 'es'}).
+                                {plagiarism.verdict === 'high-risk'
                                   ? ' Resolve flagged passages before publishing.'
                                   : ''}
                               </p>
-                            );
-                          })()}
-
-                          <div className="mt-4 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-                              onClick={() => {
-                                void runPlagiarismCheck(linkedinKey, linkedinText);
-                              }}
-                              disabled={linkedinText.length === 0 || Boolean(plagiarismRunningByKey[linkedinKey])}
-                            >
-                              {plagiarismRunningByKey[linkedinKey] ? 'Checking…' : 'Run plagiarism check'}
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-xl bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
-                              onClick={() => {
-                                void openLinkedInCompose(linkedinText);
-                              }}
-                              disabled={linkedinText.length === 0 || !isPlagiarismCleared(linkedinKey, linkedinText)}
-                              title={
-                                !isPlagiarismCleared(linkedinKey, linkedinText)
-                                  ? 'Run a passing plagiarism check before publishing.'
-                                  : undefined
-                              }
-                            >
-                              Publish to LinkedIn
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-                              onClick={() => {
-                                void copyText(linkedinText, 'LinkedIn');
-                              }}
-                              disabled={linkedinText.length === 0}
-                            >
-                              Copy LinkedIn Text
-                            </button>
-                            {!isEditingLinkedin ? (
-                              <button
-                                type="button"
-                                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-                                onClick={() => {
-                                  setEditingByKey((previous) => ({ ...previous, [linkedinKey]: true }));
-                                  setDraftByKey((previous) => ({ ...previous, [linkedinKey]: linkedinText }));
-                                }}
-                                disabled={isDeletingLinkedin}
-                              >
-                                Edit
-                              </button>
                             ) : (
-                              <>
-                                <button
-                                  type="button"
-                                  className="rounded-xl bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
-                                  onClick={() => {
-                                    void savePlatformEdit(adaptation, 'linkedin');
-                                  }}
-                                  disabled={isSavingLinkedin}
-                                >
-                                  {isSavingLinkedin ? 'Saving...' : 'Save Edit'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                                  onClick={() => {
-                                    setEditingByKey((previous) => ({ ...previous, [linkedinKey]: false }));
-                                    setDraftByKey((previous) => ({ ...previous, [linkedinKey]: linkedinText }));
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                              </>
-                            )}
-                            <button
-                              type="button"
-                              className="rounded-xl border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60"
-                              onClick={() => {
-                                void deletePlatformContent(adaptation, 'linkedin');
-                              }}
-                              disabled={linkedinText.length === 0 || isDeletingLinkedin}
-                            >
-                              {isDeletingLinkedin ? 'Deleting...' : 'Delete'}
-                            </button>
-                          </div>
-
-                          <div className="mt-5 border-t border-slate-200 pt-4">
-                            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Schedule LinkedIn post</p>
-                            <div className="grid gap-2 md:grid-cols-[1fr_auto] md:items-end">
-                              <label className="text-sm text-slate-700">
-                                <span className="mb-1 block font-medium">Publish date &amp; time</span>
-                                <input
-                                  type="datetime-local"
-                                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
-                                  value={scheduleInputByKey[linkedinKey] ?? initialScheduleInput}
-                                  onChange={(event) => {
-                                    setScheduleInputByKey((previous) => ({ ...previous, [linkedinKey]: event.target.value }));
-                                  }}
-                                />
-                              </label>
-                              <button
-                                type="button"
-                                className="rounded-xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-60"
-                                onClick={() => {
-                                  void schedulePost(adaptation, 'linkedin', articleTitle, angleLabel);
-                                }}
-                                disabled={isSchedulingLinkedin || linkedinText.length === 0 || !isPlagiarismCleared(linkedinKey, linkedinText)}
-                                title={
-                                  !isPlagiarismCleared(linkedinKey, linkedinText)
-                                    ? 'Run a passing plagiarism check before scheduling.'
-                                    : undefined
-                                }
-                              >
-                                {isSchedulingLinkedin ? 'Scheduling...' : 'Schedule'}
-                              </button>
-                            </div>
-                          </div>
-                        </section>
-                      ) : null}
-
-                      {showTwitterCard ? (
-                        <section className="rounded-xl border border-slate-200 p-4">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <h3 className="font-semibold text-slate-900">{articleTitle}</h3>
-                              <p className="mt-1 text-xs text-slate-600">Opens X compose intent with your post text prefilled.</p>
-                            </div>
-                            <span className="rounded-full bg-slate-900 px-2.5 py-1 text-xs font-semibold text-white">X / Twitter</span>
-                          </div>
-
-                          <textarea
-                            readOnly={!isEditingTwitter}
-                            value={isEditingTwitter ? (draftByKey[twitterKey] ?? twitterText) : twitterText}
-                            className="mt-4 min-h-[200px] w-full rounded-xl border border-slate-300 bg-slate-50 p-3 text-sm text-slate-800"
-                            placeholder="No X/Twitter-ready content found yet. Generate platform copy in Adapt first."
-                            onChange={(event) => {
-                              setDraftByKey((previous) => ({ ...previous, [twitterKey]: event.target.value }));
-                            }}
-                          />
-
-                          {(() => {
-                            const result = plagiarismByKey[twitterKey];
-                            if (!result) {
-                              return (
-                                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                  Plagiarism check has not been run on this X/Twitter copy. Click &ldquo;Run plagiarism check&rdquo; before publishing or scheduling.
-                                </p>
-                              );
-                            }
-                            return (
-                              <p
-                                className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
-                                  result.verdict === 'clean'
-                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                                    : result.verdict === 'high-risk'
-                                    ? 'border-red-200 bg-red-50 text-red-700'
-                                    : 'border-amber-200 bg-amber-50 text-amber-900'
-                                }`}
-                              >
-                                Plagiarism: {result.verdict.replace('-', ' ')} (risk {result.riskScore}/100,{' '}
-                                {result.flags.length} flag{result.flags.length === 1 ? '' : 's'},{' '}
-                                {result.webMatches.length} web match{result.webMatches.length === 1 ? '' : 'es'}).
-                                {result.verdict === 'high-risk' ? ' Resolve flagged passages before publishing.' : ''}
+                              <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                Plagiarism check has not been run on this {platformLabel} copy. Click &ldquo;Run plagiarism check&rdquo; before publishing or scheduling.
                               </p>
-                            );
-                          })()}
+                            )}
 
-                          <div className="mt-4 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-                              onClick={() => {
-                                void runPlagiarismCheck(twitterKey, twitterText);
-                              }}
-                              disabled={twitterText.length === 0 || Boolean(plagiarismRunningByKey[twitterKey])}
-                            >
-                              {plagiarismRunningByKey[twitterKey] ? 'Checking…' : 'Run plagiarism check'}
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:opacity-60"
-                              onClick={() => {
-                                openTwitterIntent(twitterText);
-                              }}
-                              disabled={twitterText.length === 0 || !isPlagiarismCleared(twitterKey, twitterText)}
-                              title={
-                                !isPlagiarismCleared(twitterKey, twitterText)
-                                  ? 'Run a passing plagiarism check before publishing.'
-                                  : undefined
-                              }
-                            >
-                              Publish to X / Twitter
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-                              onClick={() => {
-                                void copyText(twitterText, 'X/Twitter');
-                              }}
-                              disabled={twitterText.length === 0}
-                            >
-                              Copy X Text
-                            </button>
-                            {!isEditingTwitter ? (
+                            <div className="mt-4 flex flex-wrap gap-2">
                               <button
                                 type="button"
                                 className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
                                 onClick={() => {
-                                  setEditingByKey((previous) => ({ ...previous, [twitterKey]: true }));
-                                  setDraftByKey((previous) => ({ ...previous, [twitterKey]: twitterText }));
+                                  void runPlagiarismCheck(cardKey, text);
                                 }}
-                                disabled={isDeletingTwitter}
+                                disabled={text.length === 0 || Boolean(plagiarismRunningByKey[cardKey])}
                               >
-                                Edit
+                                {plagiarismRunningByKey[cardKey] ? 'Checking…' : 'Run plagiarism check'}
                               </button>
-                            ) : (
-                              <>
-                                <button
-                                  type="button"
-                                  className="rounded-xl bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
-                                  onClick={() => {
-                                    void savePlatformEdit(adaptation, 'twitter');
-                                  }}
-                                  disabled={isSavingTwitter}
-                                >
-                                  {isSavingTwitter ? 'Saving...' : 'Save Edit'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                                  onClick={() => {
-                                    setEditingByKey((previous) => ({ ...previous, [twitterKey]: false }));
-                                    setDraftByKey((previous) => ({ ...previous, [twitterKey]: twitterText }));
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                              </>
-                            )}
-                            <button
-                              type="button"
-                              className="rounded-xl border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60"
-                              onClick={() => {
-                                void deletePlatformContent(adaptation, 'twitter');
-                              }}
-                              disabled={twitterText.length === 0 || isDeletingTwitter}
-                            >
-                              {isDeletingTwitter ? 'Deleting...' : 'Delete'}
-                            </button>
-                          </div>
 
-                          <div className="mt-5 border-t border-slate-200 pt-4">
-                            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Schedule X / Twitter post</p>
-                            <div className="grid gap-2 md:grid-cols-[1fr_auto] md:items-end">
-                              <label className="text-sm text-slate-700">
-                                <span className="mb-1 block font-medium">Publish date &amp; time</span>
-                                <input
-                                  type="datetime-local"
-                                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
-                                  value={scheduleInputByKey[twitterKey] ?? initialScheduleInput}
-                                  onChange={(event) => {
-                                    setScheduleInputByKey((previous) => ({ ...previous, [twitterKey]: event.target.value }));
+                              {platform === 'linkedin' ? (
+                                <button
+                                  type="button"
+                                  className="rounded-xl bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
+                                  onClick={() => {
+                                    void openLinkedInCompose(text);
                                   }}
-                                />
-                              </label>
+                                  disabled={text.length === 0 || !cleared}
+                                  title={!cleared ? 'Run a passing plagiarism check before publishing.' : undefined}
+                                >
+                                  Publish to LinkedIn
+                                </button>
+                              ) : null}
+
+                              {platform === 'twitter' ? (
+                                <button
+                                  type="button"
+                                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:opacity-60"
+                                  onClick={() => {
+                                    openTwitterIntent(text);
+                                  }}
+                                  disabled={text.length === 0 || !cleared}
+                                  title={!cleared ? 'Run a passing plagiarism check before publishing.' : undefined}
+                                >
+                                  Publish to X / Twitter
+                                </button>
+                              ) : null}
+
                               <button
                                 type="button"
-                                className="rounded-xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-60"
+                                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
                                 onClick={() => {
-                                  void schedulePost(adaptation, 'twitter', articleTitle, angleLabel);
+                                  void copyText(text, platformLabel);
                                 }}
-                                disabled={isSchedulingTwitter || twitterText.length === 0 || !isPlagiarismCleared(twitterKey, twitterText)}
-                                title={
-                                  !isPlagiarismCleared(twitterKey, twitterText)
-                                    ? 'Run a passing plagiarism check before scheduling.'
-                                    : undefined
-                                }
+                                disabled={text.length === 0}
                               >
-                                {isSchedulingTwitter ? 'Scheduling...' : 'Schedule'}
+                                {meta.copyButtonLabel}
+                              </button>
+
+                              {!isEditingCard ? (
+                                <button
+                                  type="button"
+                                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                                  onClick={() => {
+                                    setEditingByKey((previous) => ({ ...previous, [cardKey]: true }));
+                                    setDraftByKey((previous) => ({ ...previous, [cardKey]: text }));
+                                  }}
+                                  disabled={isDeleting}
+                                >
+                                  Edit
+                                </button>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="rounded-xl bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
+                                    onClick={() => {
+                                      void savePlatformEdit(adaptation, platform);
+                                    }}
+                                    disabled={isSaving}
+                                  >
+                                    {isSaving ? 'Saving...' : 'Save Edit'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                                    onClick={() => {
+                                      setEditingByKey((previous) => ({ ...previous, [cardKey]: false }));
+                                      setDraftByKey((previous) => ({ ...previous, [cardKey]: text }));
+                                    }}
+                                  >
+                                    Cancel
+                                  </button>
+                                </>
+                              )}
+
+                              <button
+                                type="button"
+                                className="rounded-xl border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60"
+                                onClick={() => {
+                                  void deletePlatformContent(adaptation, platform);
+                                }}
+                                disabled={text.length === 0 || isDeleting}
+                              >
+                                {isDeleting ? 'Deleting...' : 'Delete'}
                               </button>
                             </div>
-                          </div>
-                        </section>
-                      ) : null}
+
+                            <div className="mt-5 border-t border-slate-200 pt-4">
+                              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                Schedule {platformLabel}{hasPublishHandoff ? ' post' : ' reminder'}
+                              </p>
+                              <div className="grid gap-2 md:grid-cols-[1fr_auto] md:items-end">
+                                <label className="text-sm text-slate-700">
+                                  <span className="mb-1 block font-medium">Publish date &amp; time</span>
+                                  <input
+                                    type="datetime-local"
+                                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
+                                    value={scheduleInputByKey[cardKey] ?? initialScheduleInput}
+                                    onChange={(event) => {
+                                      setScheduleInputByKey((previous) => ({ ...previous, [cardKey]: event.target.value }));
+                                    }}
+                                  />
+                                </label>
+                                <button
+                                  type="button"
+                                  className="rounded-xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-60"
+                                  onClick={() => {
+                                    void schedulePost(adaptation, platform, articleTitle, angleLabel);
+                                  }}
+                                  disabled={isScheduling || text.length === 0 || !cleared}
+                                  title={!cleared ? 'Run a passing plagiarism check before scheduling.' : undefined}
+                                >
+                                  {isScheduling ? 'Scheduling...' : 'Schedule'}
+                                </button>
+                              </div>
+                            </div>
+                          </section>
+                        );
+                      })}
 
                       {visibleCardCount === 0 ? (
                         <section className="rounded-xl border border-slate-200 p-4 lg:col-span-full">

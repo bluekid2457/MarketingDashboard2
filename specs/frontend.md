@@ -1,6 +1,6 @@
 # Frontend Specification
 
-This document defines the requirements, architecture, and key behaviors for the Marketing Dashboard frontend (Next.js 16, TypeScript, Zustand, Tailwind CSS).
+This document defines the requirements, architecture, and key behaviors for the Marketing Dashboard frontend (Next.js 16, TypeScript, Zustand, Tailwind CSS). The user-facing product name is **Flowrite** — used uniformly across the public landing page, HTML `<title>`, auth screens (login + register left panel and form heading), the desktop sidebar brand, the mobile top-bar wordmark, and the dashboard hero. "Marketing Dashboard" is reserved for internal/architectural references only and must not appear in user-visible UI copy.
 
 ## TODO Tracker
 
@@ -162,11 +162,12 @@ frontend/
       AIToolbox.tsx             # Shared AI tooling surface (Tone, Readability, Personas, A/B headlines, Research, Plagiarism, Similar posts on Adapt)
       CitationHighlightPreview.tsx  # Citation-aware preview that highlights claims and cited spans before review submission
       DiffAwareEditor.tsx       # Editor wrapper that renders pending in-place sentence-diffs (red strike-through old / green new) with per-diff Keep/Undo
+      DocumentContextHeader.tsx # Sticky "Editing: <idea topic> · <angle title>" context header rendered beneath the WorkflowStepper on Storyboard / Adapt / Publish (single-doc) so the user keeps a persistent anchor across the Storyboard → Adapt → Publish jump. Right-aligned step indicator ("Step N of 6") derived from `PIPELINE_STEPS`.
       DraftChatPanel.tsx        # Reusable AI chat panel with pending sentence-diff status for in-editor Keep/Undo
       InlineEditPanel.tsx       # Floating inline edit prompt + proposal queue used by Storyboard and Adapt
       Nav.tsx                   # Sidebar navigation component
       Spinner.tsx               # Shared loading spinner used across pages
-      WorkflowStepper.tsx       # Sticky horizontal stepper (Ideas → AI Angles → Storyboard → Adapt → Review → Publish)
+      WorkflowStepper.tsx       # Sticky horizontal stepper (Ideas → Angles → Storyboard → Adapt → Review → Publish) — reads step list from `lib/pipeline.ts`
     lib/                    # Utility helpers
       aiConfig.ts           # LocalStorage-backed AI provider config + active provider/key resolver used by angles generation
       analytics.ts          # Safe auth analytics event emitter (no-op when analytics SDK is absent)
@@ -215,9 +216,14 @@ frontend/
 ### `src/components/Nav.tsx`
 - `'use client'` directive (uses `usePathname`).
 - Mobile: fixed top header with horizontal pill navigation and alerts shortcut.
-- Desktop: fixed left sidebar (`w-72`) with branded hero panel, nav list, and weekly target panel.
-- 11 nav links with emoji icons; active link uses teal treatment (`border-teal-300 bg-teal-50 text-teal-900` desktop, filled pill on mobile).
+- Desktop: fixed left sidebar (`w-56`) with branded hero panel, three labelled groups, and a weekly target panel.
+- Sidebar groups (in order):
+  1. **Dashboard** (single link, `/dashboard`).
+  2. **Pipeline** — the canonical six pipeline steps in canonical order: **Ideas → Angles → Storyboard → Adapt → Review → Publish**. The labels and order are imported from `src/lib/pipeline.ts` (`PIPELINE_STEPS`) so the sidebar, the WorkflowStepper, and any per-page breadcrumbs always agree. Never re-declare these labels inline.
+  3. **More** — `Analytics`, `Collaboration`, `Settings`, `Notifications`. The `/collaboration` link is labeled `Collaboration` (NOT `Audience`); `Campaigns`/`Content`/`Audience` are no longer used as sidebar labels anywhere.
+- Each link renders an emoji-style icon plus the label; active link uses an emerald background treatment, inactive links use a muted teal foreground that lifts on hover.
 - Active detection: exact match on `pathname` or `pathname.startsWith(base)` (strips `/new` suffix for dynamic links like `/drafts/new`).
+- Mobile pill row renders the full flattened list (Dashboard + Pipeline + More) using the same labels — no separate mobile-only naming.
 
 ### `src/app/(app)/layout.tsx` — AppLayout
 - Client-side auth guard with `onAuthStateChanged`.
@@ -231,13 +237,19 @@ frontend/
 ### `src/components/WorkflowStepper.tsx`
 - `'use client'` directive (uses `usePathname`).
 - Sticky horizontal progress bar rendered below the mobile nav and at the top of the desktop content column.
-- Displays 6 labelled steps: **Ideas → AI Angles → Storyboard → Adapt → Review → Publish**.
-- Active step detected via `pathname.startsWith(path)` against each step's `paths` array.
+- Displays the 6 labelled steps from `PIPELINE_STEPS` (see `src/lib/pipeline.ts`): **Ideas → Angles → Storyboard → Adapt → Review → Publish**. Step labels and ordering are imported from that module — the stepper never re-declares the array inline.
+- Active step detected via `pathname.startsWith(path)` against each step's `paths` array (also sourced from `PIPELINE_STEPS`, so the Storyboard step still matches the legacy `/drafts` prefix).
 - Past steps show a checkmark badge and emerald text; active step uses filled emerald background; future steps are muted.
 - The stepper resolves an active workflow idea from route/query/workflow context and uses that idea for dynamic hrefs (Angles/Storyboard/Adapt).
 - Storyboard and Adapt hrefs only attach `angleId` when it belongs to the same active `ideaId`; stale `draft_generation_context` / `adapt_draft_context` from other ideas is ignored.
 - When no matching same-idea angle context exists, Storyboard and Adapt links fall back to `/angles?ideaId={ideaId}` (when `ideaId` is known) or `/angles` (when no idea context exists) — never to bare `/storyboard/{id}` or `/adapt/{id}` routes without `angleId`, which would cause those pages to fail.
 - Responsive: step labels hidden on mobile (xs screens), shown from `sm` breakpoint up.
+
+### `src/lib/pipeline.ts` — Canonical Pipeline Source-of-Truth
+- Exports `PIPELINE_STEPS`, a typed `readonly` array of `{ key, label, path, paths }` describing the canonical content pipeline in this exact order: `ideas → angles → storyboard → adapt → review → publish`.
+- Exports the `PipelineStepKey` union and `PipelineStep` shape for typed consumers.
+- Single import source for `Nav.tsx` (sidebar Pipeline group) and `WorkflowStepper.tsx` (sticky stepper). Per-page breadcrumbs (Storyboard, Adapt) must use the same labels, with `Publish` as the final word — never `Schedule`.
+- Adding/removing/renaming a pipeline step is a one-line edit here; nav, stepper, and breadcrumbs all update together.
 
 ### `src/lib/workflowContext.ts` — Workflow Context Persistence
 - Provides typed helpers for storing/retrieving the active workflow context in `localStorage` under the key `workflow_context`.
@@ -254,6 +266,23 @@ frontend/
   - `.muted-copy`
   - `.pill`
   - `.hero-metric`
+
+### `src/components/ComingSoonBadge.tsx`
+- Tiny inline pill (`bg-amber-100 text-amber-800`) with a small clock icon and the text "Coming soon".
+- Accepts an optional `label` prop to override the text (e.g. `Preview`, `In progress`).
+- Uses `role="status"` with an `aria-label` so screen readers announce the placeholder state.
+- Sized so it can sit next to a section `<h2>`/`<h3>` without breaking the heading layout.
+- Used directly on the dashboard KPI tiles ("Engagement rate", "Best post type") and on every `<h3>` inside the Settings → Advanced (preview) group (Compliance Flags, Audit Log Viewer, Security Settings).
+
+### `src/components/PlaceholderCard.tsx`
+- Reusable wrapper for non-functional preview sections. Renders a `surface-card` at reduced opacity (`opacity-75`) so placeholders visually recede compared to real cards.
+- Header shows the section title with a `<ComingSoonBadge />` inline; an optional `description` prop renders the muted explanatory copy.
+- Built-in `previewKind` decoration (`chart` | `editor` | `list` | `form` | `none`) draws an inert silhouette so the user gets a hint of what the feature will look like once it ships. Decoration is wrapped in `pointer-events-none select-none` and the wrapper sets `aria-disabled="true"`.
+- Optional `children` slot replaces the default decoration when a consumer wants to drop in custom skeleton content. Optional `className` allows grid-span overrides like `lg:col-span-2`.
+- Used by:
+  - `/review` for **Inline Editor**, **Version History**, **Approval Chain Controls**, **Comment / Suggestion Layer**, and **Role-Based Access**.
+  - `/analytics` for **Engagement Charts**, **Performance History**, **Predictive Scoring**, **Copy Intelligence Insights**, and **AI Visibility Tracking** (replaces the previously hardcoded "Predicted reach" and "outperform generic intros" factoids).
+  - `/collaboration` for **Role-Based Access**, **Client Brief Forms**, **Project Calendars**, and **White-Label Toggles**. The Invite / Manage Users card uses the badge inline plus a visibly disabled (`disabled` + `aria-disabled="true"`) Invite teammate button instead of `<PlaceholderCard>`.
 
 ### `src/components/AIToolbox.tsx`
 - Shared AI tooling surface used by Storyboard and Adapt.
@@ -321,8 +350,16 @@ Note: `(TODO)` marks features that are currently not functional and still need i
 
 ### Screen 2 — Dashboard (`/dashboard`)
 **Route:** `src/app/(app)/dashboard/page.tsx`
-**Layout Notes:** Hero with KPI metrics, then responsive grid for calendar, backlog, queue, analytics, and quick links.
+**Layout Notes:** Hero with KPI metrics, then responsive grid for calendar, backlog, queue, analytics, and quick links. A first-run "Get started" checklist card renders above the hero and auto-hides once setup is complete.
 **Sections:**
+0. Get started checklist (first-run onboarding card, rendered as the FIRST card above the hero) — title "Get started with Flowrite", subtitle "A few quick steps before AI features will work.". Three rows, each with a ✅ green check OR ⬜ empty box on the left, the step text in the middle, and a primary "Open" link (or outlined "Review" link when done) on the right. Items and "done" criteria:
+   1. "Set your AI provider key" → done when `getActiveAIKey()` returns a non-empty `apiKey`, OR when active provider is `ollama` (no key required). Action link: `/settings#ai-api-keys`.
+   2. "Fill in your Company Profile" → done when `loadCompanyProfile(currentUid)` from `frontend/src/lib/companyProfile.ts` returns a profile with non-empty `companyName`. Action link: `/settings#company-profile`.
+   3. "Add your first idea" → done when the user has at least one document in `users/{uid}/ideas`. Probed via a one-time Firestore `getDocs(query(collection(db, 'users', uid, 'ideas'), limit(1)))` (existence check only — the full list is not loaded). Action link: `/ideas`.
+   - Auto-hide: when all three items are `done`, the entire checklist card renders `null` (no manual dismiss button — completing the steps IS the dismissal).
+   - Loading state: while the checklist state is being computed (Firestore probe + company profile load), a small `<Spinner size="sm" />` placeholder card is rendered in place so the layout doesn't shift.
+   - Visual style: re-uses `surface-card`, `pill`, `section-title`, `muted-copy` utility classes; emerald/teal palette for completed states.
+   - Coexists with the global API-key warning banner in `(app)/layout.tsx` (banner is reactive; checklist is proactive). The checklist does not replace or modify the banner.
 1. Content Calendar
 2. Idea Backlog Summary (TODO)
 3. Drafts / Review Queue (TODO)
@@ -331,6 +368,7 @@ Note: `(TODO)` marks features that are currently not functional and still need i
   - `Edit` routes to `/adapt/{ideaId}?angleId={angleId}` for that specific adaptation.
   - `Delete` removes `users/{uid}/adaptations/{adaptationId}` from Firestore with confirmation.
 6. Quick Links (TODO)
+7. **Clean up orphans** admin card (renders directly under the Get-started checklist when at least one orphan storyboard or orphan adaptation is detected; otherwise the card returns `null` and is fully hidden). An "orphan" is a `users/{uid}/drafts/{id}` or `users/{uid}/adaptations/{id}` document whose `ideaId` no longer points to an existing `users/{uid}/ideas/{ideaId}` document. Detection is debounced and runs off the snapshot data via `findOrphanStoryboards` / `findOrphanAdaptations` from `frontend/src/lib/orphans.ts`, with parent-existence checks cached per `ideaId` so the dashboard never blocks rendering on N parallel `getDoc` calls. The card title is "Clean up orphans"; the body copy is "We found N items pointing to deleted ideas. They've been hidden from your dashboard. Delete them permanently?"; the primary action is a "Delete N orphans" button that calls `deleteOrphans(uid, ...)` (idempotent), then re-runs the detector so the card auto-hides on success. While orphan detection is in flight (post-snapshot), the dashboard optimistically renders ALL drafts/adaptations; once the detector resolves, orphans are dropped from the "Oldest open draft" hero metric, the "Storyboards and Review queue" card, the "All Adaptations" list, the "Total drafts" / "Total adaptations" analytics cards, and the "Posts this week" / "Ideas waiting" derivations.
 
 ---
 
@@ -343,7 +381,7 @@ Note: `(TODO)` marks features that are currently not functional and still need i
 3. Input card: single `<input type="text">` (one-sentence topic), three pill-style inline `<select>` dropdowns (Tone, Audience, Format — options `['Any','Article','Post','Thread','Newsletter','Video Script']`, default `'Any'`), "Score only" outline button (runs `submitIdea(true)` — skips `generateIdeaRationale`, uses `scoreIdeaTopic` + `buildFallbackRationale` only), and "Add & score" primary button (existing full AI flow). `format` state value is saved alongside `tone`/`audience` in the Firestore `addDoc` payload.
 4. Filter tabs: pill buttons for `All`, `Strong`, `Moderate`, `Weak`, `No angles yet` — each showing a count. `No angles yet` = ideas where `!draftMap.has(idea.id) && !adaptMap.has(idea.id)`. `draftMap` (`Map<string, string>`, ideaId → angleId) is populated from `users/{uid}/drafts`; `adaptMap` (`Map<string, string>`, ideaId → angleId) from `users/{uid}/adaptations` — both fetched on `currentUser` change via `getDocs` with `Promise.all`; empty Maps used on error.
 5. Sort dropdown on filter row (right): `Score high → low` (default), `Newest`, `Oldest`, `Topic A-Z`. `ratingFilter` state replaces the old `toneFilter`; `visibleIdeas` memo filters by rating label or no-draft/adapt status.
-6. Idea cards (replaces table): each idea is a rounded-2xl white card with a 56×56 px color-coded score circle (emerald=Strong, amber=Moderate, rose=Weak, slate=unscored), tone/audience pills + date + live signals count in the tag row, bold title, secondary topic line when title differs, and a right-column button group: (a) "Go to Adapt →" (dark-green filled) if `adaptMap` has the idea; (b) "Open Storyboard →" (dark-green filled) if `draftMap` has the idea but not `adaptMap`; (c) "Open angles →" — dark-green filled when no draft/adapt exists, otherwise outlined emerald — always present. A "..." dropdown menu with "Edit title" and "Delete" remains.
+6. Idea cards (replaces table): each idea is a rounded-2xl white card with a 56×56 px color-coded score circle (emerald=Strong, amber=Moderate, rose=Weak, slate=unscored), tone/audience pills + date + live signals count in the tag row, bold title, secondary topic line when title differs, and a right-column action group consisting of exactly ONE primary CTA button (dark-green filled `#1a7a5e`) plus a "..." overflow dropdown. The primary CTA is selected via the idea's furthest pipeline state: (a) `adaptMap.has(idea.id)` → "Resume in Adapt →" routing to `/adapt/{ideaId}?angleId={angleId}`; (b) `draftMap.has(idea.id) && !adaptMap.has(idea.id)` → "Resume in Storyboard →" routing to `/storyboard/{ideaId}?angleId={angleId}`; (c) neither map has the idea → "Open angles →" routing through `openAnglesForIdea`. `setWorkflowContext({ ideaId, ideaTopic })` is called before navigation. The "..." overflow dropdown always contains "Edit title" and "Delete"; when the idea has an adaptation it also contains "Open angles" and (if a draft also exists) "Open Storyboard"; when only a draft exists it also contains "Go to Adapt". The "..." trigger button uses `aria-haspopup="menu"` and `aria-expanded={isMenuOpen}`; the menu container uses `role="menu"` and each item button uses `role="menuitem"`. `openMenuIdeaId` state continues to gate single-open behavior. Inline title-edit (Save/Cancel) replaces the entire action group while active.
 7. Inline title editing: when active for a card, the right column shows the text input + Save/Cancel inline (no separate row).
 8. AI Rationale section below the top row (when `idea.relevance` exists): green `AI RATIONALE` pill + reason text.
 9. "HOW TO MAKE IT STRONGER" improvement bullets section (when `idea.relevance.improvements.length > 0`).
@@ -406,13 +444,18 @@ Implementation note:
 7. Empty-state renders a dashed bordered panel with CTA back to `/ideas` (or angles if context present).
 8. Loading state shows `<Spinner size="sm" />`; Firestore errors show inline red message.
 
-#### Legacy redirects
-- `/drafts` (`src/app/(app)/drafts/page.tsx`) — `redirect('/storyboard')`.
-- `/drafts/new` (`src/app/(app)/drafts/new/page.tsx`) — `redirect('/storyboard')`.
-- `/storyboard/new` (`src/app/(app)/storyboard/new/page.tsx`) — `redirect('/storyboard')`.
-- `/adapt/new` (`src/app/(app)/adapt/new/page.tsx`) — `redirect('/storyboard')`.
+#### Pipeline-stub landing pages
+- `/drafts` (`src/app/(app)/drafts/page.tsx`) — server component that calls `redirect('/storyboard')` (legacy URL).
+- `/adapt/new` (`src/app/(app)/adapt/new/page.tsx`) — **Adapt landing page** (client component). No longer a silent redirect. Reads `uid` from `onAuthStateChanged`, then streams two collections in parallel via Firestore `onSnapshot`:
+  - `users/{uid}/adaptations` ordered by `updatedAt` desc — used to render the "Resume an existing adaptation" section. Each card shows `ideaTopic`, `angleTitle`, a chip row of platforms that have non-empty saved copy (LinkedIn / X / Twitter / Medium / Newsletter / Blog), and a primary "Resume →" button linking to `/adapt/{ideaId}?angleId={angleId}`. Empty state renders the copy "No adaptations yet."
+  - `users/{uid}/drafts` ordered by `updatedAt` desc — used to render the "Start a new adaptation from a storyboard" section. Storyboards whose `{ideaId}_{angleId}` key already appears in the adaptations collection are filtered out so the user only sees storyboards that don't already have an adaptation. Each card shows `ideaTopic`, `angleTitle`, and a primary "Adapt this →" button linking to `/adapt/{ideaId}?angleId={angleId}` (the dynamic Adapt page handles the "no adaptation yet" case via its existing fallback path). Empty state renders "Finish a storyboard first to adapt it."
+  - When the user has zero storyboards at all, a third small hint card appears with a link back to `/storyboard` ("Go to Storyboard →").
+  - Header copy is "Pick a storyboard to adapt for platforms" + the subtitle "Adapt converts a storyboard into LinkedIn / X / Medium / Newsletter / Blog copy."
+  - Loading state renders `<Spinner size="sm" />`; Firestore errors render an inline red message. Uses `surface-card`, `section-title`, `pill`, and `muted-copy` utility classes from `globals.css` for visual consistency with the rest of the app.
+- `/storyboard/new` (`src/app/(app)/storyboard/new/page.tsx`) — **Storyboard-new landing page** (client component). Reads `uid` from `onAuthStateChanged`, then probes `users/{uid}/drafts` with `limit(1)`. If the user already has at least one storyboard, calls `router.replace('/storyboard')` so the existing index lists their work; if they have zero, renders an explainer card with the copy "A storyboard is the long-form draft we generate from your selected angle." plus a primary CTA "Pick an idea →" linking to `/ideas`. Loading state renders `<Spinner size="sm" />`.
+- `/drafts/new` (`src/app/(app)/drafts/new/page.tsx`) — same shape as `/storyboard/new` (zero-storyboard explainer card + redirect to `/storyboard` when at least one exists). Kept so legacy deep links land on a guided page instead of a silent redirect.
 
-These keep older bookmarks and stepper deep-links working while consolidating the index UX onto `/storyboard`. The dynamic `/drafts/[id]` route is preserved as the original draft editor (Screen 5) and remains used by deep links from the Review queue and the `/api/drafts/*` flow; new entry points route through `/storyboard/[id]` (Screen 5b).
+These landing pages replace the previous `redirect('/storyboard')` stubs, ensuring that clicking the Pipeline-nav verb (Adapt, Storyboard, etc.) lands on a page that explains the verb and offers the right next action. The dynamic `/drafts/[id]` route is preserved as the original draft editor (Screen 5) and remains used by deep links from the Review queue and the `/api/drafts/*` flow; new entry points route through `/storyboard/[id]` (Screen 5b). The sidebar Pipeline-group "Adapt" link continues pointing to `/adapt/new`, which is now the Adapt landing page rather than a redirect.
 
 ### Screen 5 — Draft Editor (`/drafts/[id]`)
 **Route:** `src/app/(app)/drafts/[id]/page.tsx`
@@ -438,7 +481,8 @@ These keep older bookmarks and stepper deep-links working while consolidating th
 ### Screen 5b — Storyboard Editor (`/storyboard/[id]`)
 **Route:** `src/app/(app)/storyboard/[id]/page.tsx`
 **Pattern:** Client component using `useParams()` and query `angleId`; keeps storyboard generation/save flow while supporting both inline-edit and chat-driven revision flows.
-**Layout Notes:** Single editor workspace with one source-of-truth textarea, a floating in-place inline AI editor, an in-editor sentence-diff stack for AI chat proposals, and a right-side AI change timeline for rollback.
+**Layout Notes:** Single editor workspace with one source-of-truth textarea, a floating in-place inline AI editor, an in-editor sentence-diff stack for AI chat proposals, and a right-side AI change timeline for rollback. A sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" with a right-aligned "Step 3 of 6" pill) renders directly beneath the WorkflowStepper so the user keeps a persistent anchor across the Storyboard → Adapt → Publish jump.
+**Breadcrumb:** `Angles → Storyboard (Active) → Adapt → Review → Publish` — labels and final word match the canonical `PIPELINE_STEPS` (never `Schedule`).
 **Sections:**
 1. Storyboard content is edited in a textarea (`ref={editorRef}`); generation, debounced autosave (2 s), manual save, source extraction, and adaptation handoff behavior remain intact. Initial draft generation now grounds citations against live DuckDuckGo search results derived from the selected idea/angle context and rewrites the final `## Sources` block to those vetted URLs instead of returning model-invented links.
 2. Selection capture uses textarea selection offsets (`selectionStart`/`selectionEnd`) and also computes an approximate in-editor anchor point so prompt/diff controls float at the current edit location.
@@ -452,13 +496,15 @@ These keep older bookmarks and stepper deep-links working while consolidating th
 10. `Keep` applies only the targeted sentence/span replacement, rebases nearby spans when possible, and marks overlapping unresolved proposals as conflicts.
 11. `Undo` removes only the targeted pending sentence/span proposal and preserves all other pending diffs and manual edits.
 12. Reference parsing supports case-insensitive `Sources` / `References` headings (ATX headings like `## Sources` and Setext-style headings), with numbered lists (`1.`/`1)`), bulleted lists (`-`/`*`/`+`), and plain URL lines. Entries support markdown links (`[label](url)`) and bare `http(s)` URLs, tolerate mixed indentation, trailing whitespace, and optional two-space markdown line breaks, deduplicate by canonical URL, and render valid links as clickable entries in the bottom References panel. If a source/reference heading exists but no valid links are extracted from section parsing, the parser falls back to scanning reference-style list lines across the draft so numbered markdown links under `## Sources` are still detected. Malformed URL-like references are surfaced as validation warnings.
+13. **Orphan-idea error path:** when the storyboard's parent idea (`users/{uid}/ideas/{ideaId}`) cannot be found during context resolution, the editor renders the existing red-error card with the copy "This storyboard's idea was deleted. Open the Dashboard to clean it up." plus two buttons: a primary "Open Dashboard" link to `/dashboard` (where the "Clean up orphans" admin card from Screen 2 surfaces the cleanup action) and a secondary outlined "Back to Angles" link. Existing error styling is preserved.
 
 ---
 
 ### Screen 6 — Multi-Channel Adaptation (`/adapt/[id]`)
 **Route:** `src/app/(app)/adapt/[id]/page.tsx`
 **Pattern:** Client component using `useParams()` plus query `angleId` to resolve the draft-to-adapt handoff.
-**Layout Notes:** Platform generation + tabbed editor workspace; each platform editor supports floating inline edit controls, an embedded AI chat panel that emits sentence-level in-editor diffs, and a right-side AI timeline that restores prior AI-applied states for the active platform.
+**Layout Notes:** Platform generation + tabbed editor workspace; each platform editor supports floating inline edit controls, an embedded AI chat panel that emits sentence-level in-editor diffs, and a right-side AI timeline that restores prior AI-applied states for the active platform. A sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" with a right-aligned "Step 4 of 6" pill) renders directly beneath the WorkflowStepper so the user keeps the same persistent editing anchor used on Storyboard.
+**Breadcrumb:** `Angles → Storyboard → Adapt (Active) → Review → Publish` — labels and final word match the canonical `PIPELINE_STEPS` (never `Schedule`).
 **Sections:**
 1. Uses `localStorage['adapt_draft_context']` as a fast-path when it matches the route (`ideaId` + `angleId`). If local context is missing, invalid, or route-mismatched, the page falls back to Firebase lookups (`users/{uid}/ideas/{ideaId}`, `users/{uid}/ideas/{ideaId}/workflow/angles`, and `users/{uid}/drafts/{ideaId}_{angleId}`) to rebuild a valid adaptation context instead of hard-failing immediately.
 2. If the storyboard draft document is missing during Firebase fallback resolution, Adapt builds a deterministic scaffold draft from idea + selected angle summary/sections so platform generation remains usable.
@@ -490,21 +536,23 @@ These keep older bookmarks and stepper deep-links working while consolidating th
 
 ### Screen 7 — Publishing & Scheduling (`/publish`)
 **Route:** `src/app/(app)/publish/page.tsx`
-**Layout Notes:** Library-style scheduling workspace that lists every saved adaptation for the signed-in user, with per-adaptation platform cards, edit/delete controls, schedule pickers, and a global upcoming schedule list.
+**Layout Notes:** Library-style scheduling workspace that lists every saved adaptation for the signed-in user, with per-adaptation platform cards, edit/delete controls, schedule pickers, and a global upcoming schedule list. When the user arrives via Adapt's "Save and continue" CTA (i.e. `workflow_context` localStorage holds a single `ideaId` + optional `angleId`), a sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" with a right-aligned "Step 6 of 6" pill) renders at the top of the page so the editing anchor persists from Storyboard → Adapt → Publish. The header is hidden in the multi-adaptation library view (no workflow context).
 **Sections:**
 1. Loads all adaptation documents in realtime from `users/{uid}/adaptations` ordered by `updatedAt desc` and renders each adaptation as its own scheduling block.
 2. Each adaptation block shows idea + angle labels and an `Edit Adaptation` route action that deep-links to `/adapt/{ideaId}?angleId={angleId}`.
-3. LinkedIn one-click action per adaptation card:
+3. Per-adaptation cards render for every platform present in the adaptation's `platforms` map. The canonical platform list is `linkedin | twitter | medium | newsletter | blog` (matching `frontend/src/lib/prompts/platforms/index.ts`); a card renders when there is saved content for that platform OR when the user has clicked Edit on a previously-empty platform.
+4. LinkedIn card has a one-click compose handoff:
   - attempts `navigator.clipboard.writeText(linkedinText)`
   - opens `https://www.linkedin.com/feed/?shareActive=true` in a new tab
   - shows explicit status message for copied-success or clipboard-blocked fallback guidance
-4. X/Twitter one-click action per adaptation card opens `https://twitter.com/intent/tweet?text=...` with URL-encoded prefilled text.
-5. Platform cards include content textareas, explicit `Copy` buttons, and card-level `Edit` / `Delete` controls.
-6. Card-level `Edit` enables in-card text editing for the selected adaptation + platform and persists to `users/{uid}/adaptations/{adaptationId}`.
-7. Card-level `Delete` removes the selected platform field from `users/{uid}/adaptations/{adaptationId}`; once removed, that platform card is hidden from the Publish UI.
-8. Platform-specific schedule pickers persist reminders to `users/{uid}/scheduledPosts` with adaptation/article metadata and `scheduledForMs` timestamp.
-9. Publish renders upcoming scheduled posts from Firestore so users can verify queued reminders and dates across all adaptations.
-10. Clear UX states are present for loading, signed-out/config errors, empty adaptation library, schedule validation errors, and successful publish/schedule actions.
+5. X/Twitter card has a one-click intent handoff: opens `https://twitter.com/intent/tweet?text=...` with URL-encoded prefilled text.
+6. Medium / Newsletter / Blog cards have NO provider compose-URL handoff (those platforms do not expose a one-click intent URL) — they offer "Copy text" + "Schedule reminder" instead, so users paste into their own publishing tool (Medium editor, email tool, or CMS).
+7. All platform cards include content textareas, explicit `Copy` buttons (label adapts per platform), and card-level `Edit` / `Delete` controls.
+8. Card-level `Edit` enables in-card text editing for the selected adaptation + platform and persists to `users/{uid}/adaptations/{adaptationId}`.
+9. Card-level `Delete` removes the selected platform field from `users/{uid}/adaptations/{adaptationId}`; once removed, that platform card is hidden from the Publish UI.
+10. Platform-specific schedule pickers persist reminders to `users/{uid}/scheduledPosts` with adaptation/article metadata, `scheduledForMs` timestamp, and `platforms: [<platformKey>]` where `<platformKey>` is one of `linkedin | twitter | medium | newsletter | blog`.
+11. Publish renders upcoming scheduled posts from Firestore so users can verify queued reminders and dates across all adaptations.
+12. Clear UX states are present for loading, signed-out/config errors, empty adaptation library, schedule validation errors, and successful publish/schedule actions.
 
 Implementation notes:
 - Publish page now runs as a client component and uses Firebase Auth + Firestore browser SDK lookups.
@@ -555,15 +603,22 @@ Draft Queue behavior details:
 
 ### Screen 11 — Settings & Compliance (`/settings`)
 **Route:** `src/app/(app)/settings/page.tsx`
-**Layout Notes:** Two-column compliance/settings cards with full-width company, integration, AI, and security sections.
-**Sections:**
-1. Brand Voice Editor (TODO)
-2. Compliance Flags (TODO)
-3. Audit Log Viewer (TODO)
-4. Integration Connectors
-5. Security Settings
-6. **AI API Keys** (`lg:col-span-2`) — select active provider (OpenAI / Gemini / Claude / Local Ollama); provider key inputs plus Ollama base URL and model; Save button calls `saveAIConfig` and shows "Saved!" toast; config loaded via `useEffect` from `loadAIConfig()` in `src/lib/aiConfig.ts`
-7. Sign out action (Firebase `signOut`) from the Session section with spinner feedback while logout is in progress
+**Layout Notes:** Sticky in-page nav (left rail at `lg:` and up; horizontal scroll-snap pill row on mobile) groups settings into five ordered groups with anchor-link smooth scrolling. Each section keeps its own `surface-card` container and uses an `id` matching the nav anchor. All sections remain reachable by scrolling — the nav does NOT hide content behind a click. Required-setup nav items render an amber "needs attention" dot (and the section header shows a "Needs attention" pill) when the setting is unconfigured: AI API Keys lights up when the active provider has no key (ollama is treated as always-configured, otherwise checks `getActiveAIKey()` from `src/lib/aiConfig.ts` plus the live in-memory key), and Company Profile lights up when `companyName` is empty (using the cached `loadCompanyProfile`).
+**Section groups (ordered):**
+1. **Required setup** — sections every user must complete for the app to work.
+   1. **AI API Keys** (`#ai-keys`) — select active provider (OpenAI / Gemini / Claude / Local Ollama); provider key inputs plus Ollama base URL and model; Save button calls `saveAIConfig` and shows "Saved!" toast; config loaded via `useEffect` from `loadAIConfig()` in `src/lib/aiConfig.ts`. First card under Required setup so a new user does not have to scroll past placeholder cards.
+   2. **Company Profile** (`#company-profile`) — full Company Profile form (companyName, industry, description, products, services, valueProposition, targetMarket, keyDifferentiators, brandVoice). Includes the "Auto-fill from website" panel that POSTs to `/api/company/autofill` using the active AI provider key. Save persists via `saveCompanyProfile` to Firestore at `users/{uid}.companyContext` and the local cache.
+2. **Brand & voice**
+   1. **Brand Voice Editor** (`#brand-voice`) — textarea persisted alongside the brand-voice field. (Currently a non-persisted textarea; the canonical brand voice is the `brandVoice` field on `users/{uid}.companyContext` written by Company Profile.)
+3. **Integrations**
+   1. **Integration Connectors** (`#integrations`) — LinkedIn connect/disconnect flow plus per-user and app-owner setup guidance (full behavior documented below).
+   2. **Research source** (`#research-source`) — optional Exa AI key field; saved via `saveExaKey` (`src/lib/exaConfig.ts`) to localStorage; when present, drafts use Exa instead of DuckDuckGo for source retrieval.
+4. **Advanced (preview)** — placeholder/preview features grouped together so they can be labelled "Coming soon" in a follow-up UX pass.
+   1. **Compliance Flags** (`#compliance-flags`) — placeholder.
+   2. **Audit Log Viewer** (`#audit-log`) — placeholder.
+   3. **Security Settings** (`#security-settings`) — placeholder.
+5. **Session**
+   1. **Sign out** (`#session`) — Firebase `signOut` with spinner feedback while logout is in progress.
 
 **Integration Connectors behavior:**
 - Settings loads provider connection summaries for the signed-in Firebase user from the FastAPI backend via `GET {NEXT_PUBLIC_API_URL}/api/v1/integrations/status?userId={uid}`.
@@ -709,10 +764,11 @@ All debug logs use a `[Module Name]` prefix for easy filtering in browser DevToo
 
 ### Ticket 10: FE-ROUTES-STORYBOARD-001
 - `/storyboard` now exists as the primary index route for storyboard records.
-- Legacy routes are preserved through redirects:
-  - `/drafts` -> `/storyboard`
-  - `/drafts/new` -> `/storyboard`
+- Legacy routes:
+  - `/drafts` -> `/storyboard` (server-side redirect)
   - `/drafts/[id]?angleId=...` -> `/storyboard/[id]?angleId=...`
+- `/drafts/new` and `/storyboard/new` are no longer silent redirects; they render explainer landing pages when the user has zero storyboards and only redirect to `/storyboard` when at least one storyboard exists. See the **Pipeline-stub landing pages** subsection under Screen 5a for the full landing-page contract.
+- `/adapt/new` is also a real landing page that lists existing adaptations to resume and storyboards available to adapt. See the **Pipeline-stub landing pages** subsection under Screen 5a.
 - Navigation and stepper now label stage 3 as **Storyboard** and point to `/storyboard`.
 - Angles handoff now routes directly to `/storyboard/<ideaId>?angleId=<angleId>`.
 

@@ -1,3 +1,5 @@
+import { PlaceholderCard } from '@/components/PlaceholderCard';
+
 export default function AnalyticsPage() {
   return (
     <div className="space-y-6">
@@ -7,34 +9,36 @@ export default function AnalyticsPage() {
       </section>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <section className="surface-card p-6">
-          <h2 className="section-title">Engagement Charts</h2>
-          <div className="mt-3 min-h-[180px] rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-500">
-            Engagement chart area
-          </div>
-        </section>
+        <PlaceholderCard
+          title="Engagement Charts"
+          description="Likes, comments, and reshare trends per post — not yet wired to a real analytics source."
+          previewKind="chart"
+        />
 
-        <section className="surface-card p-6">
-          <h2 className="section-title">Performance History</h2>
-          <div className="mt-3 min-h-[180px] rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-500">
-            Timeline and trend history
-          </div>
-        </section>
+        <PlaceholderCard
+          title="Performance History"
+          description="Timeline of engagement and reach across past campaigns."
+          previewKind="chart"
+        />
 
-        <section className="surface-card p-6">
-          <h2 className="section-title">Predictive Scoring</h2>
-          <p className="mt-2 text-sm text-slate-700">Predicted reach: 42k | confidence 82%</p>
-        </section>
+        <PlaceholderCard
+          title="Predictive Scoring"
+          description="Estimated reach and confidence interval for each draft before you publish."
+          previewKind="chart"
+        />
 
-        <section className="surface-card p-6">
-          <h2 className="section-title">Copy Intelligence Insights</h2>
-          <p className="mt-2 text-sm text-slate-700">Hooks with direct outcomes outperform generic intros by 19%.</p>
-        </section>
+        <PlaceholderCard
+          title="Copy Intelligence Insights"
+          description="Pattern detection across high-performing drafts (hook style, length, structure)."
+          previewKind="list"
+        />
 
-        <section className="surface-card p-6 lg:col-span-2">
-          <h2 className="section-title">AI Visibility Tracking</h2>
-          <p className="mt-2 text-sm text-slate-700">Track mentions and ranking trend across AI answer engines and search assistants.</p>
-        </section>
+        <PlaceholderCard
+          title="AI Visibility Tracking"
+          description="Track mentions and ranking trend across AI answer engines and search assistants."
+          previewKind="chart"
+          className="lg:col-span-2"
+        />
       </div>
     </div>
   );

@@ -148,7 +148,7 @@ This document defines the schema, relationships, and data requirements for the M
 - `articleTitle: string`
   Display title used by Publish/Notifications panels (defaults to `ideaTopic` when missing).
 - `platforms: string[]`
-  One-or-more platform keys (e.g. `['linkedin']`, `['twitter']`). Current Publish UI schedules one platform per record; the field is an array for multi-platform expansion.
+  One-or-more platform keys. Valid keys are `linkedin`, `twitter`, `medium`, `newsletter`, and `blog` (matching the Adapt platform schema in `frontend/src/lib/prompts/platforms/index.ts`). Current Publish UI schedules one platform per record (e.g. `['linkedin']`, `['newsletter']`); the field is an array for future multi-platform expansion.
 - `scheduledForMs: number`
   Client timestamp (ms) of the scheduled publish moment. Used for ordering and "due now / upcoming / missed" classification.
 - `scheduledForIso: string`
@@ -244,6 +244,12 @@ This document defines the schema, relationships, and data requirements for the M
 - The current implementation only needs Firestore's default single-field indexes for `createdAtMs`, `updatedAt`, and `scheduledForMs`.
 - The drafts and adaptations flows use deterministic document IDs (`${ideaId}_${angleId}`) so revisiting the same draft/angle pair reopens the same persisted state.
 - `scheduledPosts` document IDs are auto-generated; uniqueness comes from Firestore.
+
+## Defensive orphan filtering
+- A storyboard doc at `users/{uid}/drafts/{draftId}` whose `ideaId` no longer points to an existing `users/{uid}/ideas/{ideaId}` document is treated as an "orphan storyboard" and is hidden from list views (`/storyboard`, `/dashboard` Storyboards/Review queue, `/dashboard` Oldest open draft, `/adapt/new`). The same rule applies to "orphan adaptations" under `users/{uid}/adaptations/{adaptationId}`, which are hidden from `/dashboard` All Adaptations, `/publish`, and `/adapt/new`.
+- Detection is read-time only and best-effort (no Firestore triggers, no backend job): each list page debounces an existence check via `getDoc(users/{uid}/ideas/{ideaId})` after the realtime snapshot resolves and caches the result per `ideaId` so N storyboards from the same parent only incur one Firestore lookup. Read errors are treated as "exists" so transient failures never hide or delete data.
+- Cleanup is user-controlled: when at least one orphan storyboard or adaptation is detected, the dashboard renders an admin card under the Get-started checklist titled "Clean up orphans" with a primary "Delete N orphans" button. Clicking the button calls `deleteOrphans(...)` from `frontend/src/lib/orphans.ts`, which is idempotent (parallel writes that recreate the parent idea simply cause the orphan to reappear on next render) and which deletes only the listed `users/{uid}/drafts/{id}` and `users/{uid}/adaptations/{id}` docs. After deletion, the detector re-runs so the card auto-hides when zero orphans remain.
+- A missing angle (no entry in `users/{uid}/ideas/{ideaId}/workflow/angles`) does NOT mark a storyboard or adaptation as an orphan since angle workflow state can be regenerated.
 
 ## Migration Strategy
 - Enable Cloud Firestore in the Firebase project before using the ideas page.

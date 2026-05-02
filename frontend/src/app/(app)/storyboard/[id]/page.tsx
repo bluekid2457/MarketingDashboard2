@@ -17,6 +17,7 @@ import { useInlineEdit, type InlineSelection } from '@/lib/useInlineEdit';
 import { appendAIEditHistory, createEmptyAIEditHistoryState, type AIEditHistoryState } from '@/lib/aiEditHistory';
 import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
 import WorkflowStepper from '@/components/WorkflowStepper';
+import DocumentContextHeader from '@/components/DocumentContextHeader';
 import { runCitationCheck } from '@/lib/citationCheck';
 import { AIToolbox, type PlagiarismResult } from '@/components/AIToolbox';
 import { DiffAwareEditor } from '@/components/DiffAwareEditor';
@@ -231,7 +232,7 @@ export default function StoryboardEditorPage() {
             ]);
 
             if (!ideaSnap.exists()) {
-              setContextError('Could not find the idea for this storyboard. It may have been deleted.');
+              setContextError("This storyboard's idea was deleted. Open the Dashboard to clean it up.");
               setFirebaseLoaded(true);
               return;
             }
@@ -678,7 +679,7 @@ export default function StoryboardEditorPage() {
     <div className="space-y-5">
       <div className="page-header">
         <h1>Storyboard Editor</h1>
-        <p className="breadcrumb mt-1">Angles {'->'} Storyboard (Active) {'->'} Adapt {'->'} Review {'->'} Schedule</p>
+        <p className="breadcrumb mt-1">Angles {'->'} Storyboard (Active) {'->'} Adapt {'->'} Review {'->'} Publish</p>
 
         {storyboardContext ? (
           <div className="mt-2 flex flex-wrap items-center gap-4 text-sm" style={{ color: '#a7c9be' }}>
@@ -710,18 +711,32 @@ export default function StoryboardEditorPage() {
         ) : null}
       </div>
       <WorkflowStepper />
+      <DocumentContextHeader
+        ideaTopic={storyboardContext?.idea.topic ?? ''}
+        angleTitle={storyboardContext?.selectedAngle.title ?? ''}
+        activeStep="storyboard"
+      />
 
       {contextError ? (
         <section className="surface-card p-5">
           <p className="text-sm text-red-700">{contextError}</p>
-          <button
-            type="button"
-            className="mt-4 rounded-xl px-5 py-2 text-sm font-bold text-white"
-            style={{ background: '#1a7a5e' }}
-            onClick={() => router.push('/angles')}
-          >
-            Back to Angles
-          </button>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-xl px-5 py-2 text-sm font-bold text-white"
+              style={{ background: '#1a7a5e' }}
+              onClick={() => router.push('/dashboard')}
+            >
+              Open Dashboard
+            </button>
+            <button
+              type="button"
+              className="rounded-xl border border-slate-300 px-5 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50"
+              onClick={() => router.push('/angles')}
+            >
+              Back to Angles
+            </button>
+          </div>
         </section>
       ) : null}
 

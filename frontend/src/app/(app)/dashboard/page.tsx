@@ -7,13 +7,24 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
 } from 'firebase/firestore';
 
+import { ComingSoonBadge } from '@/components/ComingSoonBadge';
 import { Spinner } from '@/components/Spinner';
+import { getActiveAIKey } from '@/lib/aiConfig';
+import { loadCompanyProfile } from '@/lib/companyProfile';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import {
+  deleteOrphans,
+  findOrphanAdaptations,
+  findOrphanStoryboards,
+  type OrphanRecord,
+} from '@/lib/orphans';
 
 type IdeaDoc = {
   id: string;
@@ -152,14 +163,6 @@ function buildMonthCalendar(referenceDate: Date, activityByDay: Map<number, numb
   return cells;
 }
 
-function MissingDataBadge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-md border border-red-300 bg-red-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-700">
-      {children}
-    </span>
-  );
-}
-
 export default function DashboardPage() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -177,6 +180,16 @@ export default function DashboardPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [adaptationActionError, setAdaptationActionError] = useState<string | null>(null);
   const [deletingAdaptationId, setDeletingAdaptationId] = useState<string | null>(null);
+
+  const [checklistLoading, setChecklistLoading] = useState(true);
+  const [hasAIKey, setHasAIKey] = useState(false);
+  const [hasCompanyProfile, setHasCompanyProfile] = useState(false);
+  const [hasIdea, setHasIdea] = useState(false);
+
+  const [orphanStoryboards, setOrphanStoryboards] = useState<OrphanRecord[]>([]);
+  const [orphanAdaptations, setOrphanAdaptations] = useState<OrphanRecord[]>([]);
+  const [isCleaningOrphans, setIsCleaningOrphans] = useState(false);
+  const [orphanCleanupError, setOrphanCleanupError] = useState<string | null>(null);
 
   useEffect(() => {
     const auth = getFirebaseAuth();
@@ -364,27 +377,155 @@ export default function DashboardPage() {
     };
   }, [authReady, currentUser]);
 
+  useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+
+    let cancelled = false;
+
+    if (!currentUser) {
+      setHasAIKey(false);
+      setHasCompanyProfile(false);
+      setHasIdea(false);
+      setChecklistLoading(false);
+      return;
+    }
+
+    setChecklistLoading(true);
+
+    const uid = currentUser.uid;
+
+    const aiKeyState = (() => {
+      try {
+        const active = getActiveAIKey();
+        return active.provider === 'ollama' || active.apiKey.trim().length > 0;
+      } catch {
+        return false;
+      }
+    })();
+
+    const profilePromise = loadCompanyProfile(uid)
+      .then((profile) => profile.companyName.trim().length > 0)
+      .catch(() => false);
+
+    const ideasPromise = (async (): Promise<boolean> => {
+      const db = getFirebaseDb();
+      if (!db) {
+        return false;
+      }
+      try {
+        const snap = await getDocs(query(collection(db, 'users', uid, 'ideas'), limit(1)));
+        return !snap.empty;
+      } catch {
+        return false;
+      }
+    })();
+
+    Promise.all([profilePromise, ideasPromise]).then(([profileDone, ideaDone]) => {
+      if (cancelled) return;
+      setHasAIKey(aiKeyState);
+      setHasCompanyProfile(profileDone);
+      setHasIdea(ideaDone);
+      setChecklistLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, currentUser]);
+
+  // Debounced orphan detection (drafts + adaptations whose parent idea was deleted).
+  // Runs off the snapshot data so the existence checks never block list rendering.
+  useEffect(() => {
+    if (!currentUser || (drafts.length === 0 && adaptations.length === 0)) {
+      setOrphanStoryboards([]);
+      setOrphanAdaptations([]);
+      return;
+    }
+    let cancelled = false;
+    const uid = currentUser.uid;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const [storyboardOrphans, adaptationOrphans] = await Promise.all([
+          findOrphanStoryboards(uid),
+          findOrphanAdaptations(uid),
+        ]);
+        if (cancelled) return;
+        setOrphanStoryboards(storyboardOrphans);
+        setOrphanAdaptations(adaptationOrphans);
+      })();
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [currentUser, drafts, adaptations]);
+
+  const orphanStoryboardIds = useMemo(
+    () => new Set(orphanStoryboards.map((entry) => entry.id)),
+    [orphanStoryboards],
+  );
+  const orphanAdaptationIds = useMemo(
+    () => new Set(orphanAdaptations.map((entry) => entry.id)),
+    [orphanAdaptations],
+  );
+
+  const visibleDrafts = useMemo(
+    () => drafts.filter((draft) => !orphanStoryboardIds.has(draft.id)),
+    [drafts, orphanStoryboardIds],
+  );
+  const visibleAdaptations = useMemo(
+    () => adaptations.filter((entry) => !orphanAdaptationIds.has(entry.id)),
+    [adaptations, orphanAdaptationIds],
+  );
+
+  const orphanTotal = orphanStoryboards.length + orphanAdaptations.length;
+
+  const handleCleanupOrphans = useCallback(async (): Promise<void> => {
+    if (!currentUser || orphanTotal === 0) return;
+    setIsCleaningOrphans(true);
+    setOrphanCleanupError(null);
+    try {
+      await deleteOrphans(currentUser.uid, {
+        storyboards: orphanStoryboards.map((entry) => entry.id),
+        adaptations: orphanAdaptations.map((entry) => entry.id),
+      });
+      // Re-run the detector so the card auto-hides if everything was cleaned.
+      const [storyboardOrphans, adaptationOrphans] = await Promise.all([
+        findOrphanStoryboards(currentUser.uid),
+        findOrphanAdaptations(currentUser.uid),
+      ]);
+      setOrphanStoryboards(storyboardOrphans);
+      setOrphanAdaptations(adaptationOrphans);
+    } catch {
+      setOrphanCleanupError('Unable to clean up orphans right now. Please try again.');
+    } finally {
+      setIsCleaningOrphans(false);
+    }
+  }, [currentUser, orphanTotal, orphanStoryboards, orphanAdaptations]);
+
   const now = useMemo(() => new Date(), []);
   const weekStartMs = useMemo(() => startOfWeekMs(now), [now]);
   const previousWeekStartMs = useMemo(() => startOfPreviousWeekMs(now), [now]);
 
   const draftsThisWeek = useMemo(
-    () => drafts.filter((draft) => draft.updatedAtMs >= weekStartMs),
-    [drafts, weekStartMs],
+    () => visibleDrafts.filter((draft) => draft.updatedAtMs >= weekStartMs),
+    [visibleDrafts, weekStartMs],
   );
 
   const draftsLastWeek = useMemo(
     () =>
-      drafts.filter(
+      visibleDrafts.filter(
         (draft) => draft.updatedAtMs >= previousWeekStartMs && draft.updatedAtMs < weekStartMs,
       ),
-    [drafts, previousWeekStartMs, weekStartMs],
+    [visibleDrafts, previousWeekStartMs, weekStartMs],
   );
 
   const ideasWaiting = useMemo(() => {
-    const draftIdeaIds = new Set(drafts.map((draft) => draft.ideaId).filter(Boolean));
+    const draftIdeaIds = new Set(visibleDrafts.map((draft) => draft.ideaId).filter(Boolean));
     return ideas.filter((idea) => !draftIdeaIds.has(idea.id));
-  }, [ideas, drafts]);
+  }, [ideas, visibleDrafts]);
 
   const highPriorityWaiting = useMemo(
     () => ideasWaiting.filter((idea) => idea.relevanceLabel === 'Strong').length,
@@ -392,14 +533,14 @@ export default function DashboardPage() {
   );
 
   const oldestPendingDraft = useMemo(() => {
-    const reviewable = drafts.filter((draft) => draft.contentLength > 0);
+    const reviewable = visibleDrafts.filter((draft) => draft.contentLength > 0);
     if (reviewable.length === 0) {
       return null;
     }
     return reviewable.reduce((oldest, current) =>
       current.updatedAtMs < oldest.updatedAtMs ? current : oldest,
     );
-  }, [drafts]);
+  }, [visibleDrafts]);
 
   const reviewSlaLabel = useMemo(() => {
     if (!oldestPendingDraft) {
@@ -410,7 +551,7 @@ export default function DashboardPage() {
 
   const platformCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const adaptation of adaptations) {
+    for (const adaptation of visibleAdaptations) {
       for (const [platform, content] of Object.entries(adaptation.platforms)) {
         if (typeof content === 'string' && content.trim().length > 0) {
           counts.set(platform, (counts.get(platform) ?? 0) + 1);
@@ -418,7 +559,7 @@ export default function DashboardPage() {
       }
     }
     return counts;
-  }, [adaptations]);
+  }, [visibleAdaptations]);
 
   const topPlatform = useMemo(() => {
     let bestKey: string | null = null;
@@ -440,10 +581,10 @@ export default function DashboardPage() {
   }, [ideas]);
 
   const reviewQueue = useMemo(() => {
-    return drafts
+    return visibleDrafts
       .filter((draft) => draft.ideaId && draft.angleId)
       .slice(0, 5);
-  }, [drafts]);
+  }, [visibleDrafts]);
 
   const activityByDay = useMemo(() => {
     const map = new Map<number, number>();
@@ -521,13 +662,140 @@ export default function DashboardPage() {
     ? 'No activity yet'
     : `${postsDelta >= 0 ? '+' : ''}${postsDelta} vs last week`;
 
+  const checklistComplete = hasAIKey && hasCompanyProfile && hasIdea;
+  const showChecklist = !!currentUser && (checklistLoading || !checklistComplete);
+
+  const checklistItems: Array<{
+    key: string;
+    label: string;
+    href: string;
+    done: boolean;
+  }> = [
+    {
+      key: 'ai-key',
+      label: 'Set your AI provider key',
+      href: '/settings#ai-api-keys',
+      done: hasAIKey,
+    },
+    {
+      key: 'company-profile',
+      label: 'Fill in your Company Profile',
+      href: '/settings#company-profile',
+      done: hasCompanyProfile,
+    },
+    {
+      key: 'first-idea',
+      label: 'Add your first idea',
+      href: '/ideas',
+      done: hasIdea,
+    },
+  ];
+
   return (
     <div className="space-y-6">
+      {showChecklist ? (
+        checklistLoading ? (
+          <section className="surface-card p-6 sm:p-7" aria-label="Get started checklist loading">
+            <div className="flex items-center gap-3 text-sm text-slate-500">
+              <Spinner size="sm" />
+              <span>Checking your setup...</span>
+            </div>
+          </section>
+        ) : (
+          <section className="surface-card overflow-hidden p-6 sm:p-7" aria-labelledby="get-started-title">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.2em] text-emerald-700">Get started</p>
+                <h2 id="get-started-title" className="mt-2 text-2xl font-extrabold text-slate-900">
+                  Get started with Flowrite
+                </h2>
+                <p className="mt-1 muted-copy">A few quick steps before AI features will work.</p>
+              </div>
+              <span className="pill bg-emerald-50 text-emerald-800" style={{ borderColor: '#10b981' }}>
+                {checklistItems.filter((item) => item.done).length} / {checklistItems.length} done
+              </span>
+            </div>
+
+            <ul className="mt-5 space-y-3">
+              {checklistItems.map((item) => (
+                <li
+                  key={item.key}
+                  className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 ${
+                    item.done
+                      ? 'border-emerald-200 bg-emerald-50'
+                      : 'border-slate-200 bg-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span
+                      aria-hidden="true"
+                      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                        item.done
+                          ? 'bg-emerald-600 text-white'
+                          : 'border border-slate-300 bg-white text-transparent'
+                      }`}
+                    >
+                      {item.done ? '✓' : ' '}
+                    </span>
+                    <span
+                      className={`truncate text-sm font-semibold ${
+                        item.done ? 'text-emerald-900 line-through' : 'text-slate-800'
+                      }`}
+                    >
+                      {item.label}
+                    </span>
+                  </div>
+                  <Link
+                    href={item.href}
+                    className={`shrink-0 rounded-xl px-3 py-1.5 text-xs font-semibold ${
+                      item.done
+                        ? 'border border-emerald-300 text-emerald-800 hover:bg-emerald-100'
+                        : 'bg-teal-700 text-white hover:bg-teal-800'
+                    }`}
+                  >
+                    {item.done ? 'Review' : 'Open'}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )
+      ) : null}
+
+      {orphanTotal > 0 ? (
+        <section className="surface-card p-5" aria-labelledby="cleanup-orphans-title">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-amber-700">Admin</p>
+              <h2 id="cleanup-orphans-title" className="mt-1 text-lg font-extrabold text-slate-900">
+                Clean up orphans
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                We found {orphanTotal} item{orphanTotal === 1 ? '' : 's'} pointing to deleted ideas. They&apos;ve been hidden from your dashboard. Delete them permanently?
+              </p>
+            </div>
+            <button
+              type="button"
+              className="shrink-0 rounded-xl bg-amber-700 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-800 disabled:opacity-60"
+              onClick={() => {
+                void handleCleanupOrphans();
+              }}
+              disabled={isCleaningOrphans}
+            >
+              {isCleaningOrphans ? 'Deleting...' : `Delete ${orphanTotal} orphan${orphanTotal === 1 ? '' : 's'}`}
+            </button>
+          </div>
+          {orphanCleanupError ? (
+            <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{orphanCleanupError}</p>
+          ) : null}
+        </section>
+      ) : null}
+
       <section className="surface-card overflow-hidden p-6 sm:p-7">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-teal-700">Overview</p>
-            <h1 className="mt-2 text-3xl font-extrabold text-slate-900 sm:text-4xl">Campaign Command Center</h1>
+            <h1 className="mt-2 text-3xl font-extrabold text-slate-900 sm:text-4xl">Flowrite — your campaign command center</h1>
             <p className="mt-2 max-w-2xl muted-copy">
               Monitor momentum across your pipeline from raw ideas to live performance.
               {currentUser?.email ? <> Signed in as <span className="font-semibold text-slate-700">{currentUser.email}</span>.</> : null}
@@ -586,13 +854,13 @@ export default function DashboardPage() {
             )}
           </article>
 
-          <article className="hero-metric border-red-300 bg-red-50">
+          <article className="hero-metric opacity-75">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Engagement rate</p>
-              <MissingDataBadge>TODO</MissingDataBadge>
+              <ComingSoonBadge />
             </div>
-            <p className="mt-2 text-3xl font-extrabold text-red-700">N/A</p>
-            <p className="mt-1 text-xs font-medium text-red-700">No analytics source connected yet (see notes.md)</p>
+            <p className="mt-2 text-3xl font-extrabold text-slate-400">—</p>
+            <p className="mt-1 text-xs font-medium text-slate-500">Engagement metric is not computed yet.</p>
           </article>
         </div>
       </section>
@@ -747,24 +1015,24 @@ export default function DashboardPage() {
               )}
             </div>
 
-            <div className="rounded-xl border border-red-300 bg-red-50 p-3">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 opacity-75">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-xs uppercase tracking-wide text-slate-500">Best post type</p>
-                <MissingDataBadge>TODO</MissingDataBadge>
+                <ComingSoonBadge />
               </div>
-              <p className="mt-2 text-xl font-bold text-red-700">N/A</p>
-              <p className="text-xs text-red-700">Format performance not tracked (see notes.md)</p>
+              <p className="mt-2 text-xl font-bold text-slate-400">—</p>
+              <p className="text-xs text-slate-500">Format performance is not computed yet.</p>
             </div>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="text-xs uppercase tracking-wide text-slate-500">Total adaptations</p>
-              <p className="mt-2 text-xl font-bold text-slate-900">{adaptations.length}</p>
+              <p className="mt-2 text-xl font-bold text-slate-900">{visibleAdaptations.length}</p>
               <p className="text-xs text-teal-700">Across {platformCounts.size} platform{platformCounts.size === 1 ? '' : 's'}</p>
             </div>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="text-xs uppercase tracking-wide text-slate-500">Total drafts</p>
-              <p className="mt-2 text-xl font-bold text-slate-900">{drafts.length}</p>
+              <p className="mt-2 text-xl font-bold text-slate-900">{visibleDrafts.length}</p>
               <p className="text-xs text-teal-700">{draftsThisWeek.length} updated this week</p>
             </div>
           </div>
@@ -774,7 +1042,7 @@ export default function DashboardPage() {
       <section className="surface-card p-6">
         <div className="flex items-center justify-between gap-2">
           <h2 className="section-title">All Adaptations</h2>
-          <span className="pill">{adaptations.length} total</span>
+          <span className="pill">{visibleAdaptations.length} total</span>
         </div>
         <p className="mt-1 text-xs text-slate-500">Manage saved adaptations and reopen a specific one for editing.</p>
 
@@ -782,7 +1050,7 @@ export default function DashboardPage() {
           <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{adaptationActionError}</p>
         ) : null}
 
-        {!dataReady ? null : adaptations.length === 0 ? (
+        {!dataReady ? null : visibleAdaptations.length === 0 ? (
           <p className="mt-4 text-sm text-slate-500">
             No adaptations yet.{' '}
             <Link href="/storyboard" className="font-semibold text-teal-700 hover:underline">
@@ -791,7 +1059,7 @@ export default function DashboardPage() {
           </p>
         ) : (
           <ul className="mt-4 grid gap-3 md:grid-cols-2">
-            {adaptations.map((adaptation) => {
+            {visibleAdaptations.map((adaptation) => {
               const platformSummary = Object.entries(adaptation.platforms)
                 .filter(([, value]) => value.trim().length > 0)
                 .map(([platform]) => PLATFORM_LABELS[platform] ?? platform)
