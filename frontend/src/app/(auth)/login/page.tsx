@@ -15,6 +15,7 @@ import { useRouter } from 'next/navigation';
 import { Spinner } from '@/components/Spinner';
 import { trackAuthEvent } from '@/lib/analytics';
 import { getFirebaseAuth } from '@/lib/firebase';
+import { markSessionStart } from '@/lib/sessionExpiry';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -114,6 +115,7 @@ export default function LoginPage() {
 
     try {
       await signInWithEmailAndPassword(firebaseAuth, normalizedEmail, password);
+      markSessionStart();
       trackAuthEvent('login_success', { method: 'email_password' });
       router.replace('/dashboard');
     } catch (error) {
@@ -139,6 +141,7 @@ export default function LoginPage() {
     trackAuthEvent('login_attempt', { method: 'google' });
     try {
       await signInWithPopup(firebaseAuth, new GoogleAuthProvider());
+      markSessionStart();
       trackAuthEvent('login_success', { method: 'google' });
       router.replace('/dashboard');
     } catch (error) {
@@ -166,6 +169,7 @@ export default function LoginPage() {
     try {
       const provider = new OAuthProvider('linkedin.com');
       await signInWithPopup(firebaseAuth, provider);
+      markSessionStart();
       trackAuthEvent('login_success', { method: 'linkedin' });
       router.replace('/dashboard');
     } catch (error) {

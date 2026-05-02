@@ -33,7 +33,7 @@ export function AIEditTimeline(props: AIEditTimelineProps) {
       {entries.length === 0 ? (
         <p className="rounded-lg bg-slate-50 px-3 py-3 text-xs text-slate-500">{emptyMessage}</p>
       ) : (
-        <ol className="relative ml-2 border-l border-slate-200 pl-5">
+        <ol className="relative ml-2 max-h-[480px] overflow-y-auto border-l border-slate-200 pl-5">
           {entries.map((entry) => {
             const isActive = entry.id === activeEntryId;
             return (

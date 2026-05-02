@@ -63,6 +63,76 @@ function dedupeSources(sources: ResearchSource[], limit: number): ResearchSource
   return deduped;
 }
 
+type ExaSearchResponse = {
+  results: Array<{
+    url: string;
+    title: string;
+    highlights?: string[];
+    text?: string;
+  }>;
+};
+
+async function searchExa(query: string, apiKey: string, limit = 8): Promise<{ provider: string; sources: ResearchSource[] }> {
+  const response = await fetch('https://api.exa.ai/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+    },
+    body: JSON.stringify({
+      query,
+      numResults: limit,
+      useAutoprompt: true,
+      type: 'auto',
+      // highlights returns the most query-relevant sentences from each page,
+      // which map much more directly to citable claims than raw page text.
+      contents: {
+        highlights: { numSentences: 2, highlightsPerUrl: 3 },
+        text: { maxCharacters: 300 },
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Exa search returned ${response.status}`);
+  }
+
+  const data = (await response.json()) as ExaSearchResponse;
+  const sources: ResearchSource[] = data.results
+    .filter((r) => r.url && r.title && isValidHttpUrl(r.url))
+    .map((r) => {
+      // Prefer highlights — they're the sentences most relevant to the query.
+      // Fall back to raw text if highlights weren't returned for this result.
+      const highlightText = (r.highlights ?? []).filter(Boolean).join(' ').trim();
+      const snippet = highlightText || (r.text ?? '').slice(0, 300).trim();
+      return {
+        title: r.title.trim(),
+        url: r.url.trim(),
+        snippet,
+      };
+    });
+
+  return { provider: 'exa', sources: dedupeSources(sources, limit) };
+}
+
+export async function fetchResearchSources(
+  query: string,
+  exaApiKey: string,
+  limit = 8,
+): Promise<{ provider: string; sources: ResearchSource[] }> {
+  if (exaApiKey) {
+    try {
+      const result = await searchExa(query, exaApiKey, limit);
+      if (result.sources.length > 0) {
+        return result;
+      }
+    } catch {
+      // Exa failed — fall through to DuckDuckGo
+    }
+  }
+  return searchDuckDuckGo(query, limit);
+}
+
 export async function searchDuckDuckGo(query: string, limit = 8): Promise<{ provider: string; sources: ResearchSource[] }> {
   // Try the DuckDuckGo Instant Answer JSON endpoint first — it has CORS-free JSON output and no key.
   try {

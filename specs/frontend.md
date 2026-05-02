@@ -76,7 +76,7 @@ frontend/
   src/
     app/
       layout.tsx            # Root layout: metadata, globals.css, Manrope-first font stack on <body>
-      page.tsx              # Redirects / → /dashboard
+      page.tsx              # Marketing landing page — hero, three preview cards, feature grid, workflow steps, CTA
       globals.css           # Tailwind + design tokens + shared component utility classes
       api/
         ideas/
@@ -92,6 +92,27 @@ frontend/
           route.ts          # Provider-agnostic robust draft generation endpoint from selected idea + angle
           adapt/
             route.ts        # Provider-agnostic platform adaptation endpoint using prompt templates + draft context
+          analyze/
+            route.ts        # SEO / plagiarism / source-check analysis endpoint with deterministic fallback per type
+          chat/
+            route.ts        # Conversational AI chat endpoint that parses <UPDATED_DRAFT> tags
+          headlines/
+            route.ts        # A/B headline variant generator
+          inline-edit/
+            route.ts        # Shared inline-edit proposal endpoint for Storyboard and Adapt
+          personas/
+            route.ts        # Persona-targeted rewrite endpoint (one persona at a time per current UI)
+          plagiarism/
+            route.ts        # Verbatim-quote web search + AI heuristic AI-likelihood review (no companyContext)
+          research/
+            route.ts        # DuckDuckGo-grounded research brief synthesizer
+          rewrite/
+            route.ts        # Tone or readability rewrite endpoint
+          similar-posts/
+            route.ts        # Similar-post and competitor comparison search endpoint for Adapt AI tooling
+        company/
+          autofill/
+            route.ts        # Scrape a company website and extract a structured CompanyProfile via the configured AI provider
         trends/
           route.ts          # Public news feed aggregation for live ideas-page trends/articles
       (auth)/
@@ -107,10 +128,21 @@ frontend/
           page.tsx          # Screen 3 — Idea Input & Backlog
         angles/
           page.tsx          # Screen 4 — AI Angle Selection & Outline
-        drafts/
+        storyboard/
+          page.tsx          # Screen 5 — Storyboard Index (replaces legacy /drafts list)
+          new/
+            page.tsx        # Redirect → /storyboard
           [id]/
-            page.tsx        # Screen 5 — Draft Editor (dynamic [id])
+            page.tsx        # Screen 5b — Storyboard Editor (dynamic [id])
+        drafts/
+          page.tsx          # Redirect → /storyboard (legacy)
+          new/
+            page.tsx        # Redirect → /storyboard (legacy)
+          [id]/
+            page.tsx        # Legacy Draft Editor (still mounted, behaves as the underlying drafts/{ideaId}_{angleId} editor; new flow points to /storyboard/[id])
         adapt/
+          new/
+            page.tsx        # Redirect → /storyboard
           [id]/
             page.tsx        # Screen 6 — Multi-Channel Adaptation (dynamic [id])
         publish/
@@ -126,8 +158,15 @@ frontend/
         notifications/
           page.tsx          # Screen 12 — Error & Notifications
     components/
-      DraftChatPanel.tsx      # Reusable AI chat panel with pending sentence-diff status for in-editor Keep/Undo
-      Nav.tsx               # Sidebar navigation component (all 11 nav links)
+      AIEditTimeline.tsx        # Right-side timeline of applied AI edits with restore-to-snapshot controls
+      AIToolbox.tsx             # Shared AI tooling surface (Tone, Readability, Personas, A/B headlines, Research, Plagiarism, Similar posts on Adapt)
+      CitationHighlightPreview.tsx  # Citation-aware preview that highlights claims and cited spans before review submission
+      DiffAwareEditor.tsx       # Editor wrapper that renders pending in-place sentence-diffs (red strike-through old / green new) with per-diff Keep/Undo
+      DraftChatPanel.tsx        # Reusable AI chat panel with pending sentence-diff status for in-editor Keep/Undo
+      InlineEditPanel.tsx       # Floating inline edit prompt + proposal queue used by Storyboard and Adapt
+      Nav.tsx                   # Sidebar navigation component
+      Spinner.tsx               # Shared loading spinner used across pages
+      WorkflowStepper.tsx       # Sticky horizontal stepper (Ideas → AI Angles → Storyboard → Adapt → Review → Publish)
     lib/                    # Utility helpers
       aiConfig.ts           # LocalStorage-backed AI provider config + active provider/key resolver used by angles generation
       analytics.ts          # Safe auth analytics event emitter (no-op when analytics SDK is absent)
@@ -160,9 +199,9 @@ frontend/
 
 ## Routing
 
-### Root redirect
-- `src/app/page.tsx` — calls `redirect('/dashboard')` from `next/navigation`; sends all root visits to the dashboard entry route.
-- Access control is enforced by the `(app)` layout guard. Unauthenticated visits are redirected from `/dashboard` to `/login`.
+### Root marketing page
+- `src/app/page.tsx` — public marketing landing page rendered with inline styles (no auth, no Nav). Sections: dark green sticky navbar with Sign In + Get Started, hero on a `linear-gradient(160deg, #0f2a25 → #14302a → #0d2622)` base overlaid with a tiled diamond/rhombus SVG pattern (160×160 tile, `rgba(255,255,255,0.06)` strokes), three preview cards (AI-Generated Content, Multichannel Reach, Real-Time Performance — first two on a mint-green `#b8e6d6→#7dc9b0` gradient, third on a teal `#1d6e6e→#155f5f` gradient with a mock dashboard chart), a four-card feature grid using colored-square SVG icons (yellow lightbulb, pink target, mint document, blue bar chart), a four-step workflow row with arrow connectors between numbered circles, and a dark CTA strip reusing the diamond pattern with a sparkle SVG accent.
+- Access control is enforced by the `(app)` layout guard. Unauthenticated visits to `/dashboard` are redirected to `/login`.
 
 ### Route groups
 - **`(auth)`** — unauthenticated routes (no Nav sidebar). Currently contains `/login`.
@@ -215,6 +254,12 @@ frontend/
   - `.muted-copy`
   - `.pill`
   - `.hero-metric`
+
+### `src/components/AIToolbox.tsx`
+- Shared AI tooling surface used by Storyboard and Adapt.
+- Core tabs remain Tone, Readability, Personas, A/B headlines, Research, and Plagiarism.
+- Adapt can opt into an extra `Similar posts` tab via `enableSimilarPosts`.
+- The Similar posts tab accepts a topic/query plus optional competitor terms, calls `/api/drafts/similar-posts`, lists linked matching posts, labels competitor matches, and returns a comparison summary plus recommended differentiation moves for the current draft.
 
 ---
 
@@ -348,16 +393,26 @@ Implementation note:
 
 ---
 
-### Screen 5a — Drafts Index (`/drafts`)
-**Route:** `src/app/(app)/drafts/page.tsx`
-**Pattern:** Client component; reads auth state then streams all drafts via Firestore `onSnapshot`.
+### Screen 5a — Storyboard Index (`/storyboard`)
+**Route:** `src/app/(app)/storyboard/page.tsx`
+**Pattern:** Client component; reads auth state then streams all storyboard records (the underlying `users/{uid}/drafts` collection) via Firestore `onSnapshot`.
 **Sections:**
 1. Reads `uid` from `onAuthStateChanged`; queries `users/{uid}/drafts` ordered by `updatedAt` descending via realtime snapshot.
-2. Displays a list of draft cards; each card shows `ideaTopic`, `angleTitle`, status badge (emerald = approved, blue = published, slate = draft), and formatted `updatedAt` timestamp.
-3. Each card links to `/drafts/{ideaId}?angleId={angleId}`.
-4. "**+ New Draft**" button reads `workflowContext` from `localStorage`; if `ideaId` is set, links to `/angles?ideaId={ideaId}`; otherwise falls back to `/ideas`.
-5. Empty-state renders a dashed bordered panel with CTA back to `/ideas` (or angles if context present).
-6. Loading state shows `<Spinner size="sm" />`; Firestore errors show inline red message.
+2. Recycling banner: derives a per-record "fresh / refresh / repurpose" verdict from `updatedAtMs` (≥ 60 days → refresh; ≥ 120 days → repurpose) and surfaces a yellow banner listing the top 6 stale records with one-click `Refresh` / `Repurpose` deep links into `/storyboard/{ideaId}?angleId={angleId}`.
+3. Displays a list of storyboard cards; each shows `ideaTopic`, `angleTitle`, status badge (`storyboard` by default), recycle badge when stale, and formatted `updatedAt` timestamp.
+4. Each card links to `/storyboard/{ideaId}?angleId={angleId}`.
+5. Card-level **Delete** removes the underlying `users/{uid}/drafts/{id}` document with a confirm prompt.
+6. "**+ New Storyboard**" button reads `workflowContext` from `localStorage`; if `ideaId` is set, links to `/angles?ideaId={ideaId}`; otherwise falls back to `/ideas`.
+7. Empty-state renders a dashed bordered panel with CTA back to `/ideas` (or angles if context present).
+8. Loading state shows `<Spinner size="sm" />`; Firestore errors show inline red message.
+
+#### Legacy redirects
+- `/drafts` (`src/app/(app)/drafts/page.tsx`) — `redirect('/storyboard')`.
+- `/drafts/new` (`src/app/(app)/drafts/new/page.tsx`) — `redirect('/storyboard')`.
+- `/storyboard/new` (`src/app/(app)/storyboard/new/page.tsx`) — `redirect('/storyboard')`.
+- `/adapt/new` (`src/app/(app)/adapt/new/page.tsx`) — `redirect('/storyboard')`.
+
+These keep older bookmarks and stepper deep-links working while consolidating the index UX onto `/storyboard`. The dynamic `/drafts/[id]` route is preserved as the original draft editor (Screen 5) and remains used by deep links from the Review queue and the `/api/drafts/*` flow; new entry points route through `/storyboard/[id]` (Screen 5b).
 
 ### Screen 5 — Draft Editor (`/drafts/[id]`)
 **Route:** `src/app/(app)/drafts/[id]/page.tsx`
@@ -418,17 +473,18 @@ Implementation note:
 11. Pending chat diffs render in the active platform editor with red old text and green new text; `Keep`/`Undo` actions are scoped to a single diff entry.
 12. Keeping one diff applies only that span, preserves surrounding manual edits, and rebases or conflict-marks remaining pending diffs for that platform.
 13. AI Content Tools on Adapt apply directly to the active platform editor. Tone, readability, research, plagiarism rewrites, and persona rewrites all update the current platform copy in place; the persona UI accepts one persona target at a time and behaves like the tone presets rather than generating multiple variants.
-14. Optimization tools call `POST /api/drafts/analyze` against the active platform text and render visible result panels for:
+14. Adapt also enables a `Similar posts` AI tool tab that searches for linked topic-adjacent posts, optionally biases results toward competitor terms, and summarizes overlap and differentiation opportunities against the current active platform draft.
+15. Optimization tools call `POST /api/drafts/analyze` against the active platform text and render visible result panels for:
    - `📈 SEO Optimizer`
    - `🔍 AI Check` (backed by `type='plagiarism'`)
    - `🔗 Source Check`
    When a configured non-Ollama AI key exists, the route keeps using the existing AI-backed prompt/call/parse flow. When the active provider is non-Ollama and no key is configured, the route returns deterministic, schema-compatible fallback outputs per tool based on the currently active platform copy instead of surfacing a shared missing-key failure.
-15. The active platform editor also shows a right-side AI timeline that records applied AI changes from generation, toolbox actions, chat-diff keeps, and accepted inline edits; selecting a timeline item restores that active-platform snapshot.
-16. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content.
-17. Right-hand trends sidebar consumes live `/api/trends` data and shows truthful loading, error, or empty states instead of placeholder topics/articles.
-18. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; the primary completion CTA saves the current adaptation, preserves exact `ideaId` + `angleId` workflow context, and routes directly to `/publish`.
-19. The Adapt editor shares Storyboard inline editing UX: floating in-place prompt/diff controls anchored near current selection, red/green inline diff preview in the floating panel, and direct textarea editability while AI proposals are pending.
-20. Adapt inline editing and chat preview avoid duplicate revised-text surfaces by using the same active textarea as the only authoritative editing surface.
+16. The active platform editor also shows a right-side AI timeline that records applied AI changes from generation, toolbox actions, chat-diff keeps, and accepted inline edits; selecting a timeline item restores that active-platform snapshot.
+17. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content.
+18. Right-hand trends sidebar consumes live `/api/trends` data and shows truthful loading, error, or empty states instead of placeholder topics/articles.
+19. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; the primary completion CTA saves the current adaptation, preserves exact `ideaId` + `angleId` workflow context, and routes directly to `/publish`.
+20. The Adapt editor shares Storyboard inline editing UX: floating in-place prompt/diff controls anchored near current selection, red/green inline diff preview in the floating panel, and direct textarea editability while AI proposals are pending.
+21. Adapt inline editing and chat preview avoid duplicate revised-text surfaces by using the same active textarea as the only authoritative editing surface.
 
 ---
 

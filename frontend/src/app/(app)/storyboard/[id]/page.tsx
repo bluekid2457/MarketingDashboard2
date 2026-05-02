@@ -6,6 +6,7 @@ import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { loadExaKey } from '@/lib/exaConfig';
 import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { Spinner } from '@/components/Spinner';
@@ -19,6 +20,7 @@ import WorkflowStepper from '@/components/WorkflowStepper';
 import { runCitationCheck } from '@/lib/citationCheck';
 import { AIToolbox, type PlagiarismResult } from '@/components/AIToolbox';
 import { DiffAwareEditor } from '@/components/DiffAwareEditor';
+import { CitationHighlightPreview } from '@/components/CitationHighlightPreview';
 
 type IdeaRecord = {
   id: string;
@@ -46,9 +48,18 @@ type AdaptDraftContext = StoryboardContext & {
   draftContent: string;
 };
 
+type ResearchLog = {
+  provider: string;
+  query: string;
+  sourceCount: number;
+};
+
 type DraftApiResponse = {
   draft?: string;
   provider?: string;
+  searchProvider?: string;
+  searchQuery?: string;
+  sourceCount?: number;
   error?: string;
 };
 
@@ -56,6 +67,7 @@ type DraftChatApiResponse = {
   reply?: string;
   updatedDraft?: string | null;
   provider?: string;
+  researchLog?: ResearchLog | null;
   error?: string;
 };
 
@@ -90,6 +102,7 @@ export default function StoryboardEditorPage() {
   const [storyboardError, setStoryboardError] = useState<string | null>(null);
   const [isGeneratingStoryboard, setIsGeneratingStoryboard] = useState(false);
   const [lastProvider, setLastProvider] = useState<string | null>(null);
+  const [researchLog, setResearchLog] = useState<ResearchLog | null>(null);
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -115,6 +128,7 @@ export default function StoryboardEditorPage() {
   const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
   const [toolboxNotice, setToolboxNotice] = useState<string | null>(null);
   const [aiHistory, setAiHistory] = useState<AIEditHistoryState>(createEmptyAIEditHistoryState());
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
 
   const recordAIEdit = useCallback((previousContent: string, nextContent: string, summary: string, label: string): void => {
     setAiHistory((previous) => appendAIEditHistory(previous, { previousContent, nextContent, summary, label }));
@@ -381,6 +395,7 @@ export default function StoryboardEditorPage() {
           apiKey: activeConfig.apiKey,
           ollamaBaseUrl: activeConfig.ollamaBaseUrl,
           ollamaModel: activeConfig.ollamaModel,
+          exaApiKey: loadExaKey(),
           idea: {
             topic: storyboardContext.idea.topic,
             tone: storyboardContext.idea.tone,
@@ -400,6 +415,13 @@ export default function StoryboardEditorPage() {
       recordAIEdit(storyboardText, payload.draft, 'Generated a fresh storyboard draft.', 'Storyboard generation');
       setStoryboardText(payload.draft);
       setLastProvider(payload.provider ?? activeConfig.provider);
+      if (payload.searchProvider) {
+        setResearchLog({
+          provider: payload.searchProvider,
+          query: payload.searchQuery ?? '',
+          sourceCount: payload.sourceCount ?? 0,
+        });
+      }
     } catch (error) {
       setStoryboardError(error instanceof Error ? error.message : 'Unable to generate storyboard right now.');
     } finally {
@@ -573,6 +595,7 @@ export default function StoryboardEditorPage() {
           apiKey: activeConfig.apiKey,
           ollamaBaseUrl: activeConfig.ollamaBaseUrl,
           ollamaModel: activeConfig.ollamaModel,
+          exaApiKey: loadExaKey(),
           draft: storyboardText,
           messages: chatMessages,
           userMessage: nextMessage,
@@ -585,7 +608,33 @@ export default function StoryboardEditorPage() {
         throw new Error(payload.error ?? 'AI chat failed.');
       }
 
-      setChatMessages((previous) => [...previous, { role: 'assistant', content: payload.reply ?? '' }]);
+      const newMessages: DraftChatMessage[] = [];
+
+      // Inject a research log bubble before the assistant reply so the user
+      // can see the Exa → AI handoff in the chat history
+      if (payload.researchLog) {
+        const log = payload.researchLog;
+        const providerLabel =
+          log.provider === 'exa'
+            ? 'Exa'
+            : log.provider === 'unavailable'
+            ? 'No sources (add an Exa key in Settings)'
+            : log.provider === 'duckduckgo' || log.provider === 'duckduckgo-html'
+            ? 'DuckDuckGo'
+            : log.provider;
+        const sourceLine =
+          log.provider === 'unavailable'
+            ? 'No results — factual claims will use ALL-CAPS placeholders.'
+            : `${log.sourceCount} source${log.sourceCount !== 1 ? 's' : ''} retrieved.`;
+        newMessages.push({
+          role: 'research',
+          content: `${providerLabel} · Query: "${log.query}" · ${sourceLine}`,
+        });
+        setResearchLog(log);
+      }
+
+      newMessages.push({ role: 'assistant', content: payload.reply ?? '' });
+      setChatMessages((previous) => [...previous, ...newMessages]);
       setChatProvider(payload.provider ?? activeConfig.provider);
 
       const updatedDraft = payload.updatedDraft?.trim();
@@ -700,6 +749,25 @@ export default function StoryboardEditorPage() {
               </div>
             ) : null}
 
+            {researchLog ? (
+              <div className={`mb-3 flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs ${
+                researchLog.provider === 'exa'
+                  ? 'border-teal-200 bg-teal-50 text-teal-800'
+                  : researchLog.provider === 'unavailable'
+                  ? 'border-amber-200 bg-amber-50 text-amber-800'
+                  : 'border-slate-200 bg-slate-50 text-slate-600'
+              }`}>
+                <span>{researchLog.provider === 'unavailable' ? '⚠️' : '🔍'}</span>
+                <span>
+                  {researchLog.provider === 'exa'
+                    ? `Exa · "${researchLog.query}" · ${researchLog.sourceCount} source${researchLog.sourceCount !== 1 ? 's' : ''}`
+                    : researchLog.provider === 'unavailable'
+                    ? `No live sources — add an Exa key in Settings. Factual claims appear as ALL-CAPS placeholders.`
+                    : `${researchLog.provider === 'duckduckgo' || researchLog.provider === 'duckduckgo-html' ? 'DuckDuckGo' : researchLog.provider} · "${researchLog.query}" · ${researchLog.sourceCount} source${researchLog.sourceCount !== 1 ? 's' : ''}`}
+                </span>
+              </div>
+            ) : null}
+
             {isLoadingContextFromFirebase ? (
               <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
                 <Spinner size="sm" />
@@ -712,49 +780,72 @@ export default function StoryboardEditorPage() {
               </div>
             ) : null}
 
+            <div className="mb-3 flex gap-1">
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${!isPreviewMode ? 'bg-emerald-700 text-white' : 'border border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+                onClick={() => setIsPreviewMode(false)}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${isPreviewMode ? 'bg-emerald-700 text-white' : 'border border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+                onClick={() => setIsPreviewMode(true)}
+              >
+                Preview
+              </button>
+            </div>
+
               <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start">
-                <DiffAwareEditor
-                  value={storyboardText}
-                  onChange={setStoryboardText}
-                  pendingDiffs={chatPendingDiffs}
-                  onKeepDiff={handleKeepChatDiff}
-                  onUndoDiff={handleUndoChatDiff}
-                  onUndoAll={() => {
-                    setChatPendingDiffs([]);
-                    setChatError(null);
-                  }}
-                  editorRef={editorRef}
-                  onSelect={captureSelection}
-                  onKeyUp={captureSelection}
-                  onMouseUp={captureSelection}
-                  placeholder="Your storyboard draft appears here."
-                  overlay={
-                    <InlineEditPanel
-                      isVisible={hasInlineOverlay}
-                      anchorTop={floatingAnchor.top}
-                      anchorLeft={floatingAnchor.left}
-                      selectedText={selection.text}
-                      instruction={instruction}
-                      onInstructionChange={setInstruction}
-                      onPropose={() => {
-                        void handleProposeInlineEdit();
-                      }}
-                      isLoading={inlineEditor.isLoading}
-                      error={inlineEditor.error}
-                      pendingChange={activePendingInlineChange}
-                      onAcceptPending={() => {
-                        if (activePendingInlineChange) {
-                          inlineEditor.acceptChange(activePendingInlineChange.id);
-                        }
-                      }}
-                      onDenyPending={() => {
-                        if (activePendingInlineChange) {
-                          inlineEditor.denyChange(activePendingInlineChange.id);
-                        }
-                      }}
-                    />
-                  }
-                />
+                {isPreviewMode ? (
+                  <div className="min-h-[480px] rounded-xl border border-slate-300 bg-white p-4">
+                    <CitationHighlightPreview content={storyboardText} />
+                  </div>
+                ) : (
+                  <DiffAwareEditor
+                    value={storyboardText}
+                    onChange={setStoryboardText}
+                    pendingDiffs={chatPendingDiffs}
+                    onKeepDiff={handleKeepChatDiff}
+                    onUndoDiff={handleUndoChatDiff}
+                    onUndoAll={() => {
+                      setChatPendingDiffs([]);
+                      setChatError(null);
+                    }}
+                    editorRef={editorRef}
+                    onSelect={captureSelection}
+                    onKeyUp={captureSelection}
+                    onMouseUp={captureSelection}
+                    placeholder="Your storyboard draft appears here."
+                    overlay={
+                      <InlineEditPanel
+                        isVisible={hasInlineOverlay}
+                        anchorTop={floatingAnchor.top}
+                        anchorLeft={floatingAnchor.left}
+                        selectedText={selection.text}
+                        instruction={instruction}
+                        onInstructionChange={setInstruction}
+                        onPropose={() => {
+                          void handleProposeInlineEdit();
+                        }}
+                        isLoading={inlineEditor.isLoading}
+                        error={inlineEditor.error}
+                        pendingChange={activePendingInlineChange}
+                        onAcceptPending={() => {
+                          if (activePendingInlineChange) {
+                            inlineEditor.acceptChange(activePendingInlineChange.id);
+                          }
+                        }}
+                        onDenyPending={() => {
+                          if (activePendingInlineChange) {
+                            inlineEditor.denyChange(activePendingInlineChange.id);
+                          }
+                        }}
+                      />
+                    }
+                  />
+                )}
                 <div className="xl:sticky xl:top-5">
                   <AIEditTimeline
                     entries={aiHistory.entries}

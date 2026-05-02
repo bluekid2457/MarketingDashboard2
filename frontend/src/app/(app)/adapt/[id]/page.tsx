@@ -10,7 +10,9 @@ import { AIEditTimeline } from '@/components/AIEditTimeline';
 import { InlineEditPanel } from '@/components/InlineEditPanel';
 import { DraftChatPanel, type DraftChatMessage } from '@/components/DraftChatPanel';
 import { AIToolbox, type PlagiarismResult } from '@/components/AIToolbox';
+import { CitationHighlightPreview } from '@/components/CitationHighlightPreview';
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { loadExaKey } from '@/lib/exaConfig';
 import { appendAIEditHistory, createEmptyAIEditHistoryState, type AIEditHistoryState } from '@/lib/aiEditHistory';
 import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
@@ -70,9 +72,18 @@ type SeoState = {
   requestVersion: number;
 };
 
+type ResearchLog = {
+  provider: string;
+  query: string;
+  sourceCount: number;
+};
+
 type AdaptGenerateApiResponse = {
   generatedContent?: string;
   provider?: string;
+  searchProvider?: string;
+  searchQuery?: string;
+  sourceCount?: number;
   error?: string;
 };
 
@@ -85,6 +96,7 @@ type DraftChatApiResponse = {
   reply?: string;
   updatedDraft?: string | null;
   provider?: string;
+  researchLog?: ResearchLog | null;
   error?: string;
 };
 
@@ -295,6 +307,20 @@ export default function AdaptPage() {
     blog: null,
   });
   const [plagiarismByPlatform, setPlagiarismByPlatform] = useState<Record<PlatformKey, PlagiarismResult | null>>({
+    linkedin: null,
+    twitter: null,
+    medium: null,
+    newsletter: null,
+    blog: null,
+  });
+  const [previewModeByPlatform, setPreviewModeByPlatform] = useState<Record<PlatformKey, boolean>>({
+    linkedin: false,
+    twitter: false,
+    medium: false,
+    newsletter: false,
+    blog: false,
+  });
+  const [researchLogByPlatform, setResearchLogByPlatform] = useState<Record<PlatformKey, ResearchLog | null>>({
     linkedin: null,
     twitter: null,
     medium: null,
@@ -823,6 +849,8 @@ export default function AdaptPage() {
             apiKey: activeConfig.apiKey,
             ollamaBaseUrl: activeConfig.ollamaBaseUrl,
             ollamaModel: activeConfig.ollamaModel,
+            exaApiKey: loadExaKey(),
+            ideaTopic: adaptContext.idea.topic,
             platform,
             sourceDraft: adaptContext.draftContent,
             currentPlatformDraft: platforms[platform] ?? '',
@@ -834,6 +862,17 @@ export default function AdaptPage() {
         const generated = payload.generatedContent?.trim();
         if (!response.ok || !generated) {
           throw new Error(payload.error ?? 'Platform generation failed.');
+        }
+
+        if (payload.searchProvider) {
+          setResearchLogByPlatform((previous) => ({
+            ...previous,
+            [platform]: {
+              provider: payload.searchProvider ?? 'unavailable',
+              query: payload.searchQuery ?? '',
+              sourceCount: payload.sourceCount ?? 0,
+            },
+          }));
         }
 
         let nextVersion = 0;
@@ -1060,6 +1099,7 @@ export default function AdaptPage() {
           apiKey: activeConfig.apiKey,
           ollamaBaseUrl: activeConfig.ollamaBaseUrl,
           ollamaModel: activeConfig.ollamaModel,
+          exaApiKey: loadExaKey(),
           draft: activeDraft,
           messages: historyForPlatform,
           userMessage: nextMessage,
@@ -1072,9 +1112,37 @@ export default function AdaptPage() {
         throw new Error(payload.error ?? 'AI chat failed.');
       }
 
+      const newMessages: DraftChatMessage[] = [];
+
+      if (payload.researchLog) {
+        const log = payload.researchLog;
+        const providerLabel =
+          log.provider === 'exa'
+            ? 'Exa'
+            : log.provider === 'unavailable'
+            ? 'No sources (add an Exa key in Settings)'
+            : log.provider === 'duckduckgo' || log.provider === 'duckduckgo-html'
+            ? 'DuckDuckGo'
+            : log.provider;
+        const sourceLine =
+          log.provider === 'unavailable'
+            ? 'No results — factual claims will use ALL-CAPS placeholders.'
+            : `${log.sourceCount} source${log.sourceCount !== 1 ? 's' : ''} retrieved.`;
+        newMessages.push({
+          role: 'research',
+          content: `${providerLabel} · Query: "${log.query}" · ${sourceLine}`,
+        });
+        setResearchLogByPlatform((previous) => ({
+          ...previous,
+          [platform]: log,
+        }));
+      }
+
+      newMessages.push({ role: 'assistant', content: payload.reply ?? '' });
+
       setChatHistoryByPlatform((previous) => ({
         ...previous,
-        [platform]: [...(previous[platform] ?? []), { role: 'assistant', content: payload.reply ?? '' }],
+        [platform]: [...(previous[platform] ?? []), ...newMessages],
       }));
       setChatProviderByPlatform((previous) => ({
         ...previous,
@@ -1453,90 +1521,137 @@ export default function AdaptPage() {
                     {state.error ? <p className="mb-2 text-xs text-red-700">{state.error}</p> : null}
                     {seo.error ? <p className="mb-2 text-xs text-red-700">SEO: {seo.error}</p> : null}
 
+                    {researchLogByPlatform[activePlatform] ? (() => {
+                      const log = researchLogByPlatform[activePlatform]!;
+                      return (
+                        <div className={`mb-2 flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs ${
+                          log.provider === 'exa'
+                            ? 'border-teal-200 bg-teal-50 text-teal-800'
+                            : log.provider === 'unavailable'
+                            ? 'border-amber-200 bg-amber-50 text-amber-800'
+                            : 'border-slate-200 bg-slate-50 text-slate-600'
+                        }`}>
+                          <span>{log.provider === 'unavailable' ? '⚠️' : '🔍'}</span>
+                          <span>
+                            {log.provider === 'exa'
+                              ? `Exa · "${log.query}" · ${log.sourceCount} source${log.sourceCount !== 1 ? 's' : ''}`
+                              : log.provider === 'unavailable'
+                              ? 'No live sources — add an Exa key in Settings. Factual claims appear as ALL-CAPS placeholders.'
+                              : `${log.provider === 'duckduckgo' || log.provider === 'duckduckgo-html' ? 'DuckDuckGo' : log.provider} · "${log.query}" · ${log.sourceCount} source${log.sourceCount !== 1 ? 's' : ''}`}
+                          </span>
+                        </div>
+                      );
+                    })() : null}
+
                     <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start">
                       <div className="relative">
-                        <textarea
-                          className="min-h-[180px] w-full resize-y rounded-xl border border-slate-300 p-3 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
-                          value={text}
-                          onChange={(event) => {
-                            setPlatforms((previous) => ({
-                              ...previous,
-                              [activePlatform]: event.target.value,
-                            }));
-                            setContentVersion((previous) => ({
-                              ...previous,
-                              [activePlatform]: previous[activePlatform] + 1,
-                            }));
-                          }}
-                          onSelect={(event) => captureSelection(activePlatform, event.currentTarget)}
-                          onKeyUp={(event) => captureSelection(activePlatform, event.currentTarget)}
-                          onMouseUp={(event) => captureSelection(activePlatform, event.currentTarget)}
-                          placeholder={`Adapted ${platformMeta.label} copy appears here.`}
-                        />
+                        <div className="mb-2 flex gap-1">
+                          <button
+                            type="button"
+                            className={`rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${!previewModeByPlatform[activePlatform] ? 'bg-emerald-700 text-white' : 'border border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+                            onClick={() => setPreviewModeByPlatform((prev) => ({ ...prev, [activePlatform]: false }))}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            className={`rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${previewModeByPlatform[activePlatform] ? 'bg-emerald-700 text-white' : 'border border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+                            onClick={() => setPreviewModeByPlatform((prev) => ({ ...prev, [activePlatform]: true }))}
+                          >
+                            Preview
+                          </button>
+                        </div>
 
-                        {activePlatformChatDiffs.length > 0 ? (
-                          <div className="pointer-events-none absolute inset-x-3 bottom-3 max-h-52 overflow-auto rounded-xl border border-slate-300 bg-white/95 p-2 shadow-sm">
-                            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                              Pending AI sentence diffs in editor
-                            </p>
-                            <div className="space-y-2">
-                              {activePlatformChatDiffs.map((diff) => (
-                                <div key={diff.id} className="pointer-events-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
-                                  <p className="mb-1 text-[11px] font-semibold text-slate-600">Sentence change</p>
-                                  <p className="rounded bg-red-50 px-2 py-1 text-xs text-red-800 line-through">{diff.beforeText || '(insert)'}</p>
-                                  <p className="mt-1 rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-800">{diff.afterText || '(remove)'}</p>
-                                  {diff.message ? <p className="mt-1 text-[11px] text-amber-700">{diff.message}</p> : null}
-                                  <div className="mt-2 flex flex-wrap gap-2">
-                                    <button
-                                      type="button"
-                                      className="rounded-md bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
-                                      onClick={() => handleKeepPlatformChatDiff(diff.id)}
-                                      disabled={diff.status !== 'pending'}
-                                      aria-label="Keep this sentence diff"
-                                    >
-                                      Keep
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="rounded-md border border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
-                                      onClick={() => handleUndoPlatformChatDiff(diff.id)}
-                                      aria-label="Undo this sentence diff"
-                                    >
-                                      Undo
-                                    </button>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
+                        {previewModeByPlatform[activePlatform] ? (
+                          <div className="min-h-[180px] rounded-xl border border-slate-300 bg-white p-4">
+                            <CitationHighlightPreview content={text} />
                           </div>
-                        ) : null}
+                        ) : (
+                          <>
+                            <textarea
+                              className="min-h-[180px] w-full resize-y rounded-xl border border-slate-300 p-3 text-sm leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500"
+                              value={text}
+                              onChange={(event) => {
+                                setPlatforms((previous) => ({
+                                  ...previous,
+                                  [activePlatform]: event.target.value,
+                                }));
+                                setContentVersion((previous) => ({
+                                  ...previous,
+                                  [activePlatform]: previous[activePlatform] + 1,
+                                }));
+                              }}
+                              onSelect={(event) => captureSelection(activePlatform, event.currentTarget)}
+                              onKeyUp={(event) => captureSelection(activePlatform, event.currentTarget)}
+                              onMouseUp={(event) => captureSelection(activePlatform, event.currentTarget)}
+                              placeholder={`Adapted ${platformMeta.label} copy appears here.`}
+                            />
 
-                        <InlineEditPanel
-                          isVisible={hasInlineOverlay}
-                          anchorTop={floatingAnchor.top}
-                          anchorLeft={floatingAnchor.left}
-                          selectedText={selection.text}
-                          instruction={instruction}
-                          onInstructionChange={setInstruction}
-                          onPropose={() => {
-                            void inlineEditor.proposeChange({ selection, instruction }).then(() => {
-                              setInstruction('');
-                            });
-                          }}
-                          isLoading={inlineEditor.isLoading}
-                          error={inlineEditor.error}
-                          pendingChange={activePendingInlineChange}
-                          onAcceptPending={() => {
-                            if (activePendingInlineChange) {
-                              inlineEditor.acceptChange(activePendingInlineChange.id);
-                            }
-                          }}
-                          onDenyPending={() => {
-                            if (activePendingInlineChange) {
-                              inlineEditor.denyChange(activePendingInlineChange.id);
-                            }
-                          }}
-                        />
+                            {activePlatformChatDiffs.length > 0 ? (
+                              <div className="pointer-events-none absolute inset-x-3 bottom-3 max-h-52 overflow-auto rounded-xl border border-slate-300 bg-white/95 p-2 shadow-sm">
+                                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                                  Pending AI sentence diffs in editor
+                                </p>
+                                <div className="space-y-2">
+                                  {activePlatformChatDiffs.map((diff) => (
+                                    <div key={diff.id} className="pointer-events-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+                                      <p className="mb-1 text-[11px] font-semibold text-slate-600">Sentence change</p>
+                                      <p className="rounded bg-red-50 px-2 py-1 text-xs text-red-800 line-through">{diff.beforeText || '(insert)'}</p>
+                                      <p className="mt-1 rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-800">{diff.afterText || '(remove)'}</p>
+                                      {diff.message ? <p className="mt-1 text-[11px] text-amber-700">{diff.message}</p> : null}
+                                      <div className="mt-2 flex flex-wrap gap-2">
+                                        <button
+                                          type="button"
+                                          className="rounded-md bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
+                                          onClick={() => handleKeepPlatformChatDiff(diff.id)}
+                                          disabled={diff.status !== 'pending'}
+                                          aria-label="Keep this sentence diff"
+                                        >
+                                          Keep
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="rounded-md border border-slate-300 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                                          onClick={() => handleUndoPlatformChatDiff(diff.id)}
+                                          aria-label="Undo this sentence diff"
+                                        >
+                                          Undo
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+
+                            <InlineEditPanel
+                              isVisible={hasInlineOverlay}
+                              anchorTop={floatingAnchor.top}
+                              anchorLeft={floatingAnchor.left}
+                              selectedText={selection.text}
+                              instruction={instruction}
+                              onInstructionChange={setInstruction}
+                              onPropose={() => {
+                                void inlineEditor.proposeChange({ selection, instruction }).then(() => {
+                                  setInstruction('');
+                                });
+                              }}
+                              isLoading={inlineEditor.isLoading}
+                              error={inlineEditor.error}
+                              pendingChange={activePendingInlineChange}
+                              onAcceptPending={() => {
+                                if (activePendingInlineChange) {
+                                  inlineEditor.acceptChange(activePendingInlineChange.id);
+                                }
+                              }}
+                              onDenyPending={() => {
+                                if (activePendingInlineChange) {
+                                  inlineEditor.denyChange(activePendingInlineChange.id);
+                                }
+                              }}
+                            />
+                          </>
+                        )}
                       </div>
 
                       <div className="xl:sticky xl:top-5">
@@ -1632,6 +1747,7 @@ export default function AdaptPage() {
                             : null
                         }
                         hasApiKeyConfigured={hasApiKey}
+                        enableSimilarPosts
                         onApplyDraft={(nextDraft, summary, label) => {
                           recordPlatformAIEdit(activePlatform, text, nextDraft, summary, label ?? 'AI tool');
                           setPlatforms((previous) => ({

@@ -2,9 +2,16 @@
 
 This document describes the main screens required for the Marketing Dashboard, based on the feature list and user stories. Each screen includes its purpose, key components, and main interactions.
 
+> **Implementation status legend** (used in section headings below):
+> - **DONE** — UI is built, persists data, and at least one happy-path interaction runs end-to-end without an external API key.
+> - **PARTIAL** — Page exists and renders some real data, but one or more named components / actions are placeholders, dead, or silently fail without an AI provider key configured.
+> - **PLACEHOLDER** — Page exists but is mostly hardcoded labels / static markup with no functional behavior.
+>
+> Last verified end-to-end: 2026-05-01 via Playwright walkthrough with the project's QA test credentials, no AI API key configured, and the FastAPI backend down (missing `httpx`).
+
 ---
 
-## 1. Login & Authentication Screen (LoginScreen.jpg)
+## 1. Login & Authentication Screen (LoginScreen.jpg) — DONE
 **Purpose:** Secure user login, registration, and OAuth provider selection.
 **Components:**
 - Email/password fields
@@ -22,21 +29,22 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
-## 2. Dashboard (Main Overview)
+## 2. Dashboard (Main Overview) — PARTIAL
 **Purpose:** Central hub showing content pipeline, stats, and quick actions.
 **Components:**
-- Content calendar (visual, clickable)
-- Idea backlog summary
-- Drafts/review queue
-- Recent analytics (engagement, performance)
-- Quick links to main features
+- Content calendar (visual, clickable) — DONE (`scheduledPosts` + `adaptations` aggregated per day)
+- Idea backlog summary (top 3) — DONE
+- Storyboards / Review queue — DONE
+- Recent analytics — PARTIAL (real Posts-this-week and Ideas-waiting metrics; "Engagement rate" and "Best post type" are explicit `N/A` / `TODO` placeholders pending real platform analytics)
+- All Adaptations list — DONE
+- Quick links — DONE
 **Main Actions:**
 - Navigate to other screens
 - View high-level stats
 
 ---
 
-## 3. Idea Input & Backlog Screen (IdeaScreen.png)
+## 3. Idea Input & Backlog Screen (IdeaScreen.png) — DONE
 **Purpose:** Submit new ideas, view and manage idea backlog.
 **Layout:** Single-column, no sidebar.
 **Components:**
@@ -55,7 +63,7 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
-## 4. AI Angle Selection & Outline Screen (AngleOutlineScreen.png)
+## 4. AI Angle Selection & Outline Screen (AngleOutlineScreen.png) — DONE (with AI key); deterministic fallback covers no-key case
 **Purpose:** Review AI-generated angles/outlines for an idea, select or edit before drafting.
 **Components:**
 - Query-based idea handoff via `ideaId`, with Firestore idea loading for signed-in user
@@ -74,19 +82,17 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
-## 5. Draft Editor Screen (DraftEditorScreen.jpg)
-**Purpose:** Full-featured editor for drafting, editing, and iterating content.
+## 5. Storyboard / Draft Editor Screen (DraftEditorScreen.jpg) — PARTIAL
+**Purpose:** Full-featured editor for drafting, editing, and iterating content. The new entry route is `/storyboard/[id]` (Screen 5b in `frontend.md`); the legacy `/drafts/[id]` editor is preserved for existing deep links and shares the same `users/{uid}/drafts/{ideaId}_{angleId}` document.
 **Components:**
-- Rich text editor
-- Mid-draft prompt bar (for iterative editing)
-- Tone tuning controls
-- Readability/SEO scoring panel
-- Single-persona rewrite control
-- A/B headline generator
-- Plagiarism/citation checker
-- Right-side AI change timeline with restore actions
-- Workflow breadcrumb that includes the next Multi-Channel Adaptation step
-- Save, **Adapt for Platforms**, submit for review, or schedule buttons
+- Textarea editor (DONE)
+- Inline AI editor (`InlineEditPanel`) with floating prompt + Keep/Undo proposal review (DONE with key)
+- Mid-draft AI chat (`DraftChatPanel`) — **silently fails when no AI provider key is configured** (no error toast; `Send to AI Chat` fires no `POST /api/drafts/chat`). Needs a visible no-key warning.
+- Tone tuning, readability dial, persona rewrite, A/B headlines, research, plagiarism — exposed via `AIToolbox`. Quick-action buttons (e.g. `Make it more concise`) **silently fail without an AI key** — needs a no-key warning surface.
+- Right-side AI change timeline (`AIEditTimeline`) with restore actions (DONE)
+- Citation/references panel (DONE; references parsed via `extractReferences()` from `frontend/src/lib/draftResearch.ts`)
+- Workflow breadcrumb that includes the next Multi-Channel Adaptation step (DONE)
+- Save Storyboard, **Adapt for Platforms**, Submit for Review, Schedule Post buttons (DONE; Adapt button writes `localStorage['adapt_draft_context']` and routes to `/adapt/<ideaId>?angleId=<angleId>`)
 **Main Actions:**
 - Edit content
 - Tune tone
@@ -96,8 +102,10 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
-## 6. Multi-Channel Adaptation Screen (AdaptationScreen.jpg)
+## 6. Multi-Channel Adaptation Screen (AdaptationScreen.jpg) — PARTIAL
 **Purpose:** Adapt content for different platforms/formats.
+
+> **Known broken:** The `Continue and Generate` action on the platform-selection gate fires no network request when no AI provider key is configured — silent fail. `POST /api/drafts/adapt` does have a deterministic-fallback path but the client guard rejects the call before it reaches the route. Needs a visible no-key warning + a fallback adaptation path.
 **Components:**
 - Route/context validation against draft handoff data in `localStorage['adapt_draft_context']`
 - Firestore-backed per-platform adaptation document at `users/{uid}/adaptations/{ideaId}_{angleId}`
@@ -109,6 +117,7 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Prompt-template resolver under `src/lib/prompts/platforms` with concise per-platform rules (LinkedIn, X/Twitter, Medium, Newsletter, Blog)
 - Visible autosave/manual-save status for adaptation persistence
 - AI chat for editing/adapting the currently active platform version
+- AI tooling panel includes a Similar posts tab on Adapt that finds linked comparable posts, highlights competitor matches, and summarizes draft overlap and differentiation opportunities
 - Optimization tools for SEO Optimizer, AI Check, and Source Check with on-screen results; each tool analyzes the currently active platform copy, uses the configured AI provider when a valid key exists, and falls back to deterministic per-tool results when a non-Ollama key is missing
 - Live preview of the active platform copy plus per-platform word counts
 - Live trends and relevant articles panel sourced from `/api/trends`
@@ -122,92 +131,90 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
-## 7. Publishing & Scheduling Screen
+## 7. Publishing & Scheduling Screen — PARTIAL
 **Purpose:** Manage publishing and scheduling for each platform.
 **Components:**
-- Platform connection status (OAuth)
-- Schedule picker/calendar
-- Draft mode toggle
-- Visual content calendar
-- Gap detection alerts
-- Submit to search engines button
+- Platform connection status (OAuth) — Settings card; **requires the FastAPI backend** (`/api/v1/integrations/status`). Backend currently fails to start without `httpx` installed.
+- Schedule picker/calendar — DONE (writes `users/{uid}/scheduledPosts` and surfaces upcoming reminders in-page)
+- Draft mode toggle — TODO
+- Visual content calendar — DONE (Dashboard `Activity Calendar` aggregates `scheduledPosts` + `adaptations`)
+- Gap detection alerts — DONE
+- Submit to search engines button (IndexNow) — TODO
+- Per-card LinkedIn / X-Twitter publish — DONE as a manual handoff (clipboard + open compose URL); no direct posting to provider APIs
 **Main Actions:**
 - Schedule or publish content
-- Connect/disconnect platforms
+- Connect/disconnect platforms (LinkedIn only; OAuth scaffold present, post action TODO)
 - View calendar gaps
 
 ---
 
-## 8. Review & Approval Workflow Screen
+## 8. Review & Approval Workflow Screen — PLACEHOLDER (queue only)
 **Purpose:** Manage draft approvals, version history, and comments.
 **Components:**
-- Draft queue/list sourced from the signed-in user's Firestore drafts (`users/{uid}/drafts`)
-- Inline editor for review
-- Version history panel
-- Approval chain controls
-- Comment/suggestion layer
-- Role-based access controls
+- Draft queue/list sourced from the signed-in user's Firestore drafts (`users/{uid}/drafts`) — DONE
+- Inline editor for review — PLACEHOLDER (heading + one-line copy only; no textarea / contenteditable)
+- Version history panel — PLACEHOLDER
+- Approval chain controls — PLACEHOLDER
+- Comment/suggestion layer — PLACEHOLDER
+- Role-based access controls — PLACEHOLDER
 **Main Actions:**
-- Approve/reject drafts
-- Edit/comment
-- View/restore versions
-- Open any queue item to its corresponding draft detail route (`/drafts/<ideaId>?angleId=<angleId>`)
+- Approve/reject drafts (TODO)
+- Edit/comment (TODO)
+- View/restore versions (TODO)
+- Open any queue item to its corresponding draft detail route (`/drafts/<ideaId>?angleId=<angleId>` or `/storyboard/<ideaId>?angleId=<angleId>`) — DONE
 
 ---
 
-## 9. Analytics & Performance Screen
+## 9. Analytics & Performance Screen — PLACEHOLDER
 **Purpose:** Show engagement, performance, and predictive analytics.
-**Components:**
-- Engagement data charts (per platform)
-- Performance history timeline
-- Predictive scoring widgets
-- Copy intelligence insights
-- AI visibility tracking
-**Main Actions:**
-- View/filter analytics
-- Drill down by content, platform, or time
+**Components:** All placeholder — hardcoded labels, no chart library wired up, no API call.
+- Engagement data charts (per platform) — PLACEHOLDER (label only)
+- Performance history timeline — PLACEHOLDER
+- Predictive scoring widgets — PLACEHOLDER (hardcoded "Predicted reach: 42k | confidence 82%")
+- Copy intelligence insights — PLACEHOLDER (hardcoded factoid)
+- AI visibility tracking — PLACEHOLDER
+**Main Actions:** None functional yet.
 
 ---
 
-## 10. Collaboration & Client Management Screen
+## 10. Collaboration & Client Management Screen — PLACEHOLDER
 **Purpose:** Manage team, clients, and agency workflows.
-**Components:**
-- Invite/manage users (editors, co-authors, clients)
-- Role-based access controls
-- Client brief intake forms
-- Project-level content calendars
-- White-label output toggles
-**Main Actions:**
-- Add/remove users
-- Fill out briefs
-- Switch between brands/clients
+**Components:** All placeholder; the `Invite teammate` button is a dead no-op (no `onClick` effect, no modal, no network call).
+- Invite/manage users (editors, co-authors, clients) — PLACEHOLDER + dead button
+- Role-based access controls — PLACEHOLDER
+- Client brief intake forms — PLACEHOLDER
+- Project-level content calendars — PLACEHOLDER
+- White-label output toggles — PLACEHOLDER
+**Main Actions:** None functional yet.
 
 ---
 
-## 11. Settings & Compliance Screen
+## 11. Settings & Compliance Screen — PARTIAL
 **Purpose:** Configure brand voice, compliance, integrations, and governance.
 **Components:**
-- Brand voice profile editor
-- Compliance flag settings
-- Audit log viewer
-- Integration connectors (API, CRM, Google Docs, Slack, SSO)
-- Security settings
+- Company Profile (9 fields) with **Auto-fill from website** action backed by `POST /api/company/autofill` — DONE; persists to `users/{uid}.companyContext`
+- Brand voice profile editor — DONE; persists to the same `companyContext` object on the user doc
+- AI API Keys (OpenAI / Gemini / Claude / Ollama) plus optional research-source key (Exa) — DONE; persists to `localStorage['ai_config']`
+- Compliance flag settings — PLACEHOLDER (heading + descriptive text only)
+- Audit log viewer — PLACEHOLDER
+- Integration connectors (LinkedIn OAuth + provider registry display) — DONE *when the FastAPI backend is reachable*; currently broken in dev because `httpx` is missing from `backend/requirements.txt` and the backend will not start. Other providers from the registry (X, Medium, WordPress, Ghost, Substack, Instagram, Facebook) are informational cards only.
+- Security settings — PARTIAL (sign-out works; CRM, Google Docs, Slack, SSO connectors are TODO)
 **Main Actions:**
-- Edit brand voice
-- Set compliance rules
-- Manage integrations
-- View audit logs
+- Edit Company Profile + Brand Voice
+- Set / save AI provider keys
+- Connect / disconnect LinkedIn (when backend is up)
+- Sign out
 
 ---
 
-## 12. Error & Notification Screens
-**Purpose:** Display errors, alerts, and system notifications.
+## 12. Error & Notification Screens — PARTIAL
+**Purpose:** Display errors, alerts, and system notifications. Notifications are derived from `users/{uid}/scheduledPosts` (see `automation.md`), so when no reminders are queued the page renders empty bucket headings.
 **Components:**
-- Error messages
-- Success/warning notifications
-- System alerts (e.g., compliance, scheduling, integration failures)
+- Error Messages card — DONE (signed-out / Firebase-unavailable / Firestore-load failure surfaces here)
+- Success / Warning Notifications card — DONE (lists scheduled posts due now within ±15 minutes)
+- System Alerts card — DONE (lists upcoming reminders for the next 24 hours and missed reminders)
 **Main Actions:**
-- Dismiss or act on notifications
+- Dismiss or act on notifications (TODO — no dismiss action wired yet)
 
 ---
 

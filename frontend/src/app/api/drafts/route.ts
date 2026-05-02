@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import type { AIProvider } from '@/lib/aiConfig';
 import { callAI, type AIMessage, DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL } from '@/lib/callAI';
-import { searchDuckDuckGo, type ResearchSource } from '@/lib/draftResearch';
+import { fetchResearchSources, type ResearchSource } from '@/lib/draftResearch';
 
 type Angle = {
   id: string;
@@ -23,6 +23,7 @@ type DraftRequestBody = {
   apiKey?: string;
   ollamaBaseUrl?: string;
   ollamaModel?: string;
+  exaApiKey?: string;
   idea?: IdeaInput;
   angle?: Angle;
   companyContext?: string[];
@@ -75,7 +76,7 @@ function formatApprovedSources(sources: ResearchSource[]): string[] {
   return sources.flatMap((source, index) => [
     `- [${index + 1}] ${source.title}`,
     `  URL: ${source.url}`,
-    `  Snippet: ${source.snippet || 'No snippet available.'}`,
+    `  Key excerpt: ${source.snippet || 'No excerpt available — cite only if the title directly supports a specific claim.'}`,
   ]);
 }
 
@@ -178,7 +179,13 @@ function normalizeContextLines(value: unknown): string[] {
     .filter(Boolean);
 }
 
-function buildDraftPrompt(idea: IdeaInput, angle: Angle, companyContext: string[], approvedSources: ResearchSource[]): string {
+function buildDraftPrompt(
+  idea: IdeaInput,
+  angle: Angle,
+  companyContext: string[],
+  approvedSources: ResearchSource[],
+  hasLiveSources: boolean,
+): string {
   const sectionLines = angle.sections.map((section, index) => `${index + 1}. ${section}`).join('\n');
 
   const companyBlock = companyContext.length > 0
@@ -186,6 +193,17 @@ function buildDraftPrompt(idea: IdeaInput, angle: Angle, companyContext: string[
         '',
         'Company context (ground tone, examples, audience framing, and product references in this):',
         ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
+
+  const noSourcesBlock: string[] = !hasLiveSources
+    ? [
+        '',
+        'CRITICAL — NO LIVE SOURCES AVAILABLE: Exa is not configured and no fallback sources were found.',
+        'You MUST NOT invent statistics, URLs, studies, or specific data points.',
+        'For every sentence that would normally cite an external fact, write an ALL-CAPS placeholder instead.',
+        'Placeholder format: FIND [description of what to research] — SUGGESTED SOURCE: [publication or source type].',
+        'Example: FIND THE CURRENT AVERAGE EMAIL OPEN RATE FOR B2B SAAS — SUGGESTED SOURCE: HUBSPOT STATE OF MARKETING REPORT.',
       ]
     : [];
 
@@ -201,9 +219,12 @@ function buildDraftPrompt(idea: IdeaInput, angle: Angle, companyContext: string[
     '- A strong conclusion with next steps',
     '- Include citations for factual claims only when an approved source below supports the statement.',
     '- Use only numeric markers that map directly to the approved source list below, such as [1], [2], [3].',
+    '- Place the marker at the end of the specific sentence that states or paraphrases the claim — not at the end of a paragraph.',
+    '- If a sentence directly paraphrases or quotes a "Key excerpt" from a source, that sentence must carry the marker for that source.',
     '- End with a "## Sources" section that lists only the approved source markers you actually used in markdown list format.',
     '- Every URL in the Sources section must exactly match an approved source URL from the list below. Do not invent, rewrite, shorten, or guess links.',
     '- If an approved source does not support a statement, rewrite it as an opinion or practical recommendation instead of presenting it as fact.',
+    ...noSourcesBlock,
     '',
     'Idea context:',
     `- Topic: ${asString(idea.topic) || 'Not provided'}`,
@@ -280,6 +301,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const apiKey = asString(body.apiKey);
   const ollamaBaseUrl = asString(body.ollamaBaseUrl) || DEFAULT_OLLAMA_BASE_URL;
   const ollamaModel = asString(body.ollamaModel) || DEFAULT_OLLAMA_MODEL;
+  const exaApiKey = asString(body.exaApiKey);
   const idea = body.idea;
   const angle = body.angle;
   const companyContext = normalizeContextLines(body.companyContext);
@@ -308,10 +330,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let prompt = '';
   const searchQuery = buildSearchQuery(normalizedIdea, normalizedAngle);
-  const { provider: searchProvider, sources: approvedSources } = await searchDuckDuckGo(searchQuery, 8);
+  const { provider: searchProvider, sources: approvedSources } = await fetchResearchSources(searchQuery, exaApiKey, 8);
+
+  // Log research activity so the dev console always shows where sources came from
+  if (searchProvider === 'exa') {
+    console.log(`[Exa Search] Query: "${searchQuery}" → ${approvedSources.length} source${approvedSources.length !== 1 ? 's' : ''} retrieved`);
+  } else if (searchProvider === 'unavailable') {
+    console.log(`[Research] No sources available for query: "${searchQuery}" — Exa key not configured and DuckDuckGo returned nothing. Draft will use ALL-CAPS placeholders.`);
+  } else {
+    console.log(`[Research] Provider: ${searchProvider} | Query: "${searchQuery}" | Sources: ${approvedSources.length}`);
+  }
+
+  const hasLiveSources = approvedSources.length > 0;
 
   try {
-    prompt = buildDraftPrompt(normalizedIdea, normalizedAngle, companyContext, approvedSources);
+    prompt = buildDraftPrompt(normalizedIdea, normalizedAngle, companyContext, approvedSources, hasLiveSources);
     console.log(`[API Drafts] Final prompt prepared for ${provider}:\n${prompt}`);
 
     const draft = await callProvider(provider, apiKey, prompt, {
@@ -330,6 +363,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       citationValidation: validateCitations(normalizedDraft),
       searchProvider,
       searchQuery,
+      sourceCount: approvedSources.length,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to generate draft.';
@@ -346,6 +380,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       fallbackReason: message,
       searchProvider,
       searchQuery,
+      sourceCount: approvedSources.length,
     });
   }
 }

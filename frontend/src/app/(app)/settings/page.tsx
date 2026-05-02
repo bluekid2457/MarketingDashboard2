@@ -5,6 +5,8 @@ import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { getFirebaseAuth } from '@/lib/firebase';
 import { trackAuthEvent } from '@/lib/analytics';
 import { type AIConfig, type AIProvider, loadAIConfig, saveAIConfig } from '@/lib/aiConfig';
+import { loadExaKey, saveExaKey } from '@/lib/exaConfig';
+import { clearSessionMark } from '@/lib/sessionExpiry';
 import {
   type CompanyProfile,
   EMPTY_COMPANY_PROFILE,
@@ -68,6 +70,8 @@ export default function SettingsPage() {
     ollamaModel: 'gemma4',
   });
   const [aiSaved, setAiSaved] = useState(false);
+  const [exaKey, setExaKey] = useState('');
+  const [exaSaved, setExaSaved] = useState(false);
 
   const [companyProfile, setCompanyProfile] = useState<CompanyProfile>(EMPTY_COMPANY_PROFILE);
   const [companyUserId, setCompanyUserId] = useState<string | null>(null);
@@ -87,6 +91,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     setAiConfig(loadAIConfig());
+    setExaKey(loadExaKey());
     setCompanyProfile(loadCompanyProfileFromCache());
   }, []);
 
@@ -154,6 +159,12 @@ export default function SettingsPage() {
     saveAIConfig(aiConfig);
     setAiSaved(true);
     setTimeout(() => setAiSaved(false), 2000);
+  };
+
+  const handleExaSave = () => {
+    saveExaKey(exaKey);
+    setExaSaved(true);
+    setTimeout(() => setExaSaved(false), 2000);
   };
 
   const updateCompanyField = (field: keyof CompanyProfile) =>
@@ -302,6 +313,7 @@ export default function SettingsPage() {
     try {
       trackAuthEvent("login_attempt", { action: "logout" });
       await signOut(auth);
+      clearSessionMark();
       trackAuthEvent("login_success", { action: "logout" });
       try {
         sessionStorage.removeItem("ideas_sort_preference");
@@ -724,6 +736,48 @@ export default function SettingsPage() {
               Save
             </button>
             {aiSaved && <span className="text-sm font-medium text-teal-600">Saved!</span>}
+          </div>
+        </section>
+
+        {/* Exa Research Key */}
+        <section className="surface-card p-6 lg:col-span-2">
+          <h2 className="section-title">Research Sources (Exa AI)</h2>
+          <p className="mt-2 muted-copy">
+            Exa is a neural search engine that finds high-quality, semantically relevant sources for your drafts.
+            When a key is saved, it replaces the default DuckDuckGo search for source retrieval.
+            Exa only fetches sources — your configured AI model still writes the content.
+            The app works without a key; drafts will just fall back to DuckDuckGo for research.
+          </p>
+          <div className="mt-4 max-w-md">
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              Exa API Key
+              <span className="ml-2 text-xs font-normal text-slate-400">(optional)</span>
+            </label>
+            <input
+              type="password"
+              className="w-full rounded-xl border border-slate-300 p-2 text-sm"
+              placeholder="Your Exa API key"
+              value={exaKey}
+              onChange={(e) => setExaKey(e.target.value)}
+            />
+            <p className="mt-1.5 text-xs text-slate-500">
+              Get a key at exa.ai — the free tier includes enough searches for regular use.
+            </p>
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              className="rounded-lg bg-teal-600 px-5 py-2 text-white font-semibold hover:bg-teal-700"
+              onClick={handleExaSave}
+            >
+              Save
+            </button>
+            {exaSaved && <span className="text-sm font-medium text-teal-600">Saved!</span>}
+            {exaKey.trim() && !exaSaved && (
+              <span className="text-xs text-emerald-700">Exa key configured — drafts will use Exa for source research.</span>
+            )}
+            {!exaKey.trim() && !exaSaved && (
+              <span className="text-xs text-slate-400">No key saved — drafts will use DuckDuckGo as fallback.</span>
+            )}
           </div>
         </section>
 

@@ -1,7 +1,7 @@
 ﻿'use client';
 
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 
@@ -9,6 +9,7 @@ import Nav from '@/components/Nav';
 import { Spinner } from '@/components/Spinner';
 import { getFirebaseAuth } from '@/lib/firebase';
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { isSessionExpired, clearSessionMark } from '@/lib/sessionExpiry';
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -31,6 +32,16 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         setIsAuthenticated(false);
         setIsCheckingAuth(false);
         router.replace('/login');
+        return;
+      }
+
+      if (isSessionExpired()) {
+        clearSessionMark();
+        void signOut(firebaseAuth).finally(() => {
+          setIsAuthenticated(false);
+          setIsCheckingAuth(false);
+          router.replace('/login');
+        });
         return;
       }
 
