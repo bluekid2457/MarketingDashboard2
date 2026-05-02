@@ -16,7 +16,17 @@ type ChatRequestBody = {
   draft?: string;
   messages?: ChatMessage[];
   userMessage?: string;
+  companyContext?: string[];
 };
+
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
 
 type ChatApiResponse = {
   reply?: string;
@@ -25,10 +35,19 @@ type ChatApiResponse = {
   error?: string;
 };
 
-function buildSystemPrompt(draft: string): string {
+function buildSystemPrompt(draft: string, companyContext: string[]): string {
+  const companyBlock = companyContext.length > 0
+    ? [
+        '',
+        'Company context (use to ground tone, product references, audience framing, and brand voice):',
+        ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
+
   return [
     'You are a senior content editor and AI writing assistant.',
     'The user has a draft article and is asking for help editing or improving it.',
+    ...companyBlock,
     '',
     'Current draft:',
     '---',
@@ -73,6 +92,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatApiRe
     typeof body.ollamaModel === 'string' && body.ollamaModel.trim()
       ? body.ollamaModel.trim()
       : DEFAULT_OLLAMA_MODEL;
+  const companyContext = normalizeContextLines(body.companyContext);
 
   if (!userMessage) {
     return NextResponse.json({ error: 'userMessage is required.' }, { status: 400 });
@@ -82,7 +102,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatApiRe
     return NextResponse.json({ error: 'No API key provided.' }, { status: 400 });
   }
 
-  const systemPrompt = buildSystemPrompt(draft);
+  const systemPrompt = buildSystemPrompt(draft, companyContext);
 
   try {
     const chatMessages: AIMessage[] = [

@@ -7,6 +7,7 @@ import { collection, deleteField, doc, onSnapshot, orderBy, query, serverTimesta
 
 import { Spinner } from '@/components/Spinner';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { getActiveAIKey } from '@/lib/aiConfig';
 
 type PlatformKey = 'linkedin' | 'twitter';
 
@@ -36,6 +37,26 @@ type ScheduledPostRecord = {
 
 type StringMap = Record<string, string>;
 type BooleanMap = Record<string, boolean>;
+
+type PlagiarismVerdict = 'clean' | 'review-needed' | 'high-risk';
+
+type PlagiarismFlag = {
+  passage: string;
+  reason: string;
+  severity: 'low' | 'medium' | 'high';
+  suggestedRewrite?: string;
+  likelySource?: string;
+};
+
+type PlagiarismResult = {
+  flags: PlagiarismFlag[];
+  riskScore: number;
+  verdict: PlagiarismVerdict;
+  webMatches: Array<{ passage: string; matchUrl: string; matchTitle: string; snippet: string }>;
+  checkedAt: number;
+};
+
+type PlagiarismApiResponse = PlagiarismResult & { provider?: string; error?: string };
 
 function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -103,6 +124,8 @@ export default function PublishPage() {
   const [deletingByKey, setDeletingByKey] = useState<BooleanMap>({});
   const [schedulingByKey, setSchedulingByKey] = useState<BooleanMap>({});
   const [scheduledPosts, setScheduledPosts] = useState<ScheduledPostRecord[]>([]);
+  const [plagiarismByKey, setPlagiarismByKey] = useState<Record<string, PlagiarismResult>>({});
+  const [plagiarismRunningByKey, setPlagiarismRunningByKey] = useState<BooleanMap>({});
 
   const keyFor = useCallback((adaptationId: string, platform: PlatformKey): string => {
     return `${adaptationId}:${platform}`;
@@ -239,6 +262,66 @@ export default function PublishPage() {
       return false;
     }
   }, []);
+
+  const runPlagiarismCheck = useCallback(async (key: string, text: string) => {
+    if (!text.trim()) {
+      setNotice({ tone: 'error', message: 'No content to check on this card. Generate or edit content in Adapt first.' });
+      return;
+    }
+    const config = getActiveAIKey();
+    if (config.provider !== 'ollama' && !config.apiKey) {
+      setNotice({ tone: 'error', message: 'No AI API key set. Add a key in Settings before running the plagiarism check.' });
+      return;
+    }
+    setPlagiarismRunningByKey((previous) => ({ ...previous, [key]: true }));
+    try {
+      const response = await fetch('/api/drafts/plagiarism', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: config.provider,
+          apiKey: config.apiKey,
+          ollamaBaseUrl: config.ollamaBaseUrl,
+          ollamaModel: config.ollamaModel,
+          draft: text,
+        }),
+      });
+      const payload = (await response.json()) as PlagiarismApiResponse;
+      if (!response.ok) {
+        throw new Error(payload.error ?? 'Plagiarism check failed.');
+      }
+      const result: PlagiarismResult = {
+        flags: payload.flags ?? [],
+        riskScore: payload.riskScore ?? 0,
+        verdict: payload.verdict ?? 'review-needed',
+        webMatches: payload.webMatches ?? [],
+        checkedAt: Date.now(),
+      };
+      setPlagiarismByKey((previous) => ({ ...previous, [key]: result }));
+      setNotice({
+        tone: result.verdict === 'clean' ? 'success' : result.verdict === 'high-risk' ? 'error' : 'info',
+        message: `Plagiarism check ${result.verdict.replace('-', ' ')} (risk ${result.riskScore}/100).`,
+      });
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Plagiarism check failed.' });
+    } finally {
+      setPlagiarismRunningByKey((previous) => ({ ...previous, [key]: false }));
+    }
+  }, []);
+
+  const isPlagiarismCleared = useCallback(
+    (key: string, text: string): boolean => {
+      const result = plagiarismByKey[key];
+      if (!result) return false;
+      if (result.verdict === 'high-risk') return false;
+      // Stale results (older than 30 minutes) require a re-check.
+      if (Date.now() - result.checkedAt > 30 * 60 * 1000) return false;
+      // Length changes invalidate the prior check.
+      if (Math.abs(result.flags.reduce((acc, flag) => acc + flag.passage.length, 0)) === 0 && text.length === 0) return false;
+      return true;
+    },
+    [plagiarismByKey],
+  );
 
   const openTwitterIntent = useCallback((text: string) => {
     if (!asTrimmedString(text)) {
@@ -534,14 +617,58 @@ export default function PublishPage() {
                             }}
                           />
 
+                          {(() => {
+                            const result = plagiarismByKey[linkedinKey];
+                            if (!result) {
+                              return (
+                                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                  Plagiarism check has not been run on this LinkedIn copy. Click &ldquo;Run plagiarism check&rdquo; before publishing or scheduling.
+                                </p>
+                              );
+                            }
+                            return (
+                              <p
+                                className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+                                  result.verdict === 'clean'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                    : result.verdict === 'high-risk'
+                                    ? 'border-red-200 bg-red-50 text-red-700'
+                                    : 'border-amber-200 bg-amber-50 text-amber-900'
+                                }`}
+                              >
+                                Plagiarism: {result.verdict.replace('-', ' ')} (risk {result.riskScore}/100,{' '}
+                                {result.flags.length} flag{result.flags.length === 1 ? '' : 's'},{' '}
+                                {result.webMatches.length} web match{result.webMatches.length === 1 ? '' : 'es'}).
+                                {result.verdict === 'high-risk'
+                                  ? ' Resolve flagged passages before publishing.'
+                                  : ''}
+                              </p>
+                            );
+                          })()}
+
                           <div className="mt-4 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                              onClick={() => {
+                                void runPlagiarismCheck(linkedinKey, linkedinText);
+                              }}
+                              disabled={linkedinText.length === 0 || Boolean(plagiarismRunningByKey[linkedinKey])}
+                            >
+                              {plagiarismRunningByKey[linkedinKey] ? 'Checking…' : 'Run plagiarism check'}
+                            </button>
                             <button
                               type="button"
                               className="rounded-xl bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
                               onClick={() => {
                                 void openLinkedInCompose(linkedinText);
                               }}
-                              disabled={linkedinText.length === 0}
+                              disabled={linkedinText.length === 0 || !isPlagiarismCleared(linkedinKey, linkedinText)}
+                              title={
+                                !isPlagiarismCleared(linkedinKey, linkedinText)
+                                  ? 'Run a passing plagiarism check before publishing.'
+                                  : undefined
+                              }
                             >
                               Publish to LinkedIn
                             </button>
@@ -623,7 +750,12 @@ export default function PublishPage() {
                                 onClick={() => {
                                   void schedulePost(adaptation, 'linkedin', articleTitle, angleLabel);
                                 }}
-                                disabled={isSchedulingLinkedin || linkedinText.length === 0}
+                                disabled={isSchedulingLinkedin || linkedinText.length === 0 || !isPlagiarismCleared(linkedinKey, linkedinText)}
+                                title={
+                                  !isPlagiarismCleared(linkedinKey, linkedinText)
+                                    ? 'Run a passing plagiarism check before scheduling.'
+                                    : undefined
+                                }
                               >
                                 {isSchedulingLinkedin ? 'Scheduling...' : 'Schedule'}
                               </button>
@@ -652,14 +784,56 @@ export default function PublishPage() {
                             }}
                           />
 
+                          {(() => {
+                            const result = plagiarismByKey[twitterKey];
+                            if (!result) {
+                              return (
+                                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                  Plagiarism check has not been run on this X/Twitter copy. Click &ldquo;Run plagiarism check&rdquo; before publishing or scheduling.
+                                </p>
+                              );
+                            }
+                            return (
+                              <p
+                                className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+                                  result.verdict === 'clean'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                    : result.verdict === 'high-risk'
+                                    ? 'border-red-200 bg-red-50 text-red-700'
+                                    : 'border-amber-200 bg-amber-50 text-amber-900'
+                                }`}
+                              >
+                                Plagiarism: {result.verdict.replace('-', ' ')} (risk {result.riskScore}/100,{' '}
+                                {result.flags.length} flag{result.flags.length === 1 ? '' : 's'},{' '}
+                                {result.webMatches.length} web match{result.webMatches.length === 1 ? '' : 'es'}).
+                                {result.verdict === 'high-risk' ? ' Resolve flagged passages before publishing.' : ''}
+                              </p>
+                            );
+                          })()}
+
                           <div className="mt-4 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                              onClick={() => {
+                                void runPlagiarismCheck(twitterKey, twitterText);
+                              }}
+                              disabled={twitterText.length === 0 || Boolean(plagiarismRunningByKey[twitterKey])}
+                            >
+                              {plagiarismRunningByKey[twitterKey] ? 'Checking…' : 'Run plagiarism check'}
+                            </button>
                             <button
                               type="button"
                               className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:opacity-60"
                               onClick={() => {
                                 openTwitterIntent(twitterText);
                               }}
-                              disabled={twitterText.length === 0}
+                              disabled={twitterText.length === 0 || !isPlagiarismCleared(twitterKey, twitterText)}
+                              title={
+                                !isPlagiarismCleared(twitterKey, twitterText)
+                                  ? 'Run a passing plagiarism check before publishing.'
+                                  : undefined
+                              }
                             >
                               Publish to X / Twitter
                             </button>
@@ -741,7 +915,12 @@ export default function PublishPage() {
                                 onClick={() => {
                                   void schedulePost(adaptation, 'twitter', articleTitle, angleLabel);
                                 }}
-                                disabled={isSchedulingTwitter || twitterText.length === 0}
+                                disabled={isSchedulingTwitter || twitterText.length === 0 || !isPlagiarismCleared(twitterKey, twitterText)}
+                                title={
+                                  !isPlagiarismCleared(twitterKey, twitterText)
+                                    ? 'Run a passing plagiarism check before scheduling.'
+                                    : undefined
+                                }
                               >
                                 {isSchedulingTwitter ? 'Scheduling...' : 'Schedule'}
                               </button>

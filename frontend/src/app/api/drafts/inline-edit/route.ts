@@ -13,7 +13,28 @@ type InlineEditRequestBody = {
   selectionStart?: number;
   selectionEnd?: number;
   instruction?: string;
+  companyContext?: string[];
 };
+
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
+
+function companyContextLines(companyContext: string[]): string[] {
+  if (companyContext.length === 0) {
+    return [];
+  }
+  return [
+    '',
+    'Company context (preserve product references and brand voice when rewriting):',
+    ...companyContext.map((line) => `- ${line}`),
+  ];
+}
 
 type InlineEditResponse = {
   proposal?: {
@@ -58,7 +79,7 @@ function extractJsonPayload(raw: string): string | null {
   return objectMatch?.[0] ?? null;
 }
 
-function buildSelectedTextPrompt(draft: string, selectedText: string, instruction: string): string {
+function buildSelectedTextPrompt(draft: string, selectedText: string, instruction: string, companyContext: string[]): string {
   return [
     'You are an expert inline editor for a storyboard document.',
     'Rewrite only the selected text based on the user instruction while preserving the surrounding context.',
@@ -66,6 +87,7 @@ function buildSelectedTextPrompt(draft: string, selectedText: string, instructio
     'Do not add markdown code fences.',
     'Return JSON only with this exact schema:',
     '{"updatedText":"string","changeSummary":"string"}',
+    ...companyContextLines(companyContext),
     '',
     'Draft context:',
     '---',
@@ -80,7 +102,7 @@ function buildSelectedTextPrompt(draft: string, selectedText: string, instructio
   ].join('\n');
 }
 
-function buildAutonomousPrompt(draft: string, instruction: string): string {
+function buildAutonomousPrompt(draft: string, instruction: string, companyContext: string[]): string {
   return [
     'You are an expert inline editor for a storyboard document.',
     'No text is pre-selected. Choose one specific passage from the draft that best matches the instruction and rewrite only that passage.',
@@ -88,6 +110,7 @@ function buildAutonomousPrompt(draft: string, instruction: string): string {
     'Do not add markdown code fences.',
     'Return JSON only with this exact schema:',
     '{"beforeText":"string","updatedText":"string","changeSummary":"string"}',
+    ...companyContextLines(companyContext),
     '',
     'Draft context:',
     '---',
@@ -99,7 +122,7 @@ function buildAutonomousPrompt(draft: string, instruction: string): string {
   ].join('\n');
 }
 
-function buildAutonomousMultiPrompt(draft: string, instruction: string): string {
+function buildAutonomousMultiPrompt(draft: string, instruction: string, companyContext: string[]): string {
   return [
     'You are an expert inline editor for a storyboard document.',
     'The user is asking for a larger overhaul, not a single micro-edit.',
@@ -111,6 +134,7 @@ function buildAutonomousMultiPrompt(draft: string, instruction: string): string 
     'Return JSON only with this exact schema:',
     '{"proposals":[{"beforeText":"string","updatedText":"string","changeSummary":"string"}]}',
     'Return 2 to 3 proposals.',
+    ...companyContextLines(companyContext),
     '',
     'Draft context:',
     '---',
@@ -374,6 +398,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<InlineEdi
   const selectionStart = typeof body.selectionStart === 'number' ? body.selectionStart : -1;
   const selectionEnd = typeof body.selectionEnd === 'number' ? body.selectionEnd : -1;
   const instruction = asString(body.instruction);
+  const companyContext = normalizeContextLines(body.companyContext);
 
   if (!provider || !['openai', 'gemini', 'claude', 'ollama'].includes(provider)) {
     return NextResponse.json({ error: 'A valid provider is required.' }, { status: 400 });
@@ -398,10 +423,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<InlineEdi
   const hasSelectedRange = Boolean(selectedText && selectionStart >= 0 && selectionEnd > selectionStart);
   const shouldReturnMultipleSuggestions = !hasSelectedRange && isMultiSuggestionInstruction(instruction);
   const prompt = hasSelectedRange
-    ? buildSelectedTextPrompt(draft, selectedText, instruction)
+    ? buildSelectedTextPrompt(draft, selectedText, instruction, companyContext)
     : shouldReturnMultipleSuggestions
-      ? buildAutonomousMultiPrompt(draft, instruction)
-      : buildAutonomousPrompt(draft, instruction);
+      ? buildAutonomousMultiPrompt(draft, instruction, companyContext)
+      : buildAutonomousPrompt(draft, instruction, companyContext);
 
   try {
     const messages: AIMessage[] = [

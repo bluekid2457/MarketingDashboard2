@@ -24,6 +24,7 @@ type DraftRequestBody = {
   ollamaModel?: string;
   idea?: IdeaInput;
   angle?: Angle;
+  companyContext?: string[];
 };
 
 type CitationValidation = {
@@ -98,8 +99,25 @@ function buildFallbackDraft(idea: NormalizedIdea, angle: Angle, reason: string):
   return lines.join('\n');
 }
 
-function buildDraftPrompt(idea: IdeaInput, angle: Angle): string {
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
+
+function buildDraftPrompt(idea: IdeaInput, angle: Angle, companyContext: string[]): string {
   const sectionLines = angle.sections.map((section, index) => `${index + 1}. ${section}`).join('\n');
+
+  const companyBlock = companyContext.length > 0
+    ? [
+        '',
+        'Company context (ground tone, examples, audience framing, and product references in this):',
+        ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
 
   return [
     'You are a senior content strategist and long-form writer for a marketing team.',
@@ -120,6 +138,7 @@ function buildDraftPrompt(idea: IdeaInput, angle: Angle): string {
     `- Tone: ${asString(idea.tone) || 'Not provided'}`,
     `- Audience: ${asString(idea.audience) || 'Not provided'}`,
     `- Format: ${asString(idea.format) || 'Not provided'}`,
+    ...companyBlock,
     '',
     'Selected angle:',
     `- Title: ${angle.title}`,
@@ -188,6 +207,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const ollamaModel = asString(body.ollamaModel) || DEFAULT_OLLAMA_MODEL;
   const idea = body.idea;
   const angle = body.angle;
+  const companyContext = normalizeContextLines(body.companyContext);
 
   if (!provider || !['openai', 'gemini', 'claude', 'ollama'].includes(provider)) {
     return NextResponse.json({ error: 'A valid provider is required.' }, { status: 400 });
@@ -214,7 +234,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let prompt = '';
 
   try {
-    prompt = buildDraftPrompt(normalizedIdea, normalizedAngle);
+    prompt = buildDraftPrompt(normalizedIdea, normalizedAngle, companyContext);
     console.log(`[API Drafts] Final prompt prepared for ${provider}:\n${prompt}`);
 
     const draft = await callProvider(provider, apiKey, prompt, {

@@ -6,6 +6,7 @@ import { User, onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { companyProfileToContextLines, companyProfileToTrendTerms, loadCompanyProfile, loadCompanyProfileFromCache } from '@/lib/companyProfile';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { getWorkflowContext, setWorkflowContext } from '@/lib/workflowContext';
 import { Spinner } from '@/components/Spinner';
@@ -511,6 +512,8 @@ export default function AnglesPage() {
       }
 
       const activeConfig = getActiveAIKey();
+      const companyProfile = await loadCompanyProfile(currentUser?.uid ?? null);
+      const companyContext = companyProfileToContextLines(companyProfile);
       setGenerationError(null);
 
       const runId = crypto.randomUUID();
@@ -552,6 +555,7 @@ export default function AnglesPage() {
             selectedAngleId: options?.selectedAngleId,
             refinementPrompt: options?.refinementPrompt,
             generationSeed,
+            companyContext,
           };
 
           console.log('[Angles Page] Sending AI request', {
@@ -712,7 +716,7 @@ export default function AnglesPage() {
         setIsGenerating(false);
       }
     },
-    [idea, persistAnglesToFirestore],
+    [currentUser?.uid, idea, persistAnglesToFirestore],
   );
 
   useEffect(() => {
@@ -749,7 +753,11 @@ export default function AnglesPage() {
       setTrendsError(null);
 
       try {
-        const response = await fetch('/api/trends', {
+        const trendTerms = companyProfileToTrendTerms(loadCompanyProfileFromCache());
+        const trendsUrl = trendTerms.length > 0
+          ? `/api/trends?companyTerms=${encodeURIComponent(trendTerms.join(','))}`
+          : '/api/trends';
+        const response = await fetch(trendsUrl, {
           signal: controller.signal,
         });
 

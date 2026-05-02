@@ -28,6 +28,7 @@ type AnglesRequestBody = {
   selectedAngleId?: string;
   refinementPrompt?: string;
   generationSeed?: string;
+  companyContext?: string[];
 };
 
 const MAX_ANGLES = 8;
@@ -185,6 +186,26 @@ function parseAnglesFromModelText(rawText: string): Angle[] {
   return validateAndNormalizeAngles(parsed);
 }
 
+function normalizeContextLines(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
+
+function buildCompanyContextBlock(companyContext: string[]): string[] {
+  if (companyContext.length === 0) {
+    return [];
+  }
+  return [
+    '',
+    'Company context (use to ground angle relevance, audience framing, and product references):',
+    ...companyContext.map((line) => `- ${line}`),
+  ];
+}
+
 function ideaToPromptBlock(idea: string | IdeaInput): string {
   if (typeof idea === 'string') {
     return idea.trim();
@@ -298,6 +319,7 @@ function buildSingleAnglePrompt(
   totalCount: number,
   generationSeed?: string,
   previousAngles?: Angle[],
+  companyContext: string[] = [],
 ): string {
   const perspectiveHints = [
     'Focus on the core problem or pain point this idea addresses for the target audience.',
@@ -333,6 +355,7 @@ function buildSingleAnglePrompt(
     '',
     'Idea context:',
     ideaToPromptBlock(idea),
+    ...buildCompanyContextBlock(companyContext),
   ]
     .filter(Boolean)
     .join('\n');
@@ -342,6 +365,7 @@ function buildRefinementPrompt(
   idea: string | IdeaInput,
   selectedAngleId: string,
   refinementPrompt: string,
+  companyContext: string[] = [],
 ): string {
   return [
     'You are an expert content strategist refining an existing angle.',
@@ -354,6 +378,7 @@ function buildRefinementPrompt(
     '',
     'Idea context and selected angle:',
     ideaToPromptBlock(idea),
+    ...buildCompanyContextBlock(companyContext),
   ].join('\n');
 }
 
@@ -397,6 +422,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const selectedAngleId = asString(body.selectedAngleId);
   const refinementPrompt = asString(body.refinementPrompt);
   const generationSeed = asString(body.generationSeed);
+  const companyContext = normalizeContextLines(body.companyContext);
   const rawCount = typeof body.count === 'number' ? body.count : DEFAULT_ANGLES;
   const count = Math.max(1, Math.min(MAX_ANGLES, Math.floor(rawCount)));
 
@@ -453,7 +479,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     // ── Refinement path (single prompt, unchanged) ────────────────────────────
     if (isRefinement) {
-      const prompt = buildRefinementPrompt(idea, selectedAngleId || 'selected-angle', refinementPrompt);
+      const prompt = buildRefinementPrompt(idea, selectedAngleId || 'selected-angle', refinementPrompt, companyContext);
       console.debug('[API Angles] Built refinement prompt', { promptLength: prompt.length });
       console.log(`[API Angles] Final refinement prompt for ${provider}:\n${prompt}`);
 
@@ -527,7 +553,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const fallbackPool = buildDeterministicFallbackAngles(idea, generationSeed);
 
     for (let angleIndex = 0; angleIndex < count; angleIndex += 1) {
-      const singlePrompt = buildSingleAnglePrompt(idea, angleIndex, count, generationSeed, collectedAngles);
+      const singlePrompt = buildSingleAnglePrompt(idea, angleIndex, count, generationSeed, collectedAngles, companyContext);
       console.debug('[API Angles] Generating angle', { slot: angleIndex + 1, total: count });
       console.log(`[API Angles] Single-angle prompt for slot ${angleIndex + 1} of ${count}:\n${singlePrompt}`);
 
