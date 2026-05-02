@@ -3,22 +3,21 @@
 import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { getWorkflowContext } from '@/lib/workflowContext';
+import { PIPELINE_STEPS, type PipelineStep } from '@/lib/pipeline';
 
 type StepDef = {
   step: number;
   label: string;
   href: string;
-  paths: string[];
+  paths: readonly string[];
 };
 
-const STEPS: StepDef[] = [
-  { step: 1, label: 'Ideas', href: '/ideas', paths: ['/ideas'] },
-  { step: 2, label: 'AI Angles', href: '/angles', paths: ['/angles'] },
-  { step: 3, label: 'Storyboard', href: '/storyboard', paths: ['/drafts', '/storyboard'] },
-  { step: 4, label: 'Adapt', href: '/adapt', paths: ['/adapt'] },
-  { step: 5, label: 'Review', href: '/review', paths: ['/review'] },
-  { step: 6, label: 'Publish', href: '/publish', paths: ['/publish'] },
-];
+const STEPS: StepDef[] = PIPELINE_STEPS.map((s: PipelineStep, idx: number) => ({
+  step: idx + 1,
+  label: s.label,
+  href: s.path,
+  paths: s.paths,
+}));
 
 type AngleRouteContext = {
   ideaId?: string;

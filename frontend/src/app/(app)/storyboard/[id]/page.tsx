@@ -6,17 +6,22 @@ import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 
 import { getActiveAIKey } from '@/lib/aiConfig';
+import { loadExaKey } from '@/lib/exaConfig';
 import { companyProfileToContextLines, loadCompanyProfile } from '@/lib/companyProfile';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { Spinner } from '@/components/Spinner';
+import { AIEditTimeline } from '@/components/AIEditTimeline';
 import { InlineEditPanel } from '@/components/InlineEditPanel';
 import { DraftChatPanel, type DraftChatMessage } from '@/components/DraftChatPanel';
 import { useInlineEdit, type InlineSelection } from '@/lib/useInlineEdit';
+import { appendAIEditHistory, createEmptyAIEditHistoryState, type AIEditHistoryState } from '@/lib/aiEditHistory';
 import { applyChatSentenceDiff, buildSentenceSpanDiffs, rangesOverlap, type ChatSentenceDiff } from '@/lib/chatSpanDiff';
 import WorkflowStepper from '@/components/WorkflowStepper';
+import DocumentContextHeader from '@/components/DocumentContextHeader';
 import { runCitationCheck } from '@/lib/citationCheck';
 import { AIToolbox, type PlagiarismResult } from '@/components/AIToolbox';
 import { DiffAwareEditor } from '@/components/DiffAwareEditor';
+import { CitationHighlightPreview } from '@/components/CitationHighlightPreview';
 
 type IdeaRecord = {
   id: string;
@@ -44,9 +49,18 @@ type AdaptDraftContext = StoryboardContext & {
   draftContent: string;
 };
 
+type ResearchLog = {
+  provider: string;
+  query: string;
+  sourceCount: number;
+};
+
 type DraftApiResponse = {
   draft?: string;
   provider?: string;
+  searchProvider?: string;
+  searchQuery?: string;
+  sourceCount?: number;
   error?: string;
 };
 
@@ -54,6 +68,7 @@ type DraftChatApiResponse = {
   reply?: string;
   updatedDraft?: string | null;
   provider?: string;
+  researchLog?: ResearchLog | null;
   error?: string;
 };
 
@@ -88,6 +103,7 @@ export default function StoryboardEditorPage() {
   const [storyboardError, setStoryboardError] = useState<string | null>(null);
   const [isGeneratingStoryboard, setIsGeneratingStoryboard] = useState(false);
   const [lastProvider, setLastProvider] = useState<string | null>(null);
+  const [researchLog, setResearchLog] = useState<ResearchLog | null>(null);
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -108,11 +124,23 @@ export default function StoryboardEditorPage() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatProvider, setChatProvider] = useState<string | null>(null);
   const [chatPendingDiffs, setChatPendingDiffs] = useState<ChatSentenceDiff[]>([]);
-  const inlineEditor = useInlineEdit({ text: storyboardText, setText: setStoryboardText });
 
   const [hasApiKey, setHasApiKey] = useState<boolean>(false);
   const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
   const [toolboxNotice, setToolboxNotice] = useState<string | null>(null);
+  const [aiHistory, setAiHistory] = useState<AIEditHistoryState>(createEmptyAIEditHistoryState());
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
+
+  const recordAIEdit = useCallback((previousContent: string, nextContent: string, summary: string, label: string): void => {
+    setAiHistory((previous) => appendAIEditHistory(previous, { previousContent, nextContent, summary, label }));
+  }, []);
+  const inlineEditor = useInlineEdit({
+    text: storyboardText,
+    setText: setStoryboardText,
+    onAcceptChange: (change, previousText, nextText) => {
+      recordAIEdit(previousText, nextText, change.summary, 'Inline edit');
+    },
+  });
 
   useEffect(() => {
     const refreshKey = (): void => {
@@ -204,7 +232,7 @@ export default function StoryboardEditorPage() {
             ]);
 
             if (!ideaSnap.exists()) {
-              setContextError('Could not find the idea for this storyboard. It may have been deleted.');
+              setContextError("This storyboard's idea was deleted. Open the Dashboard to clean it up.");
               setFirebaseLoaded(true);
               return;
             }
@@ -368,6 +396,7 @@ export default function StoryboardEditorPage() {
           apiKey: activeConfig.apiKey,
           ollamaBaseUrl: activeConfig.ollamaBaseUrl,
           ollamaModel: activeConfig.ollamaModel,
+          exaApiKey: loadExaKey(),
           idea: {
             topic: storyboardContext.idea.topic,
             tone: storyboardContext.idea.tone,
@@ -384,14 +413,22 @@ export default function StoryboardEditorPage() {
         throw new Error(payload.error ?? 'Storyboard generation failed.');
       }
 
+      recordAIEdit(storyboardText, payload.draft, 'Generated a fresh storyboard draft.', 'Storyboard generation');
       setStoryboardText(payload.draft);
       setLastProvider(payload.provider ?? activeConfig.provider);
+      if (payload.searchProvider) {
+        setResearchLog({
+          provider: payload.searchProvider,
+          query: payload.searchQuery ?? '',
+          sourceCount: payload.sourceCount ?? 0,
+        });
+      }
     } catch (error) {
       setStoryboardError(error instanceof Error ? error.message : 'Unable to generate storyboard right now.');
     } finally {
       setIsGeneratingStoryboard(false);
     }
-  }, [currentUid, storyboardContext]);
+  }, [currentUid, recordAIEdit, storyboardContext, storyboardText]);
 
   useEffect(() => {
     if (!storyboardContext || !firebaseLoaded || storyboardText || isGeneratingStoryboard) return;
@@ -499,11 +536,26 @@ export default function StoryboardEditorPage() {
         );
 
         setChatError(null);
+        recordAIEdit(currentText, applied.nextText, 'Kept one AI chat sentence change.', 'Chat diff');
         return applied.nextText;
       });
     },
-    [chatPendingDiffs],
+    [chatPendingDiffs, recordAIEdit],
   );
+
+  const handleRestoreAIEdit = useCallback((entryId: string): void => {
+    const entry = aiHistory.entries.find((item) => item.id === entryId);
+    if (!entry) {
+      return;
+    }
+    setStoryboardText(entry.content);
+    setAiHistory((previous) => ({ ...previous, activeEntryId: entryId }));
+    setToolboxNotice(`Restored ${entry.label.toLowerCase()}.`);
+    setPlagiarismResult(null);
+    setChatPendingDiffs([]);
+    setChatError(null);
+    inlineEditor.setChanges([]);
+  }, [aiHistory.entries, inlineEditor]);
 
   const handleUndoChatDiff = useCallback((diffId: string): void => {
     setChatPendingDiffs((previous) => previous.filter((entry) => entry.id !== diffId));
@@ -544,6 +596,7 @@ export default function StoryboardEditorPage() {
           apiKey: activeConfig.apiKey,
           ollamaBaseUrl: activeConfig.ollamaBaseUrl,
           ollamaModel: activeConfig.ollamaModel,
+          exaApiKey: loadExaKey(),
           draft: storyboardText,
           messages: chatMessages,
           userMessage: nextMessage,
@@ -556,7 +609,33 @@ export default function StoryboardEditorPage() {
         throw new Error(payload.error ?? 'AI chat failed.');
       }
 
-      setChatMessages((previous) => [...previous, { role: 'assistant', content: payload.reply ?? '' }]);
+      const newMessages: DraftChatMessage[] = [];
+
+      // Inject a research log bubble before the assistant reply so the user
+      // can see the Exa → AI handoff in the chat history
+      if (payload.researchLog) {
+        const log = payload.researchLog;
+        const providerLabel =
+          log.provider === 'exa'
+            ? 'Exa'
+            : log.provider === 'unavailable'
+            ? 'No sources (add an Exa key in Settings)'
+            : log.provider === 'duckduckgo' || log.provider === 'duckduckgo-html'
+            ? 'DuckDuckGo'
+            : log.provider;
+        const sourceLine =
+          log.provider === 'unavailable'
+            ? 'No results — factual claims will use ALL-CAPS placeholders.'
+            : `${log.sourceCount} source${log.sourceCount !== 1 ? 's' : ''} retrieved.`;
+        newMessages.push({
+          role: 'research',
+          content: `${providerLabel} · Query: "${log.query}" · ${sourceLine}`,
+        });
+        setResearchLog(log);
+      }
+
+      newMessages.push({ role: 'assistant', content: payload.reply ?? '' });
+      setChatMessages((previous) => [...previous, ...newMessages]);
       setChatProvider(payload.provider ?? activeConfig.provider);
 
       const updatedDraft = payload.updatedDraft?.trim();
@@ -600,7 +679,7 @@ export default function StoryboardEditorPage() {
     <div className="space-y-5">
       <div className="page-header">
         <h1>Storyboard Editor</h1>
-        <p className="breadcrumb mt-1">Angles {'->'} Storyboard (Active) {'->'} Adapt {'->'} Review {'->'} Schedule</p>
+        <p className="breadcrumb mt-1">Angles {'->'} Storyboard (Active) {'->'} Adapt {'->'} Review {'->'} Publish</p>
 
         {storyboardContext ? (
           <div className="mt-2 flex flex-wrap items-center gap-4 text-sm" style={{ color: '#a7c9be' }}>
@@ -632,18 +711,32 @@ export default function StoryboardEditorPage() {
         ) : null}
       </div>
       <WorkflowStepper />
+      <DocumentContextHeader
+        ideaTopic={storyboardContext?.idea.topic ?? ''}
+        angleTitle={storyboardContext?.selectedAngle.title ?? ''}
+        activeStep="storyboard"
+      />
 
       {contextError ? (
         <section className="surface-card p-5">
           <p className="text-sm text-red-700">{contextError}</p>
-          <button
-            type="button"
-            className="mt-4 rounded-xl px-5 py-2 text-sm font-bold text-white"
-            style={{ background: '#1a7a5e' }}
-            onClick={() => router.push('/angles')}
-          >
-            Back to Angles
-          </button>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-xl px-5 py-2 text-sm font-bold text-white"
+              style={{ background: '#1a7a5e' }}
+              onClick={() => router.push('/dashboard')}
+            >
+              Open Dashboard
+            </button>
+            <button
+              type="button"
+              className="rounded-xl border border-slate-300 px-5 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50"
+              onClick={() => router.push('/angles')}
+            >
+              Back to Angles
+            </button>
+          </div>
         </section>
       ) : null}
 
@@ -671,6 +764,25 @@ export default function StoryboardEditorPage() {
               </div>
             ) : null}
 
+            {researchLog ? (
+              <div className={`mb-3 flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs ${
+                researchLog.provider === 'exa'
+                  ? 'border-teal-200 bg-teal-50 text-teal-800'
+                  : researchLog.provider === 'unavailable'
+                  ? 'border-amber-200 bg-amber-50 text-amber-800'
+                  : 'border-slate-200 bg-slate-50 text-slate-600'
+              }`}>
+                <span>{researchLog.provider === 'unavailable' ? '⚠️' : '🔍'}</span>
+                <span>
+                  {researchLog.provider === 'exa'
+                    ? `Exa · "${researchLog.query}" · ${researchLog.sourceCount} source${researchLog.sourceCount !== 1 ? 's' : ''}`
+                    : researchLog.provider === 'unavailable'
+                    ? `No live sources — add an Exa key in Settings. Factual claims appear as ALL-CAPS placeholders.`
+                    : `${researchLog.provider === 'duckduckgo' || researchLog.provider === 'duckduckgo-html' ? 'DuckDuckGo' : researchLog.provider} · "${researchLog.query}" · ${researchLog.sourceCount} source${researchLog.sourceCount !== 1 ? 's' : ''}`}
+                </span>
+              </div>
+            ) : null}
+
             {isLoadingContextFromFirebase ? (
               <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
                 <Spinner size="sm" />
@@ -683,48 +795,80 @@ export default function StoryboardEditorPage() {
               </div>
             ) : null}
 
-            <DiffAwareEditor
-              value={storyboardText}
-              onChange={setStoryboardText}
-              pendingDiffs={chatPendingDiffs}
-              onKeepDiff={handleKeepChatDiff}
-              onUndoDiff={handleUndoChatDiff}
-              onUndoAll={() => {
-                setChatPendingDiffs([]);
-                setChatError(null);
-              }}
-              editorRef={editorRef}
-              onSelect={captureSelection}
-              onKeyUp={captureSelection}
-              onMouseUp={captureSelection}
-              placeholder="Your storyboard draft appears here."
-              overlay={
-                <InlineEditPanel
-                  isVisible={hasInlineOverlay}
-                  anchorTop={floatingAnchor.top}
-                  anchorLeft={floatingAnchor.left}
-                  selectedText={selection.text}
-                  instruction={instruction}
-                  onInstructionChange={setInstruction}
-                  onPropose={() => {
-                    void handleProposeInlineEdit();
-                  }}
-                  isLoading={inlineEditor.isLoading}
-                  error={inlineEditor.error}
-                  pendingChange={activePendingInlineChange}
-                  onAcceptPending={() => {
-                    if (activePendingInlineChange) {
-                      inlineEditor.acceptChange(activePendingInlineChange.id);
+            <div className="mb-3 flex gap-1">
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${!isPreviewMode ? 'bg-emerald-700 text-white' : 'border border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+                onClick={() => setIsPreviewMode(false)}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg px-3 py-1 text-xs font-semibold transition-colors ${isPreviewMode ? 'bg-emerald-700 text-white' : 'border border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+                onClick={() => setIsPreviewMode(true)}
+              >
+                Preview
+              </button>
+            </div>
+
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start">
+                {isPreviewMode ? (
+                  <div className="min-h-[480px] rounded-xl border border-slate-300 bg-white p-4">
+                    <CitationHighlightPreview content={storyboardText} />
+                  </div>
+                ) : (
+                  <DiffAwareEditor
+                    value={storyboardText}
+                    onChange={setStoryboardText}
+                    pendingDiffs={chatPendingDiffs}
+                    onKeepDiff={handleKeepChatDiff}
+                    onUndoDiff={handleUndoChatDiff}
+                    onUndoAll={() => {
+                      setChatPendingDiffs([]);
+                      setChatError(null);
+                    }}
+                    editorRef={editorRef}
+                    onSelect={captureSelection}
+                    onKeyUp={captureSelection}
+                    onMouseUp={captureSelection}
+                    placeholder="Your storyboard draft appears here."
+                    overlay={
+                      <InlineEditPanel
+                        isVisible={hasInlineOverlay}
+                        anchorTop={floatingAnchor.top}
+                        anchorLeft={floatingAnchor.left}
+                        selectedText={selection.text}
+                        instruction={instruction}
+                        onInstructionChange={setInstruction}
+                        onPropose={() => {
+                          void handleProposeInlineEdit();
+                        }}
+                        isLoading={inlineEditor.isLoading}
+                        error={inlineEditor.error}
+                        pendingChange={activePendingInlineChange}
+                        onAcceptPending={() => {
+                          if (activePendingInlineChange) {
+                            inlineEditor.acceptChange(activePendingInlineChange.id);
+                          }
+                        }}
+                        onDenyPending={() => {
+                          if (activePendingInlineChange) {
+                            inlineEditor.denyChange(activePendingInlineChange.id);
+                          }
+                        }}
+                      />
                     }
-                  }}
-                  onDenyPending={() => {
-                    if (activePendingInlineChange) {
-                      inlineEditor.denyChange(activePendingInlineChange.id);
-                    }
-                  }}
-                />
-              }
-            />
+                  />
+                )}
+                <div className="xl:sticky xl:top-5">
+                  <AIEditTimeline
+                    entries={aiHistory.entries}
+                    activeEntryId={aiHistory.activeEntryId}
+                    onRestore={handleRestoreAIEdit}
+                  />
+                </div>
+              </div>
           </section>
 
           <section className="surface-card p-5">
@@ -741,7 +885,8 @@ export default function StoryboardEditorPage() {
                   : null
               }
               hasApiKeyConfigured={hasApiKey}
-              onApplyDraft={(nextDraft, summary) => {
+              onApplyDraft={(nextDraft, summary, label) => {
+                recordAIEdit(storyboardText, nextDraft, summary, label ?? 'AI tool');
                 setStoryboardText(nextDraft);
                 setToolboxNotice(summary);
                 setPlagiarismResult(null);

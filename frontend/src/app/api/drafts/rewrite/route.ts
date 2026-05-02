@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import type { AIProvider } from '@/lib/aiConfig';
 import { callAI, type AIMessage, DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL } from '@/lib/callAI';
 
-type RewriteMode = 'tone' | 'sentiment' | 'readability';
+type RewriteMode = 'tone' | 'readability';
 
 type RewriteRequestBody = {
   provider?: AIProvider;
@@ -13,7 +13,6 @@ type RewriteRequestBody = {
   draft?: string;
   mode?: RewriteMode;
   tone?: string;
-  sentiment?: string;
   complexityLabel?: string;
   complexityDescription?: string;
   audienceHint?: string;
@@ -49,10 +48,6 @@ function buildSystemPrompt(body: RewriteRequestBody, companyContext: string[]): 
 
   if (body.mode === 'tone' && body.tone) {
     lines.push(`Target tone: ${body.tone}.`);
-  }
-
-  if (body.mode === 'sentiment' && body.sentiment) {
-    lines.push(`Target sentiment: ${body.sentiment}. Keep claims accurate; do not invent positives or negatives.`);
   }
 
   if (body.mode === 'readability') {
@@ -131,7 +126,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<RewriteAp
 
     let summary = 'Draft rewritten.';
     if (body.mode === 'tone' && body.tone) summary = `Rewritten in a ${body.tone} tone.`;
-    if (body.mode === 'sentiment' && body.sentiment) summary = `Rewritten with ${body.sentiment} sentiment.`;
     if (body.mode === 'readability' && body.complexityLabel) summary = `Rewritten at ${body.complexityLabel} reading level.`;
 
     return NextResponse.json({ updatedDraft: cleaned, summary, provider });

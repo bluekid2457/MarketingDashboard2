@@ -1,13 +1,7 @@
 ---
 description: Orchestrator agent that reviews GitHub Issues and iteratively calls the Feature Loop Manager agent for each feature issue in the marketing dashboard repo.
 tools: [execute/runNotebookCell, execute/testFailure, execute/getTerminalOutput, execute/killTerminal, execute/sendToTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, read/getNotebookSummary, read/problems, read/readFile, read/viewImage, read/readNotebookCellOutput, read/terminalSelection, read/terminalLastCommand, agent/runSubagent, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/textSearch, search/usages, web/fetch, web/githubRepo, todo]
-handoffs:
-  - label: "Hand off to Feature Loop Manager"
-    agent: Feature Loop Manager
-    prompt: "Process this single feature issue end-to-end until approved or blocked."
-  - label: "Hand off to Developer"
-    agent: developer
-    prompt: "Implementation work is required. Execute the task and keep specs in sync."
+
 ---
 
 ## 🚫 Code Change Restriction

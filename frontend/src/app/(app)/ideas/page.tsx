@@ -84,6 +84,7 @@ type RelevanceRationaleResponse = {
 
 const TONE_OPTIONS = ['Professional', 'Casual', 'Storytelling', 'Data-driven', 'Practical'];
 const AUDIENCE_OPTIONS = ['Small Business', 'Enterprise', 'B2B', 'Consumer', 'Agencies'];
+const FORMAT_OPTIONS = ['Any', 'Article', 'Post', 'Thread', 'Newsletter', 'Video Script'];
 const DEFAULT_IDEA_FORMAT = 'Unspecified';
 const IDEAS_SORT_PREFERENCE_KEY = 'ideas_sort_preference';
 const RELEVANCE_REQUEST_TIMEOUT_MS = 18_000;
@@ -420,53 +421,6 @@ function compareIdeasForRatingSort(left: IdeaRecord, right: IdeaRecord): number 
   );
 }
 
-function TrendsPanel({
-  articles,
-  isLoading,
-  errorMessage,
-  topics,
-}: {
-  articles: TrendArticle[];
-  isLoading: boolean;
-  errorMessage: string | null;
-  topics: TrendTopic[];
-}) {
-  return (
-    <aside className="trends-panel hidden w-72 shrink-0 xl:block">
-      <h2>Live Trend Signals</h2>
-      {isLoading ? <p className="article-item">Loading trend signals...</p> : null}
-      {errorMessage ? <p className="article-item">{errorMessage}</p> : null}
-      {!isLoading && !errorMessage && topics.length === 0 ? (
-        <p className="article-item">No live trend topics were returned.</p>
-      ) : null}
-      <div className="space-y-2">
-        {topics.map((topic) => (
-          <div key={topic.label} className="trend-item rounded-xl border border-white/10 px-3 py-2 no-underline">
-            <p>{topic.label}</p>
-            <span className="trend-score">Matched articles: {topic.count}</span>
-          </div>
-        ))}
-      </div>
-
-      <h2 className="mt-5">Relevant Articles</h2>
-      {!isLoading && !errorMessage && articles.length === 0 ? (
-        <p className="article-item">No live articles were returned.</p>
-      ) : null}
-      <div>
-        {articles.map((article) => (
-          <div key={article.url} className="article-item">
-            <a href={article.url} target="_blank" rel="noreferrer">
-              {article.title}
-            </a>
-            <span className="article-date">
-              {article.source} · {article.publishedAt}
-            </span>
-          </div>
-        ))}
-      </div>
-    </aside>
-  );
-}
 
 export default function IdeasPage() {
   const router = useRouter();
@@ -495,7 +449,11 @@ export default function IdeasPage() {
   const [tone, setTone] = useState(TONE_OPTIONS[0]);
   const [audience, setAudience] = useState(AUDIENCE_OPTIONS[0]);
   const [sortBy, setSortBy] = useState<IdeaSort>(getInitialSortPreference);
-  const [toneFilter, setToneFilter] = useState<string>('All');
+  const [ratingFilter, setRatingFilter] = useState<'All' | 'Strong' | 'Moderate' | 'Weak' | 'NoAngles'>('All');
+  const [format, setFormat] = useState<string>('Any');
+  const [draftMap, setDraftMap] = useState<Map<string, string>>(new Map()); // ideaId → angleId
+  const [adaptMap, setAdaptMap] = useState<Map<string, string>>(new Map()); // ideaId → angleId
+  const [openMenuIdeaId, setOpenMenuIdeaId] = useState<string | null>(null);
   const [ideasError, setIdeasError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
@@ -640,8 +598,57 @@ export default function IdeasPage() {
     return () => controller.abort();
   }, []);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
+  useEffect(() => {
+    if (!currentUser) {
+      setDraftMap(new Map());
+      setAdaptMap(new Map());
+      return;
+    }
+
+    const firestore = getFirebaseDb();
+    if (!firestore) {
+      setDraftMap(new Map());
+      setAdaptMap(new Map());
+      return;
+    }
+
+    void (async () => {
+      try {
+        const [draftsSnap, adaptSnap] = await Promise.all([
+          getDocs(collection(firestore, 'users', currentUser.uid, 'drafts')),
+          getDocs(collection(firestore, 'users', currentUser.uid, 'adaptations')),
+        ]);
+
+        const nextDraftMap = new Map<string, string>();
+        draftsSnap.docs.forEach((d) => {
+          const data = d.data();
+          const ideaId = typeof data.ideaId === 'string' ? data.ideaId.trim() : '';
+          const angleId = typeof data.angleId === 'string' ? data.angleId.trim() : '';
+          if (ideaId && angleId) {
+            nextDraftMap.set(ideaId, angleId);
+          }
+        });
+
+        const nextAdaptMap = new Map<string, string>();
+        adaptSnap.docs.forEach((d) => {
+          const data = d.data();
+          const ideaId = typeof data.ideaId === 'string' ? data.ideaId.trim() : '';
+          const angleId = typeof data.angleId === 'string' ? data.angleId.trim() : '';
+          if (ideaId && angleId) {
+            nextAdaptMap.set(ideaId, angleId);
+          }
+        });
+
+        setDraftMap(nextDraftMap);
+        setAdaptMap(nextAdaptMap);
+      } catch {
+        setDraftMap(new Map());
+        setAdaptMap(new Map());
+      }
+    })();
+  }, [currentUser]);
+
+  async function submitIdea(scoreOnly: boolean): Promise<void> {
     if (isSubmitting) {
       return;
     }
@@ -677,19 +684,21 @@ export default function IdeasPage() {
       const fallbackRationale = buildFallbackRationale(deterministicRelevance, personalizationContext);
 
       let rationale = fallbackRationale;
-      try {
-        rationale = await generateIdeaRationale({
-          topic,
-          tone,
-          audience,
-          score: deterministicRelevance.score,
-          label: deterministicRelevance.label,
-          fallbackReason: fallbackRationale.reason,
-          fallbackImprovements: fallbackRationale.improvements,
-          context: personalizationContext,
-        });
-      } catch {
-        rationale = fallbackRationale;
+      if (!scoreOnly) {
+        try {
+          rationale = await generateIdeaRationale({
+            topic,
+            tone,
+            audience,
+            score: deterministicRelevance.score,
+            label: deterministicRelevance.label,
+            fallbackReason: fallbackRationale.reason,
+            fallbackImprovements: fallbackRationale.improvements,
+            context: personalizationContext,
+          });
+        } catch {
+          rationale = fallbackRationale;
+        }
       }
 
       await addDoc(collection(firestore, 'users', currentUser.uid, 'ideas'), {
@@ -697,7 +706,7 @@ export default function IdeasPage() {
         topic,
         tone,
         audience,
-        format: DEFAULT_IDEA_FORMAT,
+        format: format || DEFAULT_IDEA_FORMAT,
         userId: currentUser.uid,
         relevance: {
           score: deterministicRelevance.score,
@@ -713,12 +722,17 @@ export default function IdeasPage() {
       });
 
       setIdeaText('');
-      setSubmitSuccess('Idea saved to your Firebase backlog.');
+      setSubmitSuccess(scoreOnly ? 'Idea scored and saved.' : 'Idea saved to your Firebase backlog.');
     } catch {
       setSubmitError('Unable to save your idea right now. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    await submitIdea(false);
   }
 
   function beginTitleEdit(idea: IdeaRecord): void {
@@ -846,7 +860,14 @@ export default function IdeasPage() {
 
   const visibleIdeas = useMemo(() => {
     return ideas
-      .filter((idea) => toneFilter === 'All' || idea.tone === toneFilter)
+      .filter((idea) => {
+        if (ratingFilter === 'All') return true;
+        if (ratingFilter === 'Strong') return idea.relevance?.label === 'Strong';
+        if (ratingFilter === 'Moderate') return idea.relevance?.label === 'Moderate';
+        if (ratingFilter === 'Weak') return idea.relevance?.label === 'Weak';
+        if (ratingFilter === 'NoAngles') return !draftMap.has(idea.id) && !adaptMap.has(idea.id);
+        return true;
+      })
       .sort((left, right) => {
         if (sortBy === 'oldest') {
           return left.createdAtMs - right.createdAtMs;
@@ -862,304 +883,415 @@ export default function IdeasPage() {
 
         return right.createdAtMs - left.createdAtMs;
       });
-  }, [ideas, toneFilter, sortBy]);
+  }, [ideas, ratingFilter, sortBy, draftMap, adaptMap]);
+
+  const strongCount = ideas.filter((i) => i.relevance?.label === 'Strong').length;
+  const moderateCount = ideas.filter((i) => i.relevance?.label === 'Moderate').length;
+  const weakCount = ideas.filter((i) => i.relevance?.label === 'Weak').length;
+  const noAnglesCount = ideas.filter((i) => !draftMap.has(i.id) && !adaptMap.has(i.id)).length;
+
+  const lastScoredMs = ideas.reduce<number | null>((max, idea) => {
+    const scored = idea.relevance?.scoredAtMs;
+    if (typeof scored === 'number') {
+      return max === null ? scored : Math.max(max, scored);
+    }
+    return max;
+  }, null);
+
+  const lastScoredLabel = (() => {
+    if (lastScoredMs === null) return 'never';
+    const diffMin = Math.floor((Date.now() - lastScoredMs) / 60_000);
+    if (diffMin < 1) return 'just now';
+    return `${diffMin} min ago`;
+  })();
 
   const draftRating = ideaText.trim().length > 0 ? scoreIdeaTopic(ideaText) : null;
 
   return (
-    <div className="flex gap-6">
-      <div className="min-w-0 flex-1 space-y-5">
-        <div className="page-header">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <h1>Idea Input and Backlog</h1>
-              <p className="breadcrumb">
-                Enter one-sentence topics, review AI relevance scores, and open Angles by selecting any idea.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2 text-sm" style={{ color: '#a7c9be' }}>
-              <span className="rounded-full border border-white/10 px-3 py-1">
-                Ideas saved: <span className="font-semibold text-white">{ideas.length}</span>
-              </span>
-              <span className="rounded-full border border-white/10 px-3 py-1">
-                Signed in as <span className="font-semibold text-white">{currentUser?.email ?? 'loading...'}</span>
-              </span>
-            </div>
-          </div>
-        </div>
-        <WorkflowStepper />
+    <div className="min-w-0 flex-1 space-y-5">
+      <div className="rounded-2xl border bg-white shadow-sm p-6">
+        <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-slate-400">PIPELINE · IDEAS</p>
+        <h1 className="text-2xl font-bold text-slate-900">Idea Backlog</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Drop a one-sentence topic. We&apos;ll score relevance against today&apos;s trend signals and surface the strongest angles.
+        </p>
+        <p className="mt-3 text-sm text-slate-500">
+          Backlog:{' '}
+          <span className="font-semibold text-slate-700">{ideas.length} ideas</span>
+          {' · '}Strong-rated:{' '}
+          <span className="font-semibold text-slate-700">{strongCount}</span>
+          {' · '}Last scored:{' '}
+          <span className="font-semibold text-slate-700">{lastScoredLabel}</span>
+        </p>
+      </div>
+      <WorkflowStepper />
 
-        <section className="surface-card p-5">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <h2 className="section-title">New Idea</h2>
-            {submitSuccess ? <p className="text-sm font-medium text-emerald-700">{submitSuccess}</p> : null}
+      <div className="rounded-2xl border bg-white shadow-sm p-6">
+        {submitSuccess ? (
+          <p className="mb-3 text-sm font-medium text-emerald-700">{submitSuccess}</p>
+        ) : null}
+        {submitError ? (
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {submitError}
           </div>
-
-          {submitError ? (
-            <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              {submitError}
-            </div>
+        ) : null}
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <input
+            type="text"
+            className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+            placeholder="One-sentence topic — e.g. 'Why GEO beats SEO for B2B in 2026'"
+            value={ideaText}
+            onChange={(event) => {
+              setIdeaText(event.target.value);
+              if (submitError) setSubmitError(null);
+              if (submitSuccess) setSubmitSuccess(null);
+            }}
+            disabled={isSubmitting}
+          />
+          {draftRating ? (
+            <p className="text-xs text-slate-600">
+              Relevance preview:{' '}
+              <span className="font-semibold text-slate-800">{draftRating.score}/100</span>
+              {' '}({draftRating.label})
+            </p>
           ) : null}
-
-          <form className="space-y-3" onSubmit={handleSubmit}>
-            <textarea
-              className="w-full rounded-xl border border-slate-300 p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-              rows={3}
-              placeholder="Write one sentence topic description..."
-              value={ideaText}
-              onChange={(event) => {
-                setIdeaText(event.target.value);
-                if (submitError) {
-                  setSubmitError(null);
-                }
-                if (submitSuccess) {
-                  setSubmitSuccess(null);
-                }
-              }}
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-emerald-400"
+              value={tone}
+              onChange={(event) => setTone(event.target.value)}
               disabled={isSubmitting}
-            />
-            {draftRating ? (
-              <p className="text-xs text-slate-600">
-                Relevance rating preview: <span className="font-semibold text-slate-800">{draftRating.score}/100</span> ({draftRating.label})
-              </p>
-            ) : null}
-            <div className="flex flex-wrap items-center gap-3">
-              <select
-                className="rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                value={tone}
-                onChange={(event) => setTone(event.target.value)}
+            >
+              {TONE_OPTIONS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+            <select
+              className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-emerald-400"
+              value={audience}
+              onChange={(event) => setAudience(event.target.value)}
+              disabled={isSubmitting}
+            >
+              {AUDIENCE_OPTIONS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+            <select
+              className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-emerald-400"
+              value={format}
+              onChange={(event) => setFormat(event.target.value)}
+              disabled={isSubmitting}
+            >
+              {FORMAT_OPTIONS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={isSubmitting}
+                onClick={() => { void submitIdea(true); }}
               >
-                {TONE_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                value={audience}
-                onChange={(event) => setAudience(event.target.value)}
-                disabled={isSubmitting}
-              >
-                {AUDIENCE_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
+                Score only
+              </button>
               <button
                 type="submit"
-                className="ml-auto rounded-xl px-5 py-2 text-sm font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                className="rounded-xl px-5 py-2 text-sm font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
                 style={{ background: '#1a7a5e' }}
                 disabled={isSubmitting}
               >
-                {isSubmitting ? <Spinner size="sm" label="Saving..." /> : 'Add Idea'}
+                {isSubmitting ? <Spinner size="sm" label="Saving..." /> : 'Add & score'}
               </button>
             </div>
-          </form>
-        </section>
-
-        <section className="surface-card p-5">
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <h2 className="section-title">Your Ideas</h2>
-            <div className="flex flex-wrap gap-2">
-              <select
-                className="pill bg-white"
-                value={sortBy}
-                onChange={(event) => updateSortPreference(event.target.value as IdeaSort)}
-              >
-                <option value="newest">Sort: Newest</option>
-                <option value="oldest">Sort: Oldest</option>
-                <option value="topic">Sort: Topic A-Z</option>
-                <option value="rating">Sort: Rating High-Low</option>
-              </select>
-              <select className="pill bg-white" value={toneFilter} onChange={(event) => setToneFilter(event.target.value)}>
-                <option value="All">Tone: All</option>
-                {TONE_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    Tone: {option}
-                  </option>
-                ))}
-              </select>
-            </div>
           </div>
-
-          {titleEditError ? (
-            <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              {titleEditError}
-            </div>
-          ) : null}
-
-          {ideasError ? (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              {ideasError}
-            </div>
-          ) : null}
-          {isIdeasLoading ? (
-            <div className="flex items-center gap-2 text-sm text-slate-500">
-              <Spinner size="sm" />
-              <span>Loading your saved ideas...</span>
-            </div>
-          ) : null}
-          {!isIdeasLoading && !ideasError && visibleIdeas.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-5 py-8 text-center text-sm text-slate-500">
-              No ideas match the current filters yet.
-            </div>
-          ) : null}
-
-          {!isIdeasLoading && !ideasError && visibleIdeas.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left text-sm">
-                <thead>
-                  <tr className="text-xs font-bold uppercase tracking-wide text-slate-400">
-                    <th className="pb-3 pr-4">Title</th>
-                    <th className="pb-3 pr-4">Rating</th>
-                    <th className="pb-3 pr-4">Tone</th>
-                    <th className="pb-3 pr-4">Audience</th>
-                    <th className="pb-3 pr-4">Created</th>
-                    <th className="pb-3">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {visibleIdeas.map((idea) => {
-                    const rating = idea.relevance;
-                    const isEditingTitle = editingTitleIdeaId === idea.id;
-                    const isSavingTitle = isSavingTitleIdeaId === idea.id;
-
-                    return (
-                      <tr key={idea.id}>
-                        <td className="py-3 pr-4 font-semibold text-slate-800">
-                          {isEditingTitle ? (
-                            <div className="space-y-2">
-                              <input
-                                type="text"
-                                className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                                value={editingTitleValue}
-                                onChange={(event) => setEditingTitleValue(event.target.value)}
-                                maxLength={180}
-                                disabled={isSavingTitle}
-                                aria-label="Idea title"
-                              />
-                              <p className="text-xs font-normal text-slate-500">Topic: {idea.topic}</p>
-                            </div>
-                          ) : (
-                            <div>
-                              <p>{idea.title || idea.topic}</p>
-                              <p className="text-xs font-normal text-slate-500">Topic: {idea.topic}</p>
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 pr-4">
-                          {rating ? (
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-2">
-                                <span className="font-semibold text-slate-800">{rating.score}</span>
-                                <span
-                                  className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                                    rating.label === 'Strong'
-                                      ? 'bg-emerald-100 text-emerald-700'
-                                      : rating.label === 'Moderate'
-                                        ? 'bg-amber-100 text-amber-700'
-                                        : 'bg-rose-100 text-rose-700'
-                                  }`}
-                                >
-                                  {rating.label}
-                                </span>
-                                <span
-                                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                                    rating.source === 'ai' ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-700'
-                                  }`}
-                                >
-                                  {rating.source === 'ai' ? 'AI rationale' : 'Fallback rationale'}
-                                </span>
-                              </div>
-                              <div className="mt-1 max-w-md text-xs text-slate-600">
-                                <span className="font-semibold">Reason:</span> {rating.reason}
-                                {rating.improvements.length > 0 && (
-                                  <>
-                                    <br />
-                                    <span className="font-semibold">Improve:</span> {rating.improvements.join(' • ')}
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          ) : (
-                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600" title="No saved relevance metadata.">
-                              Unscored
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-3 pr-4 text-slate-600">{idea.tone}</td>
-                        <td className="py-3 pr-4 text-slate-600">{idea.audience}</td>
-                        <td className="py-3 pr-4 text-slate-500">{idea.createdAtLabel}</td>
-                        <td className="py-3">
-                          <div className="flex flex-wrap items-center gap-2">
-                            {isEditingTitle ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="rounded-lg border border-emerald-300 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
-                                  onClick={() => {
-                                    void saveTitleEdit(idea);
-                                  }}
-                                  disabled={isSavingTitle}
-                                >
-                                  {isSavingTitle ? 'Saving...' : 'Save'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                                  onClick={cancelTitleEdit}
-                                  disabled={isSavingTitle}
-                                >
-                                  Cancel
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                                onClick={() => beginTitleEdit(idea)}
-                              >
-                                Edit Title
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                              onClick={() => {
-                                void openAnglesForIdea(idea);
-                              }}
-                            >
-                              Open Angles
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-lg border border-red-200 px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-60"
-                              onClick={() => { void deleteIdea(idea); }}
-                              disabled={deletingIdeaId === idea.id}
-                            >
-                              {deletingIdeaId === idea.id ? 'Deleting...' : 'Delete'}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </section>
+        </form>
       </div>
 
-      <TrendsPanel
-        articles={trends?.articles ?? []}
-        errorMessage={trendsError}
-        isLoading={isTrendsLoading}
-        topics={trends?.topics ?? []}
-      />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-2">
+          {(
+            [
+              { key: 'All' as const, label: 'All', count: ideas.length },
+              { key: 'Strong' as const, label: 'Strong', count: strongCount },
+              { key: 'Moderate' as const, label: 'Moderate', count: moderateCount },
+              { key: 'Weak' as const, label: 'Weak', count: weakCount },
+              { key: 'NoAngles' as const, label: 'No angles yet', count: noAnglesCount },
+            ]
+          ).map(({ key, label, count }) => (
+            <button
+              key={key}
+              type="button"
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                ratingFilter === key
+                  ? 'bg-slate-900 text-white'
+                  : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+              onClick={() => setRatingFilter(key)}
+            >
+              {label} {count}
+            </button>
+          ))}
+        </div>
+        <select
+          className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-emerald-400"
+          value={sortBy}
+          onChange={(event) => updateSortPreference(event.target.value as IdeaSort)}
+        >
+          <option value="rating">Score high → low</option>
+          <option value="newest">Newest</option>
+          <option value="oldest">Oldest</option>
+          <option value="topic">Topic A-Z</option>
+        </select>
+      </div>
+
+      {titleEditError ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {titleEditError}
+        </div>
+      ) : null}
+
+      {ideasError ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {ideasError}
+        </div>
+      ) : null}
+      {isIdeasLoading ? (
+        <div className="flex items-center gap-2 text-sm text-slate-500">
+          <Spinner size="sm" />
+          <span>Loading your saved ideas...</span>
+        </div>
+      ) : null}
+      {!isIdeasLoading && !ideasError && visibleIdeas.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-5 py-8 text-center text-sm text-slate-500">
+          No ideas match the current filters yet.
+        </div>
+      ) : null}
+
+      {!isIdeasLoading && !ideasError && visibleIdeas.length > 0 ? (
+        <div className="space-y-3">
+          {visibleIdeas.map((idea) => {
+            const rating = idea.relevance;
+            const isEditingTitle = editingTitleIdeaId === idea.id;
+            const isSavingTitle = isSavingTitleIdeaId === idea.id;
+            const isMenuOpen = openMenuIdeaId === idea.id;
+            const hasDraft = draftMap.has(idea.id);
+            const hasAdapt = adaptMap.has(idea.id);
+            const scoreCircleColor = !rating
+              ? 'bg-slate-100 text-slate-500'
+              : rating.label === 'Strong'
+                ? 'bg-emerald-100 text-emerald-700'
+                : rating.label === 'Moderate'
+                  ? 'bg-amber-100 text-amber-700'
+                  : 'bg-rose-100 text-rose-700';
+
+            return (
+              <div key={idea.id} className="rounded-2xl border bg-white shadow-sm p-5">
+                <div className="flex items-start gap-4">
+                  <div className="flex shrink-0 flex-col items-center gap-0.5">
+                    <div className={`flex h-14 w-14 flex-col items-center justify-center rounded-full ${scoreCircleColor}`}>
+                      <span className="text-lg font-bold leading-none">{rating ? rating.score : '—'}</span>
+                      <span className="mt-0.5 text-[9px] font-semibold uppercase leading-none">
+                        {rating ? rating.label : 'Unscored'}
+                      </span>
+                    </div>
+                    <span className="mt-0.5 text-[9px] text-slate-400">AI score</span>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 font-medium">{idea.tone}</span>
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 font-medium">{idea.audience}</span>
+                      <span>·</span>
+                      <span>{idea.createdAtLabel}</span>
+                      <span>·</span>
+                      <span>{trends?.topics?.length ?? 0} live signals</span>
+                    </div>
+                    <p className="mt-1 font-bold text-slate-900">{idea.title || idea.topic}</p>
+                    {idea.title !== idea.topic && idea.topic ? (
+                      <p className="text-sm text-slate-500">{idea.topic}</p>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-2">
+                    {isEditingTitle ? (
+                      <div className="flex w-56 flex-col gap-1.5">
+                        <input
+                          type="text"
+                          className="w-full rounded-lg border border-slate-300 px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                          value={editingTitleValue}
+                          onChange={(event) => setEditingTitleValue(event.target.value)}
+                          maxLength={180}
+                          disabled={isSavingTitle}
+                          aria-label="Idea title"
+                        />
+                        <div className="flex gap-1.5">
+                          <button
+                            type="button"
+                            className="rounded-lg border border-emerald-300 px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+                            onClick={() => { void saveTitleEdit(idea); }}
+                            disabled={isSavingTitle}
+                          >
+                            {isSavingTitle ? 'Saving...' : 'Save'}
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            onClick={cancelTitleEdit}
+                            disabled={isSavingTitle}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {hasAdapt ? (
+                          <button
+                            type="button"
+                            className="rounded-xl px-4 py-1.5 text-xs font-bold text-white hover:opacity-90"
+                            style={{ background: '#1a7a5e' }}
+                            onClick={() => {
+                              setWorkflowContext({ ideaId: idea.id, ideaTopic: idea.topic });
+                              router.push(`/adapt/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(adaptMap.get(idea.id)!)}`);
+                            }}
+                          >
+                            Resume in Adapt →
+                          </button>
+                        ) : hasDraft ? (
+                          <button
+                            type="button"
+                            className="rounded-xl px-4 py-1.5 text-xs font-bold text-white hover:opacity-90"
+                            style={{ background: '#1a7a5e' }}
+                            onClick={() => {
+                              setWorkflowContext({ ideaId: idea.id, ideaTopic: idea.topic });
+                              router.push(`/storyboard/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(draftMap.get(idea.id)!)}`);
+                            }}
+                          >
+                            Resume in Storyboard →
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rounded-xl px-4 py-1.5 text-xs font-bold text-white hover:opacity-90"
+                            style={{ background: '#1a7a5e' }}
+                            onClick={() => { void openAnglesForIdea(idea); }}
+                          >
+                            Open angles →
+                          </button>
+                        )}
+                        <div className="relative">
+                          <button
+                            type="button"
+                            className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-50"
+                            onClick={() => setOpenMenuIdeaId(isMenuOpen ? null : idea.id)}
+                            aria-haspopup="menu"
+                            aria-expanded={isMenuOpen}
+                            aria-label="More actions"
+                          >
+                            ...
+                          </button>
+                          {isMenuOpen ? (
+                            <div
+                              role="menu"
+                              className="absolute right-0 top-8 z-10 w-44 rounded-xl border border-slate-200 bg-white shadow-lg"
+                            >
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="block w-full px-4 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                onClick={() => {
+                                  setOpenMenuIdeaId(null);
+                                  beginTitleEdit(idea);
+                                }}
+                              >
+                                Edit title
+                              </button>
+                              {hasAdapt ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    className="block w-full px-4 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                    onClick={() => {
+                                      setOpenMenuIdeaId(null);
+                                      void openAnglesForIdea(idea);
+                                    }}
+                                  >
+                                    Open angles
+                                  </button>
+                                  {hasDraft ? (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      className="block w-full px-4 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                      onClick={() => {
+                                        setOpenMenuIdeaId(null);
+                                        setWorkflowContext({ ideaId: idea.id, ideaTopic: idea.topic });
+                                        router.push(`/storyboard/${encodeURIComponent(idea.id)}?angleId=${encodeURIComponent(draftMap.get(idea.id)!)}`);
+                                      }}
+                                    >
+                                      Open Storyboard
+                                    </button>
+                                  ) : null}
+                                </>
+                              ) : null}
+                              {hasDraft && !hasAdapt ? (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  className="block w-full px-4 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                  onClick={() => {
+                                    setOpenMenuIdeaId(null);
+                                    setWorkflowContext({ ideaId: idea.id, ideaTopic: idea.topic });
+                                    router.push(`/adapt/${encodeURIComponent(idea.id)}`);
+                                  }}
+                                >
+                                  Go to Adapt
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="block w-full px-4 py-2 text-left text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
+                                onClick={() => {
+                                  setOpenMenuIdeaId(null);
+                                  void deleteIdea(idea);
+                                }}
+                                disabled={deletingIdeaId === idea.id}
+                              >
+                                {deletingIdeaId === idea.id ? 'Deleting...' : 'Delete'}
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {rating ? (
+                  <div className="mt-3 flex flex-wrap items-start gap-2">
+                    <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                      AI RATIONALE
+                    </span>
+                    <p className="text-sm text-slate-600">{rating.reason}</p>
+                  </div>
+                ) : null}
+                {rating && rating.improvements.length > 0 ? (
+                  <div className="mt-3">
+                    <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                      HOW TO MAKE IT STRONGER
+                    </p>
+                    <ul className="list-inside list-disc space-y-0.5">
+                      {rating.improvements.map((item) => (
+                        <li key={item} className="text-xs text-slate-600">{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd frontend && npm run dev)",
+      "Bash(cd frontend && npm run build)",
+      "Bash(cd frontend && npx tsc --noEmit)",
+      "Bash(cd frontend && npm run lint)",
+      "Bash(cd frontend && npm install *)",
+      "Bash(cd backend && uvicorn app.main:app --reload)",
+      "Bash(cd backend && pip install *)",
+      "Bash(cd backend && python *)",
+      "Bash(curl http://localhost:3000*)",
+      "Bash(curl http://localhost:8000*)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000*)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git branch*)",
+      "Bash(git checkout *)",
+      "Bash(npx tsc *)",
+      "mcp__playwright__browser_navigate",
+      "mcp__playwright__browser_snapshot",
+      "mcp__playwright__browser_screenshot",
+      "mcp__playwright__browser_type",
+      "mcp__playwright__browser_click",
+      "mcp__playwright__browser_fill_form",
+      "mcp__playwright__browser_evaluate",
+      "mcp__playwright__browser_wait_for",
+      "mcp__playwright__browser_console_messages",
+      "mcp__playwright__browser_network_requests",
+      "mcp__playwright__browser_tabs",
+      "mcp__playwright__browser_resize"
+    ]
+  }
+}

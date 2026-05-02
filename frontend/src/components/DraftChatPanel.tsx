@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { Spinner } from '@/components/Spinner';
 
 export type DraftChatMessage = {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'research';
   content: string;
 };
 
@@ -110,10 +110,16 @@ export function DraftChatPanel(props: DraftChatPanelProps) {
             <div
               key={`${message.role}-${index}`}
               className={`rounded-lg px-3 py-2 text-xs leading-relaxed ${
-                message.role === 'assistant' ? 'bg-white text-slate-700' : 'bg-emerald-100 text-emerald-900'
+                message.role === 'assistant'
+                  ? 'bg-white text-slate-700'
+                  : message.role === 'research'
+                  ? 'border border-teal-200 bg-teal-50 text-teal-800'
+                  : 'bg-emerald-100 text-emerald-900'
               }`}
             >
-              <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide opacity-75">{message.role}</p>
+              <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide opacity-75">
+                {message.role === 'research' ? '🔍 Research' : message.role}
+              </p>
               <p>{formatMessagePreview(message.content)}</p>
             </div>
           ))
@@ -139,6 +145,11 @@ export function DraftChatPanel(props: DraftChatPanelProps) {
           className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500"
           value={inputValue}
           onChange={(event) => onInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !sendDisabled) {
+              onSend();
+            }
+          }}
           placeholder="Example: make this more concise and add a stronger CTA"
         />
         <button

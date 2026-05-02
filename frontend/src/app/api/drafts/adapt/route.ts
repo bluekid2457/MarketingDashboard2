@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import type { AIProvider } from '@/lib/aiConfig';
 import { callAI, type AIMessage, DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL } from '@/lib/callAI';
+import { fetchResearchSources, type ResearchSource } from '@/lib/draftResearch';
 import {
   ADAPT_PROVIDER_TIMEOUT_MS,
   buildAdaptGenerationTimeoutMessage,
@@ -18,6 +19,8 @@ type AdaptRequestBody = {
   apiKey?: string;
   ollamaBaseUrl?: string;
   ollamaModel?: string;
+  exaApiKey?: string;
+  ideaTopic?: string;
   platform?: string;
   sourceDraft?: string;
   currentPlatformDraft?: string;
@@ -28,6 +31,9 @@ type AdaptApiResponse = {
   platform?: PlatformPromptKey;
   generatedContent?: string;
   provider?: string;
+  searchProvider?: string;
+  searchQuery?: string;
+  sourceCount?: number;
   error?: string;
 };
 
@@ -84,6 +90,8 @@ function buildAdaptationPrompt(
   sourceDraft: string,
   currentPlatformDraft: string,
   companyContext: string[],
+  researchSources: ResearchSource[],
+  hasLiveSources: boolean,
 ): string {
   const platformRules = getPromptRulesForPlatform(platform);
 
@@ -92,6 +100,36 @@ function buildAdaptationPrompt(
         '',
         'Company context (use to ground product references, audience framing, and brand voice):',
         ...companyContext.map((line) => `- ${line}`),
+      ]
+    : [];
+
+  const sourcesBlock: string[] = researchSources.length > 0
+    ? [
+        '',
+        'Live research sources — use these to add or support factual claims in the adapted content:',
+        ...researchSources.flatMap((source, index) => [
+          `- [${index + 1}] ${source.title}`,
+          `  URL: ${source.url}`,
+          `  Key excerpt: ${source.snippet || 'No excerpt available.'}`,
+        ]),
+        '',
+        'CITATION RULES — mandatory when live research sources are present:',
+        '- When you draw a factual claim from a source, embed its URL as an inline markdown link.',
+        '  Format: [descriptive anchor text](exact-url) — placed immediately after the claim, before punctuation.',
+        '- Use the EXACT URL from the sources list above — do NOT shorten, guess, or invent URLs.',
+        '- Add a "## Sources" section at the very end listing every source you cited.',
+        '  Format per entry: "- [Source Title](exact-url)"',
+        '- If the source draft already has a "## Sources" section, keep its entries and append any new ones.',
+      ]
+    : [];
+
+  const noSourcesBlock: string[] = !hasLiveSources
+    ? [
+        '',
+        'CRITICAL — NO LIVE SOURCES AVAILABLE: Exa is not configured and no fallback sources were found.',
+        'Do NOT invent statistics, URLs, studies, or specific data points.',
+        'For any sentence that would cite an external fact, write an ALL-CAPS placeholder instead.',
+        'Format: FIND [description of what to research] — SUGGESTED SOURCE: [publication or source type].',
       ]
     : [];
 
@@ -105,6 +143,8 @@ function buildAdaptationPrompt(
     'Platform prompt rules:',
     platformRules,
     ...companyBlock,
+    ...sourcesBlock,
+    ...noSourcesBlock,
     '',
     'Source draft:',
     '---',
@@ -116,6 +156,44 @@ function buildAdaptationPrompt(
     currentPlatformDraft || '(none)',
     '---',
   ].join('\n');
+}
+
+async function formulateAdaptQuery(
+  platform: string,
+  ideaTopic: string,
+  sourceDraft: string,
+  provider: AIProvider,
+  apiKey: string,
+  ollamaBaseUrl: string,
+  ollamaModel: string,
+): Promise<string> {
+  const draftPreview = sourceDraft.slice(0, 300).replace(/\s+/g, ' ').trim();
+  const fallback = [platform, ideaTopic].filter(Boolean).join(' ');
+  const prompt = [
+    `Generate a concise Exa search query (max 10 words) to find current, credible sources for content being adapted for ${platform}.`,
+    '',
+    `Topic: ${ideaTopic || '(not specified)'}`,
+    `Draft preview: ${draftPreview || '(empty)'}`,
+    '',
+    'Return ONLY the search query string. No explanation, no quotes, no trailing punctuation.',
+  ].join('\n');
+
+  try {
+    const raw = await callAI({
+      provider,
+      apiKey,
+      ollamaBaseUrl,
+      ollamaModel,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1,
+      maxTokens: 30,
+      tag: '[Query Formulation Adapt]',
+    });
+    const query = raw.trim().replace(/^["']|["']$/g, '');
+    return query || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse<AdaptApiResponse>> {
@@ -131,6 +209,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdaptApiR
   const apiKey = asString(body.apiKey);
   const ollamaBaseUrl = asString(body.ollamaBaseUrl) || DEFAULT_OLLAMA_BASE_URL;
   const ollamaModel = asString(body.ollamaModel) || DEFAULT_OLLAMA_MODEL;
+  const exaApiKey = asString(body.exaApiKey);
+  const ideaTopic = asString(body.ideaTopic);
   const platform = asString(body.platform);
   const sourceDraft = typeof body.sourceDraft === 'string' ? body.sourceDraft : '';
   const currentPlatformDraft = typeof body.currentPlatformDraft === 'string' ? body.currentPlatformDraft : '';
@@ -156,7 +236,37 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdaptApiR
     return NextResponse.json({ error: 'Ollama model is required.' }, { status: 400 });
   }
 
-  const prompt = buildAdaptationPrompt(platform, sourceDraft, currentPlatformDraft, companyContext);
+  // Step 1: AI formulates a focused Exa query from platform + topic + draft content
+  // Step 2: fetch sources with that query
+  // Step 3: generate adaptation with sources injected (below)
+  let researchSources: ResearchSource[] = [];
+  let searchProvider = 'unavailable';
+  let searchQuery = [platform, ideaTopic].filter(Boolean).join(' ');
+
+  if (exaApiKey) {
+    // Step 1: LLM derives a specific, searchable query from platform context and draft
+    searchQuery = await formulateAdaptQuery(platform, ideaTopic, sourceDraft, provider as AIProvider, apiKey, ollamaBaseUrl, ollamaModel);
+    console.log(`[Query Formulation Adapt] Platform: "${platform}" | Topic: "${ideaTopic}" → Exa query: "${searchQuery}"`);
+
+    // Step 2: fetch Exa sources with the AI-formulated query
+    try {
+      const result = await fetchResearchSources(searchQuery, exaApiKey, 4);
+      researchSources = result.sources;
+      searchProvider = result.provider;
+      if (searchProvider === 'exa') {
+        console.log(`[Exa Adapt Search] Query: "${searchQuery}" → ${researchSources.length} source${researchSources.length !== 1 ? 's' : ''} retrieved`);
+      } else {
+        console.log(`[Research Adapt] Provider: ${searchProvider} | Query: "${searchQuery}" | Sources: ${researchSources.length}`);
+      }
+    } catch {
+      console.warn(`[Research Adapt] Source fetch failed for query: "${searchQuery}" — proceeding without sources`);
+    }
+  } else {
+    console.log(`[Research Adapt] No Exa key — skipping source search. Adapted content will use ALL-CAPS placeholders for factual claims.`);
+  }
+
+  const hasLiveSources = researchSources.length > 0;
+  const prompt = buildAdaptationPrompt(platform, sourceDraft, currentPlatformDraft, companyContext, researchSources, hasLiveSources);
   const messages: AIMessage[] = [
     {
       role: 'system',
@@ -185,6 +295,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdaptApiR
       platform,
       generatedContent: generatedContent.trim(),
       provider,
+      searchProvider,
+      searchQuery,
+      sourceCount: researchSources.length,
     });
   } catch (error) {
     if (error instanceof AdaptGenerationTimeoutError) {

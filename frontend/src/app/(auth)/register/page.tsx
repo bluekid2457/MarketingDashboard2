@@ -142,7 +142,7 @@ export default function RegisterPage() {
           <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-600 text-3xl font-extrabold text-white shadow-lg">
             M
           </div>
-          <h1 className="text-3xl font-extrabold leading-tight">Marketing Dashboard</h1>
+          <h1 className="text-3xl font-extrabold leading-tight">Flowrite</h1>
           <p className="mt-1 text-base font-semibold" style={{ color: '#7db8a8' }}>
             Create your account
           </p>
@@ -170,7 +170,7 @@ export default function RegisterPage() {
           ) : null}
 
           <h2 className="text-2xl font-extrabold text-slate-900">Create Account</h2>
-          <p className="mt-1 text-sm text-slate-500">Join Marketing Dashboard</p>
+          <p className="mt-1 text-sm text-slate-500">Join Flowrite</p>
 
           <form className="mt-6 space-y-3" onSubmit={handleSubmit}>
             <div className="flex items-center gap-2 rounded-xl border border-slate-300 px-4 py-3 focus-within:ring-2 focus-within:ring-emerald-500">

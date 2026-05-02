@@ -47,6 +47,7 @@ type InlineEditApiResponse = {
 type UseInlineEditArgs = {
   text: string;
   setText: Dispatch<SetStateAction<string>>;
+  onAcceptChange?: (change: InlineChange, previousText: string, nextText: string) => void;
 };
 
 type ProposeArgs = {
@@ -72,7 +73,7 @@ function rangesOverlap(startA: number, endA: number, startB: number, endB: numbe
   return startA < endB && startB < endA;
 }
 
-export function useInlineEdit({ text, setText }: UseInlineEditArgs) {
+export function useInlineEdit({ text, setText, onAcceptChange }: UseInlineEditArgs) {
   const [changes, setChanges] = useState<InlineChange[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -235,6 +236,18 @@ export function useInlineEdit({ text, setText }: UseInlineEditArgs) {
         const nextText = `${currentText.slice(0, applyStart)}${target.afterText}${currentText.slice(applyEnd)}`;
         const delta = target.afterText.length - (applyEnd - applyStart);
 
+        onAcceptChange?.(
+          {
+            ...target,
+            start: applyStart,
+            end: applyStart + target.afterText.length,
+            status: 'accepted',
+            message: undefined,
+          },
+          currentText,
+          nextText,
+        );
+
         setChanges((previous) =>
           previous.map((entry) => {
             if (entry.id === target.id) {
@@ -268,7 +281,7 @@ export function useInlineEdit({ text, setText }: UseInlineEditArgs) {
         return nextText;
       });
     },
-    [changes, setText],
+    [changes, onAcceptChange, setText],
   );
 
   const denyChange = useCallback((changeId: string): void => {

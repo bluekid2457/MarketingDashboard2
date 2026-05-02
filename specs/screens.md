@@ -2,18 +2,26 @@
 
 This document describes the main screens required for the Marketing Dashboard, based on the feature list and user stories. Each screen includes its purpose, key components, and main interactions.
 
+> **Implementation status legend** (used in section headings below):
+> - **DONE** — UI is built, persists data, and at least one happy-path interaction runs end-to-end without an external API key.
+> - **PARTIAL** — Page exists and renders some real data, but one or more named components / actions are placeholders, dead, or silently fail without an AI provider key configured.
+> - **PLACEHOLDER** — Page exists but is mostly hardcoded labels / static markup with no functional behavior.
+>
+> Last verified end-to-end: 2026-05-01 via Playwright walkthrough with the project's QA test credentials, no AI API key configured, and the FastAPI backend down (missing `httpx`).
+
 ---
 
-## 1. Login & Authentication Screen (LoginScreen.jpg)
+## 1. Login & Authentication Screen (LoginScreen.jpg) — DONE
 **Purpose:** Secure user login, registration, and OAuth provider selection.
 **Components:**
+- Brand wordmark "Flowrite" rendered as the H1 on the left dark gradient panel and again as the H2 above the form on the right panel (replaces previous "Marketing Dashboard" copy)
 - Email/password fields
 - Client-side validation (email required + format, password required)
 - Inline user-safe error banner for auth failures
 - Loading state on submit with duplicate-submit prevention
 - OAuth provider buttons (currently visual placeholders)
 - Forgot password link
-- Registration link
+- Registration link (registration screen mirrors this layout and uses "Flowrite" / "Join Flowrite" copy)
 - Firebase Email/Password sign-in integration
 **Main Actions:**
 - Emit `login_attempt`, `login_success`, `login_failure` auth analytics events
@@ -22,39 +30,43 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
-## 2. Dashboard (Main Overview)
+## 2. Dashboard (Main Overview) — PARTIAL
 **Purpose:** Central hub showing content pipeline, stats, and quick actions.
 **Components:**
-- Content calendar (visual, clickable)
-- Idea backlog summary
-- Drafts/review queue
-- Recent analytics (engagement, performance)
-- Quick links to main features
+- Get started checklist (first-run onboarding, rendered as the FIRST card above the hero) — proactively tells a brand-new user the setup steps required before AI features will work. Three checklist items, each with ✅ green check or ⬜ empty box state computed live from real account state on mount: (1) "Set your AI provider key" — done when `getActiveAIKey()` returns a non-empty `apiKey` OR active provider is `ollama`; links to `/settings#ai-api-keys`. (2) "Fill in your Company Profile" — done when `loadCompanyProfile(uid)` returns a profile with non-empty `companyName`; links to `/settings#company-profile`. (3) "Add your first idea" — done when at least one document exists in `users/{uid}/ideas` (probed via a one-time `getDocs(query(collection, limit(1)))` so the whole list isn't loaded); links to `/ideas`. **Auto-hide:** when all three are done the entire card renders `null` and disappears — no manual dismiss button (the work is the dismissal). While checklist state is being computed a small `<Spinner size="sm" />` placeholder card is rendered so layout doesn't shift. Coexists with the global API-key warning banner in `(app)/layout.tsx` (the banner is reactive; the checklist is proactive).
+- Hero card with `Overview` eyebrow and H1 "Flowrite — your campaign command center" (replaces previous "Campaign Command Center" copy; aligns the in-app brand with the public landing page)
+- Content calendar (visual, clickable) — DONE (`scheduledPosts` + `adaptations` aggregated per day)
+- Idea backlog summary (top 3) — DONE
+- Storyboards / Review queue — DONE
+- Recent analytics — PARTIAL (real Posts-this-week and Ideas-waiting metrics; "Engagement rate" and "Best post type" tiles render an em dash value with an inline `Coming soon` badge and dimmed `opacity-75` styling instead of fake numbers, so it is obvious the metric is not computed yet)
+- All Adaptations list — DONE
+- Quick links — DONE
 **Main Actions:**
 - Navigate to other screens
 - View high-level stats
 
 ---
 
-## 3. Idea Input & Backlog Screen (IdeaScreen.png)
+## 3. Idea Input & Backlog Screen (IdeaScreen.png) — DONE
 **Purpose:** Submit new ideas, view and manage idea backlog.
+**Layout:** Single-column, no sidebar.
 **Components:**
-- Free-form idea input box
-- Optional dropdowns: tone, audience, format
-- List/table of ideas with relevance/timeliness scores. 
-- Sort/filter controls
-- Trend detection panel (shows trending topics) As well as ability to click into the articles that are relevant.
-- Competitor content panel (shows tracked competitor posts/gaps)
-- Selected-idea card with a Generate Angles button that routes to `/angles?ideaId=<ideaDocId>`
+- Header card: eyebrow `PIPELINE · IDEAS`, `Idea Backlog` title, subtitle, stats row (backlog count · strong-rated count · last scored).
+- `WorkflowStepper`.
+- Input card: single-line text input, pill selects for Tone / Audience / Format (`Any|Article|Post|Thread|Newsletter|Video Script`), "Score only" outline button (score without AI rationale), "Add & score" primary button (full AI flow).
+- Filter tabs row: `All`, `Strong`, `Moderate`, `Weak`, `No angles yet` — each shows count. Sort dropdown: `Score high → low`, `Newest`, `Oldest`, `Topic A-Z`.
+- Idea cards (replaces table): rounded-2xl white cards each with a color-coded 56×56 score circle (emerald/amber/rose/slate), tone+audience pills + date + live signals count, bold title, secondary topic line, and exactly ONE primary CTA button (dark-green filled `#1a7a5e`) determined by the furthest-along pipeline state for that idea: (a) when the idea has an adaptation in `adaptMap` → "Resume in Adapt →" routing to `/adapt/{ideaId}?angleId={angleId}`; (b) when the idea has a draft in `draftMap` but no adaptation → "Resume in Storyboard →" routing to `/storyboard/{ideaId}?angleId={angleId}`; (c) when neither exists → "Open angles →" routing through `openAnglesForIdea`. A "..." overflow dropdown holds Edit title and Delete plus state-dependent secondary entries: when adaptation exists, also "Open angles" and (if draft also exists) "Open Storyboard"; when only a draft exists, also "Go to Adapt". Dropdown items use `role="menuitem"`; the "..." trigger has `aria-haspopup="menu"` and `aria-expanded`.
+- Per-card AI rationale section (`AI RATIONALE` pill + reason text) and "HOW TO MAKE IT STRONGER" improvement bullets.
 **Main Actions:**
-- Submit/edit/delete ideas
-- Sort/filter backlog
-- View trends and competitor analysis
-- Trigger angles generation flow for the selected idea
+- Submit idea with full AI scoring or score-only path
+- Filter by score label or no-angles status
+- Sort backlog
+- Inline title edit / delete per card
+- Open angles workflow from any card
 
 ---
 
-## 4. AI Angle Selection & Outline Screen (AngleOutlineScreen.png)
+## 4. AI Angle Selection & Outline Screen (AngleOutlineScreen.png) — DONE (with AI key); deterministic fallback covers no-key case
 **Purpose:** Review AI-generated angles/outlines for an idea, select or edit before drafting.
 **Components:**
 - Query-based idea handoff via `ideaId`, with Firestore idea loading for signed-in user
@@ -73,136 +85,142 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
-## 5. Draft Editor Screen (DraftEditorScreen.jpg)
-**Purpose:** Full-featured editor for drafting, editing, and iterating content.
+## 5. Storyboard / Draft Editor Screen (DraftEditorScreen.jpg) — PARTIAL
+**Purpose:** Full-featured editor for drafting, editing, and iterating content. The new entry route is `/storyboard/[id]` (Screen 5b in `frontend.md`); the legacy `/drafts/[id]` editor is preserved for existing deep links and shares the same `users/{uid}/drafts/{ideaId}_{angleId}` document.
 **Components:**
-- Rich text editor
-- Mid-draft prompt bar (for iterative editing)
-- Tone/sentiment tuning controls
-- Readability/SEO scoring panel
-- Persona targeting options
-- A/B headline generator
-- Plagiarism/citation checker
-- Workflow breadcrumb that includes the next Multi-Channel Adaptation step
-- Save, **Adapt for Platforms**, submit for review, or schedule buttons
+- Textarea editor (DONE)
+- Inline AI editor (`InlineEditPanel`) with floating prompt + Keep/Undo proposal review (DONE with key)
+- Mid-draft AI chat (`DraftChatPanel`) — **silently fails when no AI provider key is configured** (no error toast; `Send to AI Chat` fires no `POST /api/drafts/chat`). Needs a visible no-key warning.
+- Tone tuning, readability dial, persona rewrite, A/B headlines, research, plagiarism — exposed via `AIToolbox`. Quick-action buttons (e.g. `Make it more concise`) **silently fail without an AI key** — needs a no-key warning surface.
+- Right-side AI change timeline (`AIEditTimeline`) with restore actions (DONE)
+- Citation/references panel (DONE; references parsed via `extractReferences()` from `frontend/src/lib/draftResearch.ts`)
+- Workflow breadcrumb that includes the next Multi-Channel Adaptation step (DONE)
+- Persistent sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" + "Step 3 of 6" pill) below the WorkflowStepper so the editing anchor carries through to Adapt and Publish
+- Save Storyboard, **Adapt for Platforms**, Submit for Review, Schedule Post buttons (DONE; Adapt button writes `localStorage['adapt_draft_context']` and routes to `/adapt/<ideaId>?angleId=<angleId>`)
 **Main Actions:**
 - Edit content
-- Tune tone/sentiment
+- Tune tone
 - Check SEO/readability
 - Save/submit/schedule
 - Store draft handoff context and route to `/adapt/<ideaId>?angleId=<angleId>` when Adapt for Platforms is clicked
 
 ---
 
-## 6. Multi-Channel Adaptation Screen (AdaptationScreen.jpg)
+## 6. Multi-Channel Adaptation Screen (AdaptationScreen.jpg) — PARTIAL
 **Purpose:** Adapt content for different platforms/formats.
+
+> **Known broken:** The `Continue and Generate` action on the platform-selection gate fires no network request when no AI provider key is configured — silent fail. `POST /api/drafts/adapt` does have a deterministic-fallback path but the client guard rejects the call before it reaches the route. Needs a visible no-key warning + a fallback adaptation path.
 **Components:**
 - Route/context validation against draft handoff data in `localStorage['adapt_draft_context']`
 - Firestore-backed per-platform adaptation document at `users/{uid}/adaptations/{ideaId}_{angleId}`
 - Platform selector for LinkedIn, X/Twitter, Medium, Newsletter, and Blog
 - Explicit Generate action for the active platform (calls AI adaptation endpoint)
 - Platform-specific editor where only the active tab's copy is edited
+- Persona rewrites apply directly to the active platform editor without creating extra persona tabs
+- Right-side AI change timeline for applied AI edits with restore actions
 - Prompt-template resolver under `src/lib/prompts/platforms` with concise per-platform rules (LinkedIn, X/Twitter, Medium, Newsletter, Blog)
 - Visible autosave/manual-save status for adaptation persistence
 - AI chat for editing/adapting the currently active platform version
+- AI tooling panel includes a Similar posts tab on Adapt that finds linked comparable posts, highlights competitor matches, and summarizes draft overlap and differentiation opportunities
 - Optimization tools for SEO Optimizer, AI Check, and Source Check with on-screen results; each tool analyzes the currently active platform copy, uses the configured AI provider when a valid key exists, and falls back to deterministic per-tool results when a non-Ollama key is missing
 - Live preview of the active platform copy plus per-platform word counts
 - Live trends and relevant articles panel sourced from `/api/trends`
+- Persistent sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" + "Step 4 of 6" pill) below the WorkflowStepper, mirroring Storyboard, so the editing anchor stays visible across the Storyboard → Adapt → Publish jump
 **Main Actions:**
 - Adapt content per platform
 - Generate platform-specific copy from the source draft using AI prompt rules
 - Save/revisit retained platform adaptations
 - Run analysis tools on the active platform copy
+- Restore previous AI-applied platform snapshots
 - Preview and approve
 
 ---
 
-## 7. Publishing & Scheduling Screen
+## 7. Publishing & Scheduling Screen — PARTIAL
 **Purpose:** Manage publishing and scheduling for each platform.
 **Components:**
-- Platform connection status (OAuth)
-- Schedule picker/calendar
-- Draft mode toggle
-- Visual content calendar
-- Gap detection alerts
-- Submit to search engines button
+- Platform connection status (OAuth) — Settings card; **requires the FastAPI backend** (`/api/v1/integrations/status`). Backend currently fails to start without `httpx` installed.
+- Schedule picker/calendar — DONE (writes `users/{uid}/scheduledPosts` and surfaces upcoming reminders in-page)
+- Draft mode toggle — TODO
+- Visual content calendar — DONE (Dashboard `Activity Calendar` aggregates `scheduledPosts` + `adaptations`)
+- Gap detection alerts — DONE
+- Submit to search engines button (IndexNow) — TODO
+- Per-card LinkedIn / X-Twitter publish — DONE as a manual handoff (clipboard + open compose URL); no direct posting to provider APIs
+- Persistent sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" + "Step 6 of 6" pill) at the top of the page when the user arrived from a single-adaptation Adapt → Publish jump (workflow context has `ideaId`); hidden in the multi-adaptation library view
 **Main Actions:**
 - Schedule or publish content
-- Connect/disconnect platforms
+- Connect/disconnect platforms (LinkedIn only; OAuth scaffold present, post action TODO)
 - View calendar gaps
 
 ---
 
-## 8. Review & Approval Workflow Screen
+## 8. Review & Approval Workflow Screen — PLACEHOLDER (queue only)
 **Purpose:** Manage draft approvals, version history, and comments.
 **Components:**
-- Draft queue/list sourced from the signed-in user's Firestore drafts (`users/{uid}/drafts`)
-- Inline editor for review
-- Version history panel
-- Approval chain controls
-- Comment/suggestion layer
-- Role-based access controls
+- Draft queue/list sourced from the signed-in user's Firestore drafts (`users/{uid}/drafts`) — DONE
+- Inline editor for review — PLACEHOLDER (rendered via `<PlaceholderCard>` with a `Coming soon` badge and an editor-silhouette decoration so it visually recedes from the working queue)
+- Version history panel — PLACEHOLDER (`<PlaceholderCard>` + `Coming soon` badge)
+- Approval chain controls — PLACEHOLDER (`<PlaceholderCard>` + `Coming soon` badge)
+- Comment/suggestion layer — PLACEHOLDER (`<PlaceholderCard>` + `Coming soon` badge)
+- Role-based access controls — PLACEHOLDER (`<PlaceholderCard>` + `Coming soon` badge)
 **Main Actions:**
-- Approve/reject drafts
-- Edit/comment
-- View/restore versions
-- Open any queue item to its corresponding draft detail route (`/drafts/<ideaId>?angleId=<angleId>`)
+- Approve/reject drafts (TODO)
+- Edit/comment (TODO)
+- View/restore versions (TODO)
+- Open any queue item to its corresponding draft detail route (`/drafts/<ideaId>?angleId=<angleId>` or `/storyboard/<ideaId>?angleId=<angleId>`) — DONE
 
 ---
 
-## 9. Analytics & Performance Screen
+## 9. Analytics & Performance Screen — PLACEHOLDER
 **Purpose:** Show engagement, performance, and predictive analytics.
-**Components:**
-- Engagement data charts (per platform)
-- Performance history timeline
-- Predictive scoring widgets
-- Copy intelligence insights
-- AI visibility tracking
-**Main Actions:**
-- View/filter analytics
-- Drill down by content, platform, or time
+**Components:** All placeholder — every section renders through `<PlaceholderCard>` so the title shows a `Coming soon` badge and the body shows a dimmed silhouette decoration (chart line / list rows). The previously hardcoded "Predicted reach: 42k | confidence 82%" line and the "outperform generic intros by 19%" factoid have been removed so the page no longer looks like real data.
+- Engagement data charts (per platform) — PLACEHOLDER (`<PlaceholderCard>` + chart silhouette)
+- Performance history timeline — PLACEHOLDER (`<PlaceholderCard>` + chart silhouette)
+- Predictive scoring widgets — PLACEHOLDER (`<PlaceholderCard>` + chart silhouette)
+- Copy intelligence insights — PLACEHOLDER (`<PlaceholderCard>` + list silhouette)
+- AI visibility tracking — PLACEHOLDER (`<PlaceholderCard>` + chart silhouette, full-width)
+**Main Actions:** None functional yet.
 
 ---
 
-## 10. Collaboration & Client Management Screen
+## 10. Collaboration & Client Management Screen — PLACEHOLDER
 **Purpose:** Manage team, clients, and agency workflows.
-**Components:**
-- Invite/manage users (editors, co-authors, clients)
-- Role-based access controls
-- Client brief intake forms
-- Project-level content calendars
-- White-label output toggles
-**Main Actions:**
-- Add/remove users
-- Fill out briefs
-- Switch between brands/clients
+**Components:** All sections render with the `Coming soon` badge and dimmed preview decoration. The Invite / Manage Users card keeps its custom layout (badge inline with the heading) and renders the `Invite teammate` button as a visibly disabled button (`disabled` + `aria-disabled="true"`, greyed-out styling) so the user immediately sees it is not interactive yet.
+- Invite/manage users (editors, co-authors, clients) — PLACEHOLDER (`Coming soon` badge inline + disabled `Invite teammate` button)
+- Role-based access controls — PLACEHOLDER (`<PlaceholderCard>` + list silhouette)
+- Client brief intake forms — PLACEHOLDER (`<PlaceholderCard>` + form silhouette)
+- Project-level content calendars — PLACEHOLDER (`<PlaceholderCard>` + chart silhouette)
+- White-label output toggles — PLACEHOLDER (`<PlaceholderCard>` + form silhouette, full-width)
+**Main Actions:** None functional yet.
 
 ---
 
-## 11. Settings & Compliance Screen
+## 11. Settings & Compliance Screen — PARTIAL
 **Purpose:** Configure brand voice, compliance, integrations, and governance.
 **Components:**
-- Brand voice profile editor
-- Compliance flag settings
-- Audit log viewer
-- Integration connectors (API, CRM, Google Docs, Slack, SSO)
-- Security settings
+- Company Profile (9 fields) with **Auto-fill from website** action backed by `POST /api/company/autofill` — DONE; persists to `users/{uid}.companyContext`
+- Brand voice profile editor — DONE; persists to the same `companyContext` object on the user doc
+- AI API Keys (OpenAI / Gemini / Claude / Ollama) plus optional research-source key (Exa) — DONE; persists to `localStorage['ai_config']`
+- Compliance flag settings — PLACEHOLDER (within the **Advanced (preview)** group; the section heading carries an inline `Coming soon` badge and the entire card body is dimmed via `opacity-75` + `aria-disabled="true"`)
+- Audit log viewer — PLACEHOLDER (same `Advanced (preview)` treatment — inline `Coming soon` badge on the `<h3>` plus dimmed card body)
+- Integration connectors (LinkedIn OAuth + provider registry display) — DONE *when the FastAPI backend is reachable*; currently broken in dev because `httpx` is missing from `backend/requirements.txt` and the backend will not start. Other providers from the registry (X, Medium, WordPress, Ghost, Substack, Instagram, Facebook) are informational cards only.
+- Security settings — PLACEHOLDER (within the **Advanced (preview)** group; inline `Coming soon` badge on the `<h3>` and dimmed card body. Sign-out lives in the separate **Session** group, which is not affected by this treatment)
 **Main Actions:**
-- Edit brand voice
-- Set compliance rules
-- Manage integrations
-- View audit logs
+- Edit Company Profile + Brand Voice
+- Set / save AI provider keys
+- Connect / disconnect LinkedIn (when backend is up)
+- Sign out
 
 ---
 
-## 12. Error & Notification Screens
-**Purpose:** Display errors, alerts, and system notifications.
+## 12. Error & Notification Screens — PARTIAL
+**Purpose:** Display errors, alerts, and system notifications. Notifications are derived from `users/{uid}/scheduledPosts` (see `automation.md`), so when no reminders are queued the page renders empty bucket headings.
 **Components:**
-- Error messages
-- Success/warning notifications
-- System alerts (e.g., compliance, scheduling, integration failures)
+- Error Messages card — DONE (signed-out / Firebase-unavailable / Firestore-load failure surfaces here)
+- Success / Warning Notifications card — DONE (lists scheduled posts due now within ±15 minutes)
+- System Alerts card — DONE (lists upcoming reminders for the next 24 hours and missed reminders)
 **Main Actions:**
-- Dismiss or act on notifications
+- Dismiss or act on notifications (TODO — no dismiss action wired yet)
 
 ---
 

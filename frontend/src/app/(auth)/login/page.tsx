@@ -15,6 +15,7 @@ import { useRouter } from 'next/navigation';
 import { Spinner } from '@/components/Spinner';
 import { trackAuthEvent } from '@/lib/analytics';
 import { getFirebaseAuth } from '@/lib/firebase';
+import { markSessionStart } from '@/lib/sessionExpiry';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -114,6 +115,7 @@ export default function LoginPage() {
 
     try {
       await signInWithEmailAndPassword(firebaseAuth, normalizedEmail, password);
+      markSessionStart();
       trackAuthEvent('login_success', { method: 'email_password' });
       router.replace('/dashboard');
     } catch (error) {
@@ -139,6 +141,7 @@ export default function LoginPage() {
     trackAuthEvent('login_attempt', { method: 'google' });
     try {
       await signInWithPopup(firebaseAuth, new GoogleAuthProvider());
+      markSessionStart();
       trackAuthEvent('login_success', { method: 'google' });
       router.replace('/dashboard');
     } catch (error) {
@@ -166,6 +169,7 @@ export default function LoginPage() {
     try {
       const provider = new OAuthProvider('linkedin.com');
       await signInWithPopup(firebaseAuth, provider);
+      markSessionStart();
       trackAuthEvent('login_success', { method: 'linkedin' });
       router.replace('/dashboard');
     } catch (error) {
@@ -201,7 +205,7 @@ export default function LoginPage() {
           <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-600 text-3xl font-extrabold text-white shadow-lg">
             M
           </div>
-          <h1 className="text-3xl font-extrabold leading-tight">Marketing Dashboard</h1>
+          <h1 className="text-3xl font-extrabold leading-tight">Flowrite</h1>
           <p className="mt-1 text-base font-semibold" style={{ color: '#7db8a8' }}>
             Welcome to your Hub!
           </p>
@@ -228,7 +232,7 @@ export default function LoginPage() {
             </div>
           ) : null}
 
-          <h2 className="text-2xl font-extrabold text-slate-900">Marketing Dashboard</h2>
+          <h2 className="text-2xl font-extrabold text-slate-900">Flowrite</h2>
           <p className="mt-1 text-sm text-slate-500">Sign in to your account</p>
 
           <form className="mt-6 space-y-3" onSubmit={handleSubmit}>
