@@ -22,6 +22,8 @@ The current automation surface is split across three layers:
 
 3. **Integration / OAuth scaffolding (FastAPI backend).** The `backend/app/routers/linkedin.py` and `backend/app/routers/integrations.py` routes implement a per-user LinkedIn OAuth flow that persists encrypted tokens in `integrationSecrets/{uid__provider}` and a public summary in `users/{uid}/integrationConnections/{provider}`. The token material is stored but is NOT yet wired into a publish action — direct API publishing remains TODO.
 
+4. **Repository PR version automation (GitHub Actions).** A GitHub Actions workflow (`.github/workflows/pr-version-bump.yml`) runs on `pull_request` `opened` and `reopened` events. For PRs created from branches in this repository (non-fork), it bumps the frontend package patch version by running `npm --prefix frontend version patch --no-git-tag-version`, then commits and pushes `frontend/package.json` and `frontend/package-lock.json` back to the PR branch.
+
 ---
 
 ## Automation Flows

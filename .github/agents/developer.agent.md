@@ -1,4 +1,4 @@
----
+﻿---
 description: Senior Developer implementing features and fixes for the marketing dashboard. When making any code changes, always check the relevant spec file (in specs/) and update it to reflect the new or changed behavior, requirements, or architecture. This ensures the specs stay in sync with the codebase. Use when a TIP is ready and implementation should begin.
 tools: [vscode, execute, read, agent, edit, search, web, 'firebase/*', browser, todo]
 handoffs:
@@ -50,6 +50,7 @@ Always write or edit files directly using available tools. Do not describe code 
 - Use React hooks (useState, useEffect) for state management; consider Context API or library for shared state.
 - Fetch data server-side (getServerSideProps, API routes) when possible to keep secrets safe.
 
+ - **Landing / Marketing Pages:** Public-facing landing and information pages live in `frontend/public/landingPages/` as standalone `.html` files (no React, no TSX). Do NOT create TSX page components for new marketing pages — add an `.html` file to that folder instead. The root route `/` is redirected to `/landingPages/index.html` by both `next.config.js` (async redirects rule) and the `src/app/page.tsx` server component. When editing landing page content, edit `frontend/public/landingPages/index.html` directly.
  - **Screen Implementation:** When creating or updating frontend screens, always use the images provided in `specs/screens/` (e.g., AdaptationScreen.jpg, AngleOutlineScreen.jpg, DraftEditorScreen.jpg, IdeaScreen.png, LoginScreen.jpg) as the visual reference. The UI should match the layout, structure, and key visual elements shown in these images as closely as possible unless otherwise specified in the spec or TIP.
 
 ### Database (Firebase NoSQL DB)

@@ -1,4 +1,4 @@
-# Screens Specification for Marketing Dashboard
+﻿# Screens Specification for Marketing Dashboard
 
 This document describes the main screens required for the Marketing Dashboard, based on the feature list and user stories. Each screen includes its purpose, key components, and main interactions.
 
@@ -10,6 +10,22 @@ This document describes the main screens required for the Marketing Dashboard, b
 > Last verified end-to-end: 2026-05-01 via Playwright walkthrough with the project's QA test credentials, no AI API key configured, and the FastAPI backend down (missing `httpx`).
 
 ---
+
+
+## 0. Public Landing Page (`/landingPages/index.html`) — DONE
+**Purpose:** Marketing landing page for unauthenticated visitors. No React, no auth, no Nav.
+**File:** `frontend/public/landingPages/index.html` — standalone HTML served as a static asset. The root route `/` redirects here via `next.config.js` and the `src/app/page.tsx` redirect fallback.
+**Components:**
+- Sticky dark-green navbar (`#14302a`) with "Flowrite" wordmark, Sign In link (`/login`), and "Get Started" CTA button (`/register`)
+- Hero section: diamond/rhombus SVG tile pattern overlaid on dark green gradient, badge label "AI-Powered Content Platform", H1 "Turn Ideas Into Content That Converts", subtext paragraph, two CTA buttons (Start Free Trial → `/register`, View Demo → `/dashboard`)
+- Three preview cards (auto-fit grid, min 280px): AI-Generated Content (mint gradient, 10x faster + 3000+ words stats), Multichannel Reach (mint gradient, hub-and-spoke channel diagram), Real-Time Performance (teal gradient, mock chart + traffic sources)
+- Feature grid (four cards): Campaign Ideas, AI-Powered Angles, Multi-platform Adapt, Analytics & Scheduling — each with a colored-square icon and description
+- Workflow steps row: numbered circles 1–4 connected by arrow SVGs, labels: Ideas, Angles, Draft & Adapt, Publish
+- CTA banner: diamond-pattern teal gradient, "Ready to transform your content workflow?" heading with sparkle SVG, "Get Started For Free" button → `/register`
+- Footer: dark green (`#14302a`), "Flowrite" wordmark, copyright 2026
+**Fonts:** Manrope (400–800) and Playfair Display (700–800) loaded from Google Fonts.
+**Styling:** All styles inline or in a `<style>` block. No Tailwind, no external CSS.
+**Links:** All hrefs point to Next.js routes (`/login`, `/register`, `/dashboard`) — routing is handled by Next.js.
 
 ## 1. Login & Authentication Screen (LoginScreen.jpg) — DONE
 **Purpose:** Secure user login, registration, and OAuth provider selection.
