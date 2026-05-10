@@ -101,6 +101,27 @@ export async function startLinkedInConnection(userId: string, redirectAfter = '/
   });
 }
 
+type LinkedInLoginStartResponse = {
+  provider: 'linkedin';
+  purpose: 'login';
+  authorizeUrl: string;
+  scopes: string[];
+};
+
+/**
+ * Begin the LinkedIn-based sign-in flow. Returns the LinkedIn authorization
+ * URL the caller should redirect the browser to. The backend's
+ * /auth/linkedin/login/callback handler will redirect back to /login with
+ * either `linkedinStatus=success&linkedinToken=<firebase-custom-token>` or
+ * `linkedinStatus=error&linkedinMessage=<reason>`.
+ */
+export async function startLinkedInLogin(): Promise<LinkedInLoginStartResponse> {
+  return requestJson<LinkedInLoginStartResponse>('/api/v1/auth/linkedin/login/start', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 export async function disconnectIntegration(provider: string, userId: string): Promise<IntegrationConnection> {
   const payload = await requestJson<DisconnectResponse>(`/api/v1/integrations/${provider}/disconnect`, {
     method: 'POST',

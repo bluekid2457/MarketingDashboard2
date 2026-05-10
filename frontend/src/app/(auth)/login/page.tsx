@@ -4,8 +4,8 @@ import { FormEvent, Suspense, useEffect, useState } from 'react';
 import { FirebaseError } from 'firebase/app';
 import {
   GoogleAuthProvider,
-  OAuthProvider,
   onAuthStateChanged,
+  signInWithCustomToken,
   signInWithEmailAndPassword,
   signInWithPopup,
 } from 'firebase/auth';
@@ -15,6 +15,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Spinner } from '@/components/Spinner';
 import { trackAuthEvent } from '@/lib/analytics';
 import { getFirebaseAuth } from '@/lib/firebase';
+import { startLinkedInLogin } from '@/lib/integrations';
 import { markSessionStart } from '@/lib/sessionExpiry';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -55,6 +56,9 @@ function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const accountDeleted = searchParams.get('accountDeleted') === '1';
+  const linkedinStatus = searchParams.get('linkedinStatus');
+  const linkedinToken = searchParams.get('linkedinToken');
+  const linkedinMessage = searchParams.get('linkedinMessage');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -72,6 +76,36 @@ function LoginContent() {
       return;
     }
 
+    // Handle return from the LinkedIn sign-in OAuth round-trip. On success
+    // the backend redirects us back here with a one-shot Firebase custom
+    // token in the URL; exchange it for a real Firebase session.
+    if (linkedinStatus === 'success' && linkedinToken) {
+      setSocialLoading('linkedin');
+      trackAuthEvent('login_attempt', { method: 'linkedin' });
+      signInWithCustomToken(firebaseAuth, linkedinToken)
+        .then(() => {
+          markSessionStart();
+          trackAuthEvent('login_success', { method: 'linkedin' });
+          router.replace('/dashboard');
+        })
+        .catch((error: unknown) => {
+          const message = getAuthErrorMessage(error);
+          if (message) setErrorMessage(message);
+          trackAuthEvent('login_failure', { method: 'linkedin' });
+          setSocialLoading(null);
+          setIsCheckingAuth(false);
+          // Drop the token from the URL so a refresh doesn't retry it.
+          router.replace('/login');
+        });
+      return;
+    }
+
+    if (linkedinStatus === 'error') {
+      setErrorMessage(linkedinMessage || 'LinkedIn sign-in was cancelled or failed.');
+      trackAuthEvent('login_failure', { method: 'linkedin' });
+      router.replace('/login');
+    }
+
     const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
       if (user) {
         router.replace('/dashboard');
@@ -81,7 +115,7 @@ function LoginContent() {
     });
 
     return unsubscribe;
-  }, [router]);
+  }, [linkedinMessage, linkedinStatus, linkedinToken, router]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -157,28 +191,27 @@ function LoginContent() {
 
   async function handleLinkedInSignIn() {
     if (socialLoading) return;
-    const firebaseAuth = getFirebaseAuth();
-    if (!firebaseAuth) {
-      setErrorMessage(
-        'Authentication is not configured. Add NEXT_PUBLIC_FIREBASE_* environment values.',
-      );
-      return;
-    }
 
     setSocialLoading('linkedin');
     setErrorMessage(null);
     trackAuthEvent('login_attempt', { method: 'linkedin' });
+
+    // LinkedIn is not a built-in Firebase Auth provider, so we delegate
+    // the OAuth dance to the FastAPI backend. The backend exchanges the
+    // LinkedIn code for an access token, looks up the user via
+    // /v2/userinfo, ensures a matching Firebase Auth user exists, and
+    // redirects back to this page with a Firebase custom token. The
+    // useEffect above completes the sign-in via signInWithCustomToken.
     try {
-      const provider = new OAuthProvider('linkedin.com');
-      await signInWithPopup(firebaseAuth, provider);
-      markSessionStart();
-      trackAuthEvent('login_success', { method: 'linkedin' });
-      router.replace('/dashboard');
+      const { authorizeUrl } = await startLinkedInLogin();
+      window.location.assign(authorizeUrl);
     } catch (error) {
-      const message = getAuthErrorMessage(error);
-      if (message) setErrorMessage(message);
+      const fallback =
+        error instanceof Error && error.message
+          ? error.message
+          : 'Unable to start LinkedIn sign-in. Please try again.';
+      setErrorMessage(fallback);
       trackAuthEvent('login_failure', { method: 'linkedin' });
-    } finally {
       setSocialLoading(null);
     }
   }

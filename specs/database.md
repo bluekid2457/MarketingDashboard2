@@ -13,7 +13,7 @@ This document defines the schema, relationships, and data requirements for the M
 - Adaptations are user-linked and isolated by path under `users/{uid}/adaptations/{adaptationId}`.
 - Scheduled publish reminders are user-linked under `users/{uid}/scheduledPosts/{scheduledPostId}`.
 - The signed-in user's company profile is stored on the user document (`users/{uid}`) under the `companyContext` field, mirrored to `localStorage['company_profile_cache']` for offline/cache reads.
-- Backend-only OAuth/integration storage lives under `integrationAuthStates/`, `users/{uid}/integrationConnections/{provider}`, and `integrationSecrets/{uid__provider}` (see backend.md for write semantics).
+- Backend-only OAuth/integration storage lives under `integrationAuthStates/`, `linkedinLoginStates/`, `users/{uid}/integrationConnections/{provider}`, and `integrationSecrets/{uid__provider}` (see backend.md for write semantics).
 - The current ideas page only reads and writes the authenticated user's idea documents. It does not read global shared idea documents.
 
 ## Entity Relationship Summary
@@ -25,7 +25,8 @@ This document defines the schema, relationships, and data requirements for the M
 - `users/{uid}/scheduledPosts/{scheduledPostId}` stores per-platform publish reminders surfaced on the dashboard calendar, publish queue, and notifications page.
 - `users/{uid}/integrationConnections/{provider}` stores per-provider browser-safe OAuth/integration connection summaries (written by the FastAPI backend).
 - `integrationSecrets/{uid__provider}` (top-level, backend-only) stores the encrypted token blob for that connection. Not readable by `users/{uid}/**` rules.
-- `integrationAuthStates/{sha256(state)}` (top-level, backend-only) stores short-lived OAuth state metadata for CSRF-safe LinkedIn callbacks.
+- `integrationAuthStates/{sha256(state)}` (top-level, backend-only) stores short-lived OAuth state metadata for CSRF-safe LinkedIn *connect-for-publishing* callbacks (already-signed-in user adding LinkedIn to Settings).
+- `linkedinLoginStates/{sha256(state)}` (top-level, backend-only) stores short-lived OAuth state metadata for CSRF-safe LinkedIn *sign-in* callbacks (anonymous visitor using "Sign in with LinkedIn"). Kept separate from `integrationAuthStates/` so a sign-in state cannot be replayed against the connect-for-publishing exchange and vice versa.
 - The idea document also stores `userId` so the document contents mirror the parent path and can be validated in security rules.
 
 ## Collection Definitions
@@ -225,7 +226,7 @@ This document defines the schema, relationships, and data requirements for the M
 - Not readable from the client. Written/read by the FastAPI backend service-account credentials only.
 
 ### `integrationAuthStates/{sha256(state)}` (backend-only, top-level)
-**Purpose:** Short-lived OAuth state metadata for CSRF-safe LinkedIn (and future provider) OAuth callbacks. Document ID is the SHA-256 of the opaque state token returned by `POST /api/v1/auth/linkedin/start`.
+**Purpose:** Short-lived OAuth state metadata for CSRF-safe LinkedIn *connect-for-publishing* callbacks. Document ID is the SHA-256 of the opaque state token returned by `POST /api/v1/auth/linkedin/start`.
 
 **Typical fields:**
 - `userId: string`
@@ -236,6 +237,17 @@ This document defines the schema, relationships, and data requirements for the M
 
 **Security:**
 - Not readable from the client. Single-use; consumed during the OAuth callback exchange.
+
+### `linkedinLoginStates/{sha256(state)}` (backend-only, top-level)
+**Purpose:** Short-lived OAuth state metadata for CSRF-safe LinkedIn *sign-in* callbacks. Document ID is the SHA-256 of the opaque state token returned by `POST /api/v1/auth/linkedin/login/start`. Kept separate from `integrationAuthStates/` so a sign-in state cannot be replayed against the connect-for-publishing exchange and vice versa.
+
+**Typical fields:**
+- `purpose: 'login'`
+- `createdAtMs: number`
+- `expiresAtMs: number` (creation time + 15 minutes)
+
+**Security:**
+- Not readable from the client. Single-use; consumed during the sign-in callback exchange. No `userId` is stored — the document exists only to prove that a specific LinkedIn `state` parameter was issued by this backend within the last 15 minutes.
 
 ## Constraints and Indexes
 - `topic` must be non-empty and is validated in the client before create.

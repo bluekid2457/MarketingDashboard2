@@ -114,6 +114,37 @@ There is currently no `/api/v1/*` proxy that forwards Next.js calls to FastAPI; 
   - Persists encrypted token material under backend-only `integrationSecrets/{uid__linkedin}`.
   - Redirects back to the frontend with `integration=linkedin` and a `status` query parameter.
 
+### `POST /api/v1/auth/linkedin/login/start`
+- **Location**: `backend/app/routers/linkedin.py`
+- **Purpose**: Begin a LinkedIn-based sign-in flow. Used by the "Sign in with LinkedIn" button on the public login page. Distinct from `/auth/linkedin/start`, which connects an already-authenticated user's LinkedIn account for posting.
+- **Request schema**: empty JSON body (`{}`).
+- **Behavior**:
+  - Validates LinkedIn client configuration.
+  - Generates a CSRF-safe OAuth state token.
+  - Stores `{ purpose: 'login', createdAtMs, expiresAtMs }` in Firestore under `linkedinLoginStates/{sha256(state)}` (separate from the connect-flow `integrationAuthStates` collection so the two cannot be replayed against each other).
+  - Returns a LinkedIn authorization URL requesting the sign-in subset of scopes (`openid profile email`) — deliberately excludes `w_member_social` since posting permissions are not needed to authenticate.
+- **Response shape**:
+  - `{ provider: 'linkedin', purpose: 'login', authorizeUrl: string, scopes: string[] }`
+
+### `GET /api/v1/auth/linkedin/login/callback`
+- **Location**: `backend/app/routers/linkedin.py`
+- **Purpose**: Complete a LinkedIn sign-in attempt and hand the browser a Firebase custom token.
+- **Query params**:
+  - `code?: string`
+  - `state?: string`
+  - `error?: string`
+  - `error_description?: string`
+- **Behavior**:
+  - Pops and validates the login-purpose state from `linkedinLoginStates/{sha256(state)}`.
+  - Exchanges the code for an access token.
+  - Calls `https://api.linkedin.com/v2/userinfo` to read the member's email, name, and picture.
+  - Finds the matching Firebase Auth user by email or creates a new one (`email_verified=True`), updating `display_name` and `photo_url` from LinkedIn when they differ.
+  - Mints a Firebase custom token via `firebase_admin.auth.create_custom_token(uid)`.
+  - Redirects to `${FRONTEND_URL}/login?linkedinStatus=success&linkedinToken=<custom_token>` on success or `linkedinStatus=error&linkedinMessage=<reason>` on failure. The frontend completes the sign-in via `signInWithCustomToken`.
+- **Notes**:
+  - LinkedIn must return an email — the LinkedIn app must request the `email` scope and the LinkedIn member must have a verified email on file.
+  - Requires the Firebase Admin SDK to be initialized with service-account credentials capable of minting custom tokens. The same credentials used for Firestore access are sufficient.
+
 ### `GET /api/v1/integrations/providers`
 - **Location**: `backend/app/routers/integrations.py`
 - **Purpose**: Return the provider registry used by the backend integration layer.

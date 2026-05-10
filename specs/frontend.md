@@ -348,10 +348,13 @@ Note: `(TODO)` marks features that are currently not functional and still need i
   3. Call Firebase Auth `signInWithEmailAndPassword`.
   4. On success, emit `login_success` and redirect to `/dashboard`.
   5. On failure, emit `login_failure` and display a user-safe inline message.
-- LinkedIn sign-in flow:
-  1. User clicks "Sign in with LinkedIn" on login.
-  2. App uses Firebase `OAuthProvider('linkedin.com')` with `signInWithPopup`.
-  3. On success, app redirects to `/dashboard`; on failure, app shows a safe error message.
+- LinkedIn sign-in flow (delegates to FastAPI backend because Firebase Auth does not natively support LinkedIn):
+  1. User clicks "Sign in with LinkedIn" on `/login`.
+  2. Page calls `startLinkedInLogin()` (`frontend/src/lib/integrations.ts`), which POSTs to `${NEXT_PUBLIC_API_URL}/api/v1/auth/linkedin/login/start` with an empty body and receives an `{ authorizeUrl }`.
+  3. Page redirects the browser to `authorizeUrl` (the LinkedIn OAuth consent screen).
+  4. LinkedIn redirects to the backend at `/api/v1/auth/linkedin/login/callback`, which exchanges the code, reads the user's email/name/picture from LinkedIn `/v2/userinfo`, finds-or-creates a Firebase Auth user, mints a Firebase custom token, and redirects the browser back to `/login?linkedinStatus=success&linkedinToken=<custom_token>` (or `linkedinStatus=error&linkedinMessage=<reason>` on failure).
+  5. The login page detects `linkedinStatus=success&linkedinToken` on mount, calls `signInWithCustomToken(auth, token)`, scrubs the token from the URL, and redirects to `/dashboard`. On `linkedinStatus=error` it shows the message inline.
+  6. Analytics events `login_attempt` / `login_success` / `login_failure` with `method: 'linkedin'` are emitted from both the start handler and the callback handler.
 - Registration submit flow:
   1. Validate email, password, and confirm password.
   2. Emit registration analytics events through `trackAuthEvent`.
@@ -654,7 +657,8 @@ Draft Queue behavior details:
 **Integration Client Library:** `src/lib/integrations.ts`
 - `getBackendApiBaseUrl()` â€” resolves `NEXT_PUBLIC_API_URL` and falls back to `http://localhost:8000` in development.
 - `listIntegrationConnections(userId)` â€” fetches provider connection summaries from the FastAPI backend.
-- `startLinkedInConnection(userId, redirectAfter?)` â€” requests the backend-generated LinkedIn OAuth URL.
+- `startLinkedInConnection(userId, redirectAfter?)` â€” requests the backend-generated LinkedIn OAuth URL for the *posting/integration* flow (already-authenticated user adding LinkedIn to Settings).
+- `startLinkedInLogin()` â€” requests the backend-generated LinkedIn OAuth URL for the *sign-in* flow. Returns `{ authorizeUrl, scopes }`; the caller redirects the browser to `authorizeUrl`. The backend redirects back to `/login` with either `linkedinStatus=success&linkedinToken=<firebase-custom-token>` or `linkedinStatus=error&linkedinMessage=<reason>`.
 - `disconnectIntegration(provider, userId)` â€” disconnects a saved provider connection.
 
 **AI Config Library:** `src/lib/aiConfig.ts`
