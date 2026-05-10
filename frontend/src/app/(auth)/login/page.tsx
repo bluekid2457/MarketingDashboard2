@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, Suspense, useEffect, useState } from 'react';
 import { FirebaseError } from 'firebase/app';
 import {
   GoogleAuthProvider,
@@ -51,7 +51,7 @@ function getAuthErrorMessage(error: unknown): string | null {
   return 'Unable to sign in right now. Please try again in a moment.';
 }
 
-export default function LoginPage() {
+function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const accountDeleted = searchParams.get('accountDeleted') === '1';
@@ -323,5 +323,13 @@ export default function LoginPage() {
         </section>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginContent />
+    </Suspense>
   );
 }

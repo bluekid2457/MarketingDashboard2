@@ -38,6 +38,10 @@ applications:
         baseDirectory: .next
         files:
           - "**/*"
+        secondaryArtifacts:
+        - baseDirectory: public
+          files:
+            - '**/*'
       cache:
         paths:
           - node_modules/**/*
