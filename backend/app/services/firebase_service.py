@@ -41,8 +41,9 @@ def get_firestore_client():
         if _firestore_client is not None:
             return _firestore_client
 
-        firebase_app = firebase_admin.get_app() if firebase_admin.get_apps() else None
-        if firebase_app is None:
+        try:
+            firebase_app = firebase_admin.get_app()
+        except ValueError:
             credential = _build_credentials()
             options = {}
             if settings.firebase_project_id:

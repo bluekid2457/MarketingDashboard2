@@ -10,7 +10,7 @@ import {
   signInWithPopup,
 } from 'firebase/auth';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 import { Spinner } from '@/components/Spinner';
 import { trackAuthEvent } from '@/lib/analytics';
@@ -53,6 +53,8 @@ function getAuthErrorMessage(error: unknown): string | null {
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const accountDeleted = searchParams.get('accountDeleted') === '1';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -217,6 +219,12 @@ export default function LoginPage() {
 
         {/* Right form panel */}
         <section className="bg-white px-8 py-10 sm:px-12" aria-label="Authentication form">
+          {accountDeleted ? (
+            <div className="mb-6 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+              <span>Your account and all associated data have been deleted.</span>
+            </div>
+          ) : null}
+
           {errorMessage ? (
             <div className="mb-6 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               <span className="text-base">✕</span>

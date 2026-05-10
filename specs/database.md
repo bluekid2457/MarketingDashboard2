@@ -251,6 +251,23 @@ This document defines the schema, relationships, and data requirements for the M
 - Cleanup is user-controlled: when at least one orphan storyboard or adaptation is detected, the dashboard renders an admin card under the Get-started checklist titled "Clean up orphans" with a primary "Delete N orphans" button. Clicking the button calls `deleteOrphans(...)` from `frontend/src/lib/orphans.ts`, which is idempotent (parallel writes that recreate the parent idea simply cause the orphan to reappear on next render) and which deletes only the listed `users/{uid}/drafts/{id}` and `users/{uid}/adaptations/{id}` docs. After deletion, the detector re-runs so the card auto-hides when zero orphans remain.
 - A missing angle (no entry in `users/{uid}/ideas/{ideaId}/workflow/angles`) does NOT mark a storyboard or adaptation as an orphan since angle workflow state can be regenerated.
 
+## Account deletion contract
+
+Account deletion is fully client-side. When the user confirms the modal in Settings, `deleteAccount()` in `frontend/src/lib/account.ts` runs in the browser using the Firebase Web SDK and permanently deletes the following, in this order:
+
+1. For each doc under `users/{uid}/ideas/{*}`, delete the per-idea `workflow/angles` doc (idempotent — `deleteDoc` on a missing doc is a no-op).
+2. Every doc under `users/{uid}/ideas/{*}`.
+3. Every doc under `users/{uid}/drafts/{*}`.
+4. Every doc under `users/{uid}/adaptations/{*}`.
+5. Every doc under `users/{uid}/scheduledPosts/{*}`.
+6. Every doc under `users/{uid}/integrationConnections/{*}`.
+7. `integrationSecrets/{uid}__{provider}` for each provider listed in step 6 (the connection summaries are the source of truth for which secrets exist; rules limit delete access to docs whose ID begins with `${uid}__`).
+8. Every `integrationAuthStates/*` doc whose `userId == uid` (best-effort; if the rules query fails the call swallows the error since these docs contain only a SHA-256 of the OAuth state plus timestamps and no PII).
+9. `users/{uid}` root doc (including the `companyContext` field).
+10. The Firebase Auth user itself, via `auth.currentUser.delete()`. If Firebase returns `auth/requires-recent-login`, the modal switches to a re-auth step (password input for email/password accounts, popup for Google) and resumes from this step on retry.
+
+Steps 1–9 are issued in `writeBatch` chunks of up to 400 ops to stay under the Firestore 500-op batch limit. Every step is idempotent so a partial failure is safe to retry.
+
 ## Migration Strategy
 - Enable Cloud Firestore in the Firebase project before using the ideas page.
 - Deploy Firestore security rules before production use so user A cannot read or write user B's idea documents.
@@ -260,7 +277,8 @@ This document defines the schema, relationships, and data requirements for the M
 - All client reads and writes must occur under `users/{request.auth.uid}/*`.
 - Unauthenticated clients must not be able to read or write user documents.
 - User A must not be able to read or write user B's subtree.
-- Top-level `integrationSecrets/` and `integrationAuthStates/` collections are NOT covered by the `users/{userId}/**` rule and remain unreadable from any authenticated client. They are accessed only via the FastAPI backend running with Firebase Admin credentials.
+- Top-level `integrationSecrets/` token contents are NEVER readable from the client — the encrypted blob can only be written by the FastAPI backend (running with Firebase Admin credentials). The signed-in user can `list` and `delete` their own secret docs (those whose ID is prefixed by `${request.auth.uid}__`) for self-service account deletion.
+- Top-level `integrationAuthStates/` are written/consumed only by the backend OAuth flow. The signed-in user can `list` (the query-as-a-whole rule) and `delete` rows whose `userId` field equals their `auth.uid`, for self-service account deletion. They cannot create or update these docs.
 
 **Deployed Firestore rules:**
 ```firestore
@@ -270,8 +288,20 @@ service cloud.firestore {
     match /users/{userId}/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
-    // integrationSecrets/* and integrationAuthStates/* intentionally omitted —
-    // backend-only access via Firebase Admin SDK, not reachable from clients.
+
+    // Account-deletion self-cleanup: signed-in users can list and delete the
+    // backend-only docs that belong to them, but cannot read contents (tokens
+    // are encrypted at rest by the backend) or write new entries.
+    match /integrationSecrets/{key} {
+      allow list, delete: if request.auth != null
+        && key.matches('^' + request.auth.uid + '__.*');
+    }
+
+    match /integrationAuthStates/{stateHash} {
+      allow list: if request.auth != null;
+      allow delete: if request.auth != null
+        && resource.data.userId == request.auth.uid;
+    }
   }
 }
 ```

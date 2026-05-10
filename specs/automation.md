@@ -77,6 +77,7 @@ The current automation surface is split across three layers:
 | Per-user connection status | `GET /api/v1/integrations/status` | `listIntegrationConnections(userId)` | DONE |
 | Manual token persistence (non-OAuth providers) | `POST /api/v1/integrations/{provider}/tokens` | TODO (no UI consumer yet) | BACKEND-ONLY |
 | Disconnect provider | `POST /api/v1/integrations/{provider}/disconnect` | `disconnectIntegration(provider, userId)` | DONE |
+| Self-service account deletion | (client-side only — Firebase Web SDK) | `deleteAccount()` (`src/lib/account.ts`) | DONE |
 | Direct LinkedIn publish | TODO | TODO | TODO |
 | X / Twitter / Medium / WordPress / Ghost / Substack OAuth | TODO | TODO | TODO |
 | Search engine submission (IndexNow) | TODO | TODO | TODO |
@@ -98,6 +99,7 @@ The current automation surface is split across three layers:
 - **Browser-driven publish:** Because publishing is a manual handoff (the user is in their own browser tab on linkedin.com / twitter.com), there is no automated traffic that would trigger anti-bot measures. The Marketing Dashboard server never impersonates the user against a third-party UI.
 - **Backend rate limiting:** Not yet implemented on `/api/v1/auth/*` or `/api/v1/integrations/*` routes. Future work: per-user rate limit and abuse detection on the OAuth start endpoint.
 - **AI provider calls:** All AI provider traffic is keyed off the user's own provider credentials configured in Settings; see backend.md for retry/timeout behavior on each `/api/drafts/*` and `/api/angles` route.
+- **Account deletion:** Settings contains a "Danger zone" group below Session with a Delete account button that opens a type-to-confirm modal. Confirming runs `deleteAccount()` in `frontend/src/lib/account.ts` entirely client-side via the Firebase Web SDK: it purges every `users/{uid}/**` subcollection, deletes the matching `integrationSecrets/{uid}__*` rows (rules grant the user delete access to docs whose ID is prefixed by their `uid`), best-effort deletes `integrationAuthStates` rows whose `userId` matches, deletes the `users/{uid}` root doc, then calls `auth.currentUser.delete()`. If Firebase requires recent re-authentication, the modal pivots to a re-auth step (password input for email/password, popup for Google) and resumes from `auth.currentUser.delete()`.
 
 ---
 

@@ -1,9 +1,4 @@
-
-Aju Kuriakose
-Thu, Apr 9, 3:07 PM
-to me
-
-Here is the full consolidated list across every category.
+# Feature List — Implementation Status
 
 > Last verified end-to-end: 2026-05-01 via Playwright walkthrough with the project's QA test credentials, no AI provider key configured, and the FastAPI backend down (missing `httpx` dependency in `backend/requirements.txt`).
 >

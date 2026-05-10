@@ -226,6 +226,7 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Set / save AI provider keys
 - Connect / disconnect LinkedIn (when backend is up)
 - Sign out
+- "Danger zone" group below Session contains a Delete account button that opens a type-to-confirm modal and permanently deletes the user client-side via the Firebase Web SDK (no backend involvement). On `auth/requires-recent-login`, the modal pivots to a re-auth step (password for email/password, popup for Google) before completing the deletion.
 
 ---
 

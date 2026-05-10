@@ -171,6 +171,10 @@ There is currently no `/api/v1/*` proxy that forwards Next.js calls to FastAPI; 
   - Deletes the backend-only secret document.
   - Marks the public connection summary as `status: 'disconnected'`.
 
+### Account deletion (no backend endpoint)
+- **Location**: client-side only — `frontend/src/lib/account.ts`.
+- **Why no backend**: Firebase Auth and the Firestore Web SDK already let the signed-in user delete their own data. Adding a backend endpoint would require running the FastAPI service with Firebase Admin service-account credentials, which is unnecessary for self-service deletion. Firestore security rules grant the user delete access to their own backend-only docs (`integrationSecrets/{uid}__*`, `integrationAuthStates` rows where `userId == auth.uid`) without exposing read/write access — see `firestore.rules` and `specs/database.md`.
+
 ---
 
 ## Next.js route handlers

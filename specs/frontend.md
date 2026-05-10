@@ -74,8 +74,10 @@ frontend/
   tailwind.config.ts        # content: ./src/**/*.{ts,tsx}
   postcss.config.js         # tailwindcss + autoprefixer
   public/
-    landingPages/       # Static HTML marketing pages (landing, info). Add future HTML pages here.
-      index.html          # Main public landing page (converted from TSX); hero, preview cards, feature grid, workflow steps, CTA banner
+    landingPages/       # Static HTML marketing pages (landing, info, legal). Add future HTML pages here.
+      index.html          # Main public landing page (converted from TSX); hero, preview cards, feature grid, workflow steps, CTA banner; footer links to privacy.html and terms.html
+      privacy.html        # Public Privacy Policy (static HTML, same Manrope/Playfair palette as index.html); covers data collection, AI/social-platform sub-processors, Fernet-encrypted OAuth tokens, retention, deletion, and contact (ak@sequoiasys.com)
+      terms.html          # Public Terms of Service (static HTML, same visual style); covers acceptable use, content ownership, third-party platform disclaimers, AI-output disclaimer, liability cap, and a [Jurisdiction] placeholder for legal counsel to confirm
   src/
     app/
       layout.tsx            # Root layout: metadata, globals.css, Manrope-first font stack on <body>
@@ -211,8 +213,10 @@ frontend/
 ### `frontend/public/landingPages/` — Static HTML marketing pages
 - All public-facing marketing and information pages are standalone HTML files in this directory.
 - Files are served by Next.js as static assets (no React, no TypeScript). Links within these pages use standard href paths that route to Next.js pages (e.g., `/login`, `/register`, `/dashboard`).
-- **index.html** — Main landing page. Faithful HTML conversion of the previous page.tsx. Includes: sticky dark-green navbar, diamond-pattern hero with CTA buttons, three preview cards, feature grid with SVG icons, four-step workflow row, CTA banner, and footer. Fonts loaded from Google Fonts (Manrope, Playfair Display). All styles are inline or in a `<style>` block.
-- To add a new marketing/info page (e.g., pricing, about), create `frontend/public/landingPages/<name>.html` — no Next.js route or TSX file needed.
+- **index.html** — Main landing page. Faithful HTML conversion of the previous page.tsx. Includes: sticky dark-green navbar, diamond-pattern hero with CTA buttons, three preview cards, feature grid with SVG icons, four-step workflow row, CTA banner, and footer. Fonts loaded from Google Fonts (Manrope, Playfair Display). All styles are inline or in a `<style>` block. Footer contains a horizontal link row to `/landingPages/privacy.html`, `/landingPages/terms.html`, and `/login` alongside the brand and `© 2026 Flowrite` copyright.
+- **privacy.html** — Public Privacy Policy. Self-contained static HTML with the same navbar, footer, and `#14302a`/`#0f766e`/`#f0f4f2` palette as `index.html`; body uses a max-width ~800px legal-document layout with h2/h3 hierarchy. Sections: Introduction, Information We Collect (account, OAuth tokens encrypted with Fernet, content, usage), How We Use Your Information, Third-Party Sharing & Sub-Processors (Google Firebase, OpenAI/Anthropic, LinkedIn/Meta/X), Data Retention & Deletion, Data Security, Your Rights, Cookies & Tracking (Firebase Auth session cookie only), Children's Privacy (under 16 not permitted), International Data Transfers, Changes, Contact (`ak@sequoiasys.com`). Effective date: May 7, 2026. Required for Meta App Review and other social-platform OAuth approvals.
+- **terms.html** — Public Terms of Service. Same visual style as `privacy.html`. Sections: Acceptance, Description of Service, Account Registration & Security, Acceptable Use, User-Generated Content & Ownership (user retains ownership; grants Flowrite a limited license to host/process/transmit solely to provide the service; Flowrite does not use Your Content to train third-party AI models), Third-Party Services Disclaimer, AI-Generated Content Disclaimer (user must review before publishing), Subscription & Billing (free during beta, paid plans introduced with notice), Termination, Limitation of Liability (as-is, liability capped at greater of fees paid in last 12 months or USD 100), Indemnification, Governing Law (placeholder `[Jurisdiction]` with HTML comment for legal counsel to confirm; working assumption is India), Changes, Miscellaneous, Contact. Effective date: May 7, 2026.
+- To add a new marketing/info page (e.g., pricing, about), create `frontend/public/landingPages/<name>.html` — no Next.js route or TSX file needed. Keep these as plain HTML so external auditors (Meta, X, LinkedIn) can fetch them without the Next dev server running.
 
 ### Route groups
 - **`(auth)`** â€” unauthenticated routes (no Nav sidebar). Currently contains `/login`.
@@ -320,6 +324,7 @@ Note: `(TODO)` marks features that are currently not functional and still need i
 8. OAuth provider buttons (Google + LinkedIn)
 9. Forgot password link (UI placeholder) (TODO)
 10. Create account link to `/register`
+- When the URL contains `?accountDeleted=1`, a one-time green success notice ("Your account and all associated data have been deleted.") renders above the existing error banner on the form panel. The notice does not auto-redirect â€” it disappears the next time the user navigates away from `/login`.
 
 ### Registration â€” Create Account (`/register`)
 **Route:** `src/app/(auth)/register/page.tsx`
@@ -629,6 +634,8 @@ Draft Queue behavior details:
    3. **Security Settings** (`#security-settings`) â€” placeholder.
 5. **Session**
    1. **Sign out** (`#session`) â€” Firebase `signOut` with spinner feedback while logout is in progress.
+6. **Danger zone**
+   1. **Delete account** (`#danger-zone`) â€” red button under a "Danger zone" group. Opens a `DeleteAccountModal` that requires the user to type `DELETE` (case-sensitive) before the Confirm button enables. Confirming runs `deleteAccount()` in `src/lib/account.ts` entirely client-side via the Firebase Web SDK: every doc under `users/{uid}/{ideas, drafts, adaptations, scheduledPosts, integrationConnections}` is purged (each idea's `workflow/angles` doc deleted first), the matching `integrationSecrets/{uid}__*` rows and the user's `integrationAuthStates` rows are deleted (rules permit self-cleanup), the `users/{uid}` root doc is deleted, and finally `auth.currentUser.delete()` is called. If Firebase returns `auth/requires-recent-login`, the modal pivots to a re-auth step (password input for `password` provider, popup for `google.com`) and resumes the deletion. On success the page clears `localStorage['company_profile_cache']` and `sessionStorage['ideas_sort_preference']`, signs out via Firebase (the auth user is already gone, so this just clears local state), calls `clearSessionMark()`, fires `trackAuthEvent('login_success', { action: 'account_deleted' })`, and redirects to `/login?accountDeleted=1`. On failure the modal stays open and the error message is rendered inline.
 
 **Integration Connectors behavior:**
 - Settings loads provider connection summaries for the signed-in Firebase user from the FastAPI backend via `GET {NEXT_PUBLIC_API_URL}/api/v1/integrations/status?userId={uid}`.

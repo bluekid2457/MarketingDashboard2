@@ -3,7 +3,7 @@
 ## Project
 
 AI-powered marketing content dashboard. Stack:
-- **Frontend**: Next.js 16 (App Router), TypeScript, Tailwind CSS, Zustand — runs on `localhost:3000`
+- **Frontend**: Next.js 15 (App Router), TypeScript, Tailwind CSS, Zustand — runs on `localhost:3000`
 - **Backend**: FastAPI (Python 3.10+), Firebase/Firestore — runs on `localhost:8000`
 - **Auth**: Firebase Auth (client-side), Firebase Admin (server-side)
 

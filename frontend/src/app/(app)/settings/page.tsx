@@ -15,7 +15,10 @@ import {
   saveCompanyProfile,
 } from '@/lib/companyProfile';
 import { disconnectIntegration, listIntegrationConnections, startLinkedInConnection, type IntegrationConnection } from '@/lib/integrations';
+import { deleteAccount, ReauthRequiredError, reauthenticateCurrentUser } from '@/lib/account';
+import type { DeleteAccountModalStep } from '@/components/DeleteAccountModal';
 import { ComingSoonBadge } from '@/components/ComingSoonBadge';
+import { DeleteAccountModal } from '@/components/DeleteAccountModal';
 import { Spinner } from '@/components/Spinner';
 
 type ConnectorNoticeTone = 'success' | 'error' | 'info';
@@ -29,10 +32,11 @@ type SettingsSectionId =
   | 'compliance-flags'
   | 'audit-log'
   | 'security-settings'
-  | 'session';
+  | 'session'
+  | 'danger-zone';
 
 type SettingsGroup = {
-  id: 'required' | 'brand' | 'integrations' | 'advanced' | 'session';
+  id: 'required' | 'brand' | 'integrations' | 'advanced' | 'session' | 'danger';
   label: string;
   description: string;
   items: { id: SettingsSectionId; label: string; needsAttention?: boolean }[];
@@ -107,6 +111,12 @@ export default function SettingsPage() {
   const [integrationNotice, setIntegrationNotice] = useState<string | null>(null);
   const [integrationNoticeTone, setIntegrationNoticeTone] = useState<ConnectorNoticeTone>('info');
   const [connectorBusyKey, setConnectorBusyKey] = useState<string | null>(null);
+
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteStep, setDeleteStep] = useState<DeleteAccountModalStep>('confirm');
+  const [deleteReauthProviderId, setDeleteReauthProviderId] = useState<string | null>(null);
 
   useEffect(() => {
     setAiConfig(loadAIConfig());
@@ -243,6 +253,12 @@ export default function SettingsPage() {
         label: 'Session',
         description: 'Session — sign out of the dashboard.',
         items: [{ id: 'session', label: 'Sign out' }],
+      },
+      {
+        id: 'danger',
+        label: 'Danger zone',
+        description: 'Danger zone — permanently delete your account and all associated data.',
+        items: [{ id: 'danger-zone', label: 'Delete account' }],
       },
     ],
     [aiKeyNeedsAttention, companyProfileNeedsAttention],
@@ -419,6 +435,82 @@ export default function SettingsPage() {
       trackAuthEvent("login_failure", { action: "logout", error: String(e) });
       setLoading(false);
     }
+  };
+
+  const finishAccountDeletion = async () => {
+    const auth = getFirebaseAuth();
+    if (!auth) return;
+    try {
+      localStorage.removeItem('company_profile_cache');
+    } catch {
+      // Ignore storage cleanup failures so deletion can still complete.
+    }
+    try {
+      sessionStorage.removeItem('ideas_sort_preference');
+    } catch {
+      // Ignore storage cleanup failures so deletion can still complete.
+    }
+    // The Firebase Auth user is already deleted by deleteAccount(). Calling
+    // signOut clears any local session state without producing user-facing noise.
+    try {
+      await signOut(auth);
+    } catch {
+      // Already signed out (auth user is gone) — safe to ignore.
+    }
+    clearSessionMark();
+    trackAuthEvent('login_success', { action: 'account_deleted' });
+    router.replace('/login?accountDeleted=1');
+  };
+
+  const handleDeleteAccount = async () => {
+    const auth = getFirebaseAuth();
+    if (!auth) {
+      setDeleteError('Firebase is not configured. Reload the page and try again.');
+      return;
+    }
+    if (!auth.currentUser) {
+      setDeleteError('Sign in before deleting your account.');
+      return;
+    }
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await deleteAccount();
+      await finishAccountDeletion();
+    } catch (err) {
+      if (err instanceof ReauthRequiredError) {
+        setDeleteReauthProviderId(err.providerId);
+        setDeleteStep('reauth');
+        setDeleteError(null);
+        setDeleteBusy(false);
+        return;
+      }
+      setDeleteError(err instanceof Error ? err.message : 'Unable to delete your account right now.');
+      setDeleteBusy(false);
+    }
+  };
+
+  const handleReauthAndRetryDeletion = async (password: string | null) => {
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await reauthenticateCurrentUser(password ?? undefined);
+      await deleteAccount();
+      await finishAccountDeletion();
+    } catch (err) {
+      setDeleteError(
+        err instanceof Error ? err.message : 'Unable to re-authenticate and finish deletion.',
+      );
+      setDeleteBusy(false);
+    }
+  };
+
+  const closeDeleteModal = () => {
+    if (deleteBusy) return;
+    setDeleteOpen(false);
+    setDeleteError(null);
+    setDeleteStep('confirm');
+    setDeleteReauthProviderId(null);
   };
 
   return (
@@ -1050,8 +1142,54 @@ export default function SettingsPage() {
               {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
             </section>
           </section>
+
+          {/* GROUP 6 — Danger zone */}
+          <section aria-labelledby="group-danger" className="space-y-4">
+            <header>
+              <h2 id="group-danger" className="text-xs font-bold uppercase tracking-[0.2em] text-red-700">
+                Danger zone
+              </h2>
+              <p className="mt-1 muted-copy">
+                Danger zone — permanently delete your account and all associated data.
+              </p>
+            </header>
+
+            <section
+              id="danger-zone"
+              className="surface-card p-6 scroll-mt-24 border-red-200 flex flex-col items-start"
+            >
+              <h3 className="section-title">Delete account</h3>
+              <p className="mt-2 muted-copy">
+                Permanently delete your account and every piece of data we hold for you — ideas, drafts,
+                adaptations, scheduled posts, integration connections, your company profile, and your
+                encrypted OAuth tokens. This cannot be undone.
+              </p>
+              <button
+                className="mt-3 rounded-lg bg-red-600 px-5 py-2 text-white font-semibold hover:bg-red-700 disabled:opacity-60"
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeleteStep('confirm');
+                  setDeleteReauthProviderId(null);
+                  setDeleteOpen(true);
+                }}
+                disabled={deleteBusy}
+              >
+                Delete account
+              </button>
+            </section>
+          </section>
         </div>
       </div>
+      <DeleteAccountModal
+        open={deleteOpen}
+        step={deleteStep}
+        busy={deleteBusy}
+        error={deleteError}
+        reauthProviderId={deleteReauthProviderId}
+        onCancel={closeDeleteModal}
+        onConfirm={() => void handleDeleteAccount()}
+        onReauthenticateAndRetry={(password) => void handleReauthAndRetryDeletion(password)}
+      />
     </div>
   );
 }

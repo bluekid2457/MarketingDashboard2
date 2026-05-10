@@ -12,6 +12,7 @@ This file defines which spec in `specs/` owns each part of the system so agents 
 
 | File | Primary Owner For | Current Coverage |
 |---|---|---|
+| `architecture.md` | Cross-layer architecture overview — runtime layers, route inventories, data flow, deployment | High-level synthesis of the other specs; the file to read first when starting cold |
 | `backend.md` | FastAPI backend behavior, backend environment variables, app startup/config, CORS, API endpoints, backend security expectations | Currently documents the FastAPI stack, folder structure, env vars, `GET /health`, CORS, local run steps, and backend security expectations |
 | `frontend.md` | Next.js frontend routes, shared UI structure, auth flow, screen behavior, client/server frontend integrations, frontend env usage, Next.js API routes | Currently the most detailed spec: covers app structure, route groups, shared components, login/register flow, all 12 app screens, AI settings flow, dynamic route pattern, `/api/angles`, `/api/drafts`, `/api/trends`, debugging notes, and frontend security |
 | `database.md` | Firestore collections, document shape, relationships, indexes, migration strategy, Firestore rules, and data integrity requirements | Currently focused on `users/{uid}/ideas/{ideaId}`, including required fields, query pattern, security rules, and testing requirements |
@@ -65,6 +66,7 @@ Use `screens.md` together with these images when implementing or reviewing page 
 
 | If you are working on | Read first |
 |---|---|
+| Cross-layer overview / starting cold | `architecture.md` |
 | FastAPI app behavior or backend config | `backend.md` |
 | Login, dashboard, ideas, angles, drafts, app layout, or frontend API routes | `frontend.md` |
 | Firestore data shape or rules | `database.md` |

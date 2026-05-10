@@ -34,12 +34,6 @@ Use only when all TIP acceptance criteria pass and no blocking issues remain. In
 - What was validated
 - Any optional follow-ups or tech debt notes
 
-## Verdict Contract
-Return exactly one of these outcomes:
-
-### APPROVED
-Use only when all TIP acceptance criteria pass and no blocking issues remain.
-
 ### NEEDS WORK
 Return:
 - A one-line reason.

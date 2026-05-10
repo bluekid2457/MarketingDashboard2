@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Flowrite</title>
+  <meta name="description" content="Flowrite Privacy Policy — what data we collect, how we use it, third-party sub-processors, retention, and your rights." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Manrope', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; background: #f0f4f2; min-height: 100vh; color: #10233d; }
+    a { text-decoration: none; color: #0f766e; }
+    a:hover { text-decoration: underline; }
+    .serif { font-family: 'Playfair Display', 'Manrope', serif; }
+    .legal-body { max-width: 800px; margin: 0 auto; padding: 3rem 1.5rem 4rem; }
+    .legal-body h1 { font-family: 'Playfair Display', 'Manrope', serif; font-size: clamp(2rem, 4vw, 2.75rem); font-weight: 800; letter-spacing: -0.02em; color: #10233d; margin-bottom: 0.5rem; line-height: 1.15; }
+    .legal-body .meta { color: #607086; font-size: 0.9rem; margin-bottom: 2.5rem; }
+    .legal-body h2 { font-family: 'Playfair Display', 'Manrope', serif; font-size: 1.5rem; font-weight: 800; color: #14302a; margin-top: 2.5rem; margin-bottom: 0.85rem; letter-spacing: -0.015em; }
+    .legal-body h3 { font-size: 1.05rem; font-weight: 700; color: #14302a; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+    .legal-body p { color: #34455e; font-size: 1rem; line-height: 1.75; margin-bottom: 1rem; }
+    .legal-body ul { color: #34455e; font-size: 1rem; line-height: 1.75; margin: 0 0 1rem 1.5rem; }
+    .legal-body li { margin-bottom: 0.4rem; }
+    .legal-body strong { color: #14302a; font-weight: 700; }
+    .legal-body .callout { background: #ffffff; border: 1px solid #d8f3ef; border-left: 4px solid #0f766e; border-radius: 8px; padding: 1rem 1.25rem; margin: 1.25rem 0; }
+  </style>
+</head>
+<body>
+
+  <!-- Sticky Navbar -->
+  <nav style="background: #14302a; position: sticky; top: 0; z-index: 50;">
+    <div style="max-width: 1200px; margin: 0 auto; padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; height: 64px;">
+      <a href="/landingPages/index.html" style="color: #ffffff; font-weight: 800; font-size: 1.25rem; letter-spacing: -0.02em;">Flowrite</a>
+      <div style="display: flex; align-items: center; gap: 1.5rem;">
+        <a href="/login" style="color: #d8f3ef; font-weight: 500; font-size: 0.9rem;">Sign In</a>
+        <a href="/register" style="background: #0f766e; color: #ffffff; font-weight: 600; font-size: 0.9rem; padding: 0.5rem 1.25rem; border-radius: 8px;">Get Started</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Body -->
+  <main class="legal-body">
+    <h1 class="serif">Privacy Policy</h1>
+    <p class="meta">Last updated: May 7, 2026 &middot; Effective date: May 7, 2026</p>
+
+    <h2>1. Introduction</h2>
+    <p>
+      Flowrite ("Flowrite", "we", "us", or "our") is an AI-powered marketing content platform that helps users brainstorm campaign ideas, generate platform-specific drafts, and schedule posts to their connected social networks. This Privacy Policy explains what information we collect when you use Flowrite, how we use it, who we share it with, and the choices you have. By using Flowrite, you agree to the practices described here.
+    </p>
+    <p>
+      If you have any questions about this policy, please contact us at <a href="mailto:ak@sequoiasys.com">ak@sequoiasys.com</a>.
+    </p>
+
+    <h2>2. Information We Collect</h2>
+
+    <h3>2.1 Account information</h3>
+    <p>
+      When you create a Flowrite account, we collect your name, email address, and a password. Authentication is handled through Firebase Authentication; we do not store your password in plaintext on our servers.
+    </p>
+
+    <h3>2.2 OAuth tokens for connected social platforms</h3>
+    <p>
+      When you connect a third-party social account (LinkedIn, Facebook, Instagram, X) so that Flowrite can publish on your behalf, the relevant platform issues access and refresh tokens to us. These tokens are encrypted at rest using Fernet (AES-128 in CBC mode with HMAC) before being written to our database. We never see, store, or transmit your social-platform passwords.
+    </p>
+
+    <h3>2.3 Content you create</h3>
+    <p>
+      Flowrite stores the content you produce in the product, including campaign ideas, angle outlines, draft posts, scheduled posts, and any associated metadata such as target platform, scheduled time, and tags.
+    </p>
+
+    <h3>2.4 Usage data</h3>
+    <p>
+      We collect basic usage and diagnostic information so that we can keep the service reliable. This includes server logs (request timestamps, route paths, status codes), error reports, and aggregate metrics about feature use.
+    </p>
+
+    <h2>3. How We Use Your Information</h2>
+    <ul>
+      <li>To provide, operate, and maintain the Flowrite service.</li>
+      <li>To generate AI-assisted content on your behalf using your prompts and inputs.</li>
+      <li>To schedule and publish posts to your connected social accounts using the OAuth tokens you have authorized.</li>
+      <li>To send you transactional messages (account confirmations, security notices, service updates).</li>
+      <li>To monitor service health, debug errors, and improve the product.</li>
+      <li>To comply with legal obligations and enforce our Terms of Service.</li>
+    </ul>
+    <p>
+      We do not sell your personal information. We do not use your private content (drafts, ideas, scheduled posts) to train third-party AI models.
+    </p>
+
+    <h2>4. Third-Party Sharing &amp; Sub-Processors</h2>
+    <p>
+      Flowrite relies on a small set of trusted sub-processors to deliver the service. We share only the data each provider needs for its specific function.
+    </p>
+
+    <h3>4.1 Google Firebase</h3>
+    <p>
+      We use Google Firebase for authentication (Firebase Auth) and database hosting (Firestore). Account credentials, encrypted OAuth tokens, and user content are stored in Firestore. Firebase processes this data on our behalf as a sub-processor.
+    </p>
+
+    <h3>4.2 AI providers (OpenAI, Anthropic)</h3>
+    <p>
+      When you ask Flowrite to generate or rewrite content, we send your prompt and any relevant input you provided (such as a draft or campaign brief) to a large-language-model provider such as OpenAI or Anthropic. These providers process the request and return the generated text. The content you submit for AI generation may be transmitted to these providers; please do not submit information you would not want sent to a third-party model API.
+    </p>
+
+    <h3>4.3 Social platforms (LinkedIn, Meta/Facebook/Instagram, X)</h3>
+    <p>
+      When you publish a post through Flowrite, we use your authorized OAuth token to call the relevant social platform's API and submit the post on your behalf. We share only what each platform's API requires for the specific publishing action you requested (for example, the post body, attached media, and target page or profile).
+    </p>
+
+    <h3>4.4 Legal disclosure</h3>
+    <p>
+      We may disclose information if required by law, a valid court order, or a government request, or if we believe in good faith that disclosure is necessary to protect our rights, your safety, or the safety of others.
+    </p>
+
+    <h2>5. Data Retention &amp; Deletion</h2>
+    <ul>
+      <li><strong>Account data</strong> is retained for as long as your account is active.</li>
+      <li><strong>OAuth tokens</strong> for connected social platforms are deleted from our database immediately when you disconnect that integration from your settings page or when you delete your account.</li>
+      <li><strong>Scheduled posts</strong> are purged shortly after their publish window has passed; published-post records may be retained for analytics and audit purposes.</li>
+      <li><strong>Server logs</strong> are retained for a limited diagnostic window (typically up to 90 days) and then rotated out.</li>
+    </ul>
+    <div class="callout">
+      <p style="margin: 0;">
+        <strong>Right to deletion.</strong> You can request deletion of your account and associated data at any time. Use the in-app data deletion controls in your settings page, or email <a href="mailto:ak@sequoiasys.com">ak@sequoiasys.com</a> with the subject line "Data Deletion Request" from the email address on your Flowrite account.
+      </p>
+    </div>
+
+    <h2>6. Data Security</h2>
+    <ul>
+      <li><strong>Encryption at rest</strong> for all OAuth secrets, using Fernet symmetric encryption with keys held only by our backend service.</li>
+      <li><strong>Encryption in transit</strong> via HTTPS/TLS for every request between your browser, our backend, and our sub-processors.</li>
+      <li><strong>Least-privilege access controls</strong> on Firestore through security rules so that one user's data cannot be read or written by another user's session.</li>
+      <li><strong>Operational hygiene</strong> such as secret rotation, restricted production access, and logging of administrative actions.</li>
+    </ul>
+    <p>
+      No system is perfectly secure. If we ever become aware of a breach affecting your data, we will notify you in a manner consistent with applicable law.
+    </p>
+
+    <h2>7. Your Rights</h2>
+    <p>
+      Depending on where you live, you may have the right to access, correct, export, or delete the personal information we hold about you, and to withdraw consent for specific processing activities. You can exercise these rights directly inside Flowrite:
+    </p>
+    <ul>
+      <li>View and edit your profile and account email from the settings page.</li>
+      <li>Disconnect any connected social platform, which immediately deletes the associated OAuth tokens.</li>
+      <li>Request full account deletion (see Section 5).</li>
+    </ul>
+    <p>
+      For any rights request you cannot complete inside the product, email <a href="mailto:ak@sequoiasys.com">ak@sequoiasys.com</a>.
+    </p>
+
+    <h2>8. Cookies &amp; Tracking</h2>
+    <p>
+      Flowrite uses a minimal set of cookies. The most important is the Firebase Authentication session cookie, which keeps you signed in between visits. We do not use third-party advertising cookies, and we do not run cross-site tracking pixels on the dashboard.
+    </p>
+
+    <h2>9. Children's Privacy</h2>
+    <p>
+      Flowrite is not directed at children under the age of 16, and we do not knowingly collect personal information from anyone under 16. If you believe a child has provided us with personal information, please contact <a href="mailto:ak@sequoiasys.com">ak@sequoiasys.com</a> and we will delete it.
+    </p>
+
+    <h2>10. International Data Transfers</h2>
+    <p>
+      Our infrastructure providers operate data centers in multiple regions. By using Flowrite, you understand that your information may be processed and stored in countries other than the one in which you reside, which may have different data-protection rules. Where required by law, we rely on appropriate transfer mechanisms.
+    </p>
+
+    <h2>11. Changes to This Policy</h2>
+    <p>
+      We may update this Privacy Policy from time to time as the product evolves or as the law requires. When we make material changes, we will post an updated effective date at the top of this page and, for significant changes, notify you via the dashboard or by email. Your continued use of Flowrite after the effective date constitutes acceptance of the updated policy.
+    </p>
+
+    <h2>12. Contact</h2>
+    <p>
+      Questions, concerns, or requests can be sent to <a href="mailto:ak@sequoiasys.com">ak@sequoiasys.com</a>.
+    </p>
+  </main>
+
+  <!-- Footer -->
+  <footer style="background: #14302a; padding: 2.5rem 1.5rem;">
+    <div style="max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; gap: 0.85rem; text-align: center;">
+      <span style="color: #ffffff; font-weight: 800; font-size: 1.1rem;">Flowrite</span>
+      <div style="display: flex; flex-wrap: wrap; gap: 1.25rem; justify-content: center;">
+        <a href="/landingPages/index.html" style="color: #d8f3ef; font-size: 0.85rem; font-weight: 500;">Home</a>
+        <a href="/landingPages/privacy.html" style="color: #d8f3ef; font-size: 0.85rem; font-weight: 500;">Privacy Policy</a>
+        <a href="/landingPages/terms.html" style="color: #d8f3ef; font-size: 0.85rem; font-weight: 500;">Terms of Service</a>
+        <a href="/login" style="color: #d8f3ef; font-size: 0.85rem; font-weight: 500;">Sign In</a>
+      </div>
+      <p style="color: #607086; font-size: 0.85rem; margin: 0;">&copy; 2026 Flowrite. All rights reserved.</p>
+    </div>
+  </footer>
+
+</body>
+</html>

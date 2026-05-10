@@ -4,5 +4,19 @@ service cloud.firestore {
     match /users/{userId}/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
+
+    // Account-deletion self-cleanup: a signed-in user may LIST and DELETE
+    // backend-only docs that belong to them, but cannot READ contents (the
+    // tokens are encrypted at rest by the backend) or WRITE/CREATE new ones.
+    match /integrationSecrets/{key} {
+      allow list, delete: if request.auth != null
+        && key.matches('^' + request.auth.uid + '__.*');
+    }
+
+    match /integrationAuthStates/{stateHash} {
+      allow list: if request.auth != null;
+      allow delete: if request.auth != null
+        && resource.data.userId == request.auth.uid;
+    }
   }
 }

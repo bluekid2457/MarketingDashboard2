@@ -9,7 +9,7 @@ Start here for overall repo context before diving into a specific agent file:
 | Document | Purpose |
 |---|---|
 | `README.md` | Project entry point, setup, stack, environment variables |
-| `architecture.md` | Runtime architecture, API map, data model, security expectations |
+| `specs/architecture.md` | Runtime architecture, API map, data model, security expectations |
 | `user_stories.md` | Product intent, personas, acceptance criteria |
 | `specs/backend.md` | Backend behavior and API contract |
 | `specs/frontend.md` | Frontend routes, screens, and UI behavior |
@@ -62,7 +62,6 @@ Next Handoff:
 | Architect | `.github/agents/architect.agent.md` | A GitHub Issue needs an implementation-ready TIP | No | Technical Implementation Plan covering relevant layers, risks, and acceptance criteria | `developer` |
 | Developer | `.github/agents/developer.agent.md` | A TIP is approved for implementation | Yes | Code changes plus mandatory matching updates in `specs/` | `architect` review |
 | Tester Reviewer | `.github/agents/tester_reviewer.agent.md` | A developer pass needs validation against the TIP | No | Strict `APPROVED` or `NEEDS WORK` verdict with concrete issues | back to `developer` when needed |
-| Auto_Loop | `.github/agents/auto_loop.agent.md` | You want test-driven autonomous completion using Playwright findings | No | Repeating loop: Playwright gap detection -> orchestrator execution -> Playwright re-test until stable | none; returns final verdict |
 | Feature Loop Manager | `.github/agents/feature-loop.agent.md` | Fire-and-forget execution of one feature or one TIP | No | Closed-loop orchestration across architect, developer, and tester until approved or blocked | none; returns final verdict |
 | Orchestrator | `.github/agents/orchestrator.agent.md` | Batch execution across open feature issues | No | Multi-issue coordination, spec TODO cleanup, and issue-level completion tracking | `feature-loop` |
 | Reviewer | `.github/agents/reviewer.agent.md` | Ad-hoc or periodic codebase audit | No | Prioritized review report and general improvement plan | `planner` |
@@ -78,7 +77,7 @@ Next Handoff:
 | "Turn this issue into an implementation blueprint" | `architect` | Produces the TIP the developer will execute |
 | "Implement this TIP" | `developer` | Only agent allowed to make implementation changes |
 | "Build this feature end-to-end without checkpoints" | `feature-loop` | Runs architect/developer/tester in an autonomous loop |
-| "Test workflow gaps and auto-implement fixes" | `Auto_Loop` | Uses Playwright to find missing behavior, calls orchestrator to implement, then re-tests |
+| "Test workflow gaps and auto-implement fixes" | `/auto-loop` skill | Uses Playwright to find missing behavior and developer to implement fixes, then re-tests |
 | "Process all open feature issues" | `orchestrator` | Coordinates issue-by-issue execution across the backlog |
 | "Review the codebase and propose improvements" | `reviewer` | Produces a prioritized audit and improvement plan |
 | "There is a bug, diagnose and fix it" | `debugger` | Handles interactive troubleshooting and small fixes |
@@ -102,11 +101,10 @@ Single-feature autonomous path
      -> repeat until APPROVED or BLOCKED
 
 Playwright-driven autonomous completion path
-  -> Auto_Loop
-     -> Playwright Tester (discover failures)
-     -> orchestrator (implement issue list)
-     -> Playwright Tester (verify and discover remaining)
-     -> repeat until APPROVED or BLOCKED
+  -> /auto-loop skill
+     -> developer (implement)
+     -> playwright-tester (verify)
+     -> repeat until target behavior is observed
 
 Multi-issue autonomous path
   -> orchestrator
@@ -121,7 +119,6 @@ Multi-issue autonomous path
 | `architect` | Must not write implementation code; only produce implementation-ready TIP sections relevant to the issue |
 | `developer` | Must read before editing, implement directly in files, and update the matching `specs/` file for every code change |
 | `tester_reviewer` | Must validate only against the TIP and return a strict verdict, not new requirements |
-| `Auto_Loop` | Must begin with Playwright validation, create test-derived issue list only, call orchestrator for implementation, then re-test until stable or blocked |
 | `feature-loop` | Must keep looping without asking for approval until tester approves or loop guardrails stop execution |
 | `orchestrator` | Must preserve Planner ordering, keep `specs/*.md` TODO markers accurate, and log feature outcomes |
 | `reviewer` | Must produce evidence-based findings only, grouped into a review report and general improvement plan |
@@ -142,6 +139,6 @@ Multi-issue autonomous path
 
 1. Read this file first.
 2. Read the specific `.agent.md` file for the role you are about to use.
-3. Read the relevant `specs/` file and `architecture.md` before proposing implementation details.
+3. Read the relevant `specs/` file and `specs/architecture.md` before proposing implementation details.
 4. If code must change, route through `developer` unless you are explicitly using `debugger` for a small bug fix.
 5. Treat `specs/` as the canonical mirror of implemented behavior and keep it current.

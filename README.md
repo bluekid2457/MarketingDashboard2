@@ -1,12 +1,12 @@
 # Marketing Dashboard
 
-An AI-powered marketing content management dashboard built with **Next.js 14**, **FastAPI**, and **Firebase**.
+An AI-powered marketing content management dashboard built with **Next.js 15**, **FastAPI**, and **Firebase**.
 
 ## Tech Stack
 
 | Layer     | Technology                          |
 |-----------|--------------------------------------|
-| Frontend  | Next.js 14, React 18, TypeScript, Tailwind CSS, Zustand |
+| Frontend  | Next.js 15, React 18, TypeScript, Tailwind CSS, Zustand |
 | Backend   | FastAPI, Python 3.10+, Pydantic, Firebase Admin, Fernet encryption |
 | Database  | Firebase (Firestore)                 |
 
