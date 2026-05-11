@@ -96,9 +96,14 @@ This document defines the schema, relationships, and data requirements for the M
   - `keyDifferentiators: string`
   - `brandVoice: string`
   Read by the Settings page and by every AI feature that accepts a `companyContext: string[]` payload (see backend.md). Mirrored to `localStorage['company_profile_cache']`.
+- `authProvider: string` — `"linkedin"` when the user was provisioned via the LinkedIn sign-in flow. Written by the FastAPI backend (`linkedin_oauth_service._ensure_firebase_user`). Absent for users who signed up via other Firebase Auth providers.
+- `linkedinMemberSub: string` — LinkedIn-provided `sub` (member identifier) for LinkedIn-signed-up users. The Firebase uid for these users is deterministically `linkedin_<linkedinMemberSub>`. Backend-written.
+- `email: string` — real email returned by LinkedIn at sign-in time. The Firebase Auth user intentionally has NO email set (to keep LinkedIn accounts isolated from other providers that share the same address), so this field is the canonical place to read the user's email for LinkedIn-signed-up accounts. Backend-written.
+- `displayName: string`, `pictureUrl: string` — also mirrored here for parity with the Firebase Auth user's `display_name` / `photo_url`. Backend-written.
+- `updatedAtMs: number` — server timestamp (ms) of the last backend write to this doc.
 
 **Notes:**
-- The user document is created lazily on first `setDoc(..., { merge: true })` from the Settings or `/api/company/autofill` flows; there is no required-field guarantee.
+- The user document is created lazily on first `setDoc(..., { merge: true })` from the Settings, `/api/company/autofill`, or LinkedIn sign-in flows; there is no required-field guarantee.
 
 ### `users/{uid}/ideas/{ideaId}/workflow/angles`
 **Purpose:** Persist generated/refined angles for a single idea so `/angles?ideaId=...` can restore state on revisit.
@@ -154,16 +159,39 @@ This document defines the schema, relationships, and data requirements for the M
   Client timestamp (ms) of the scheduled publish moment. Used for ordering and "due now / upcoming / missed" classification.
 - `scheduledForIso: string`
   ISO-8601 mirror of `scheduledForMs` for human-readable rendering.
-- `status: string`
-  Reminder status (currently always `'scheduled'` at creation; future states may include `'published'`, `'cancelled'`).
+- `status: 'scheduled' | 'publishing' | 'published' | 'failed' | 'cancelled'`
+  Lifecycle state of the scheduled post. Created with `'scheduled'`. The background scheduler (`POST /api/v1/publish/scheduled/run`) CAS-flips it to `'publishing'` while a tick is running, then to `'published'` (on LinkedIn 2xx) or `'failed'` (on any other outcome). A zombie sweeper rolls `'publishing'` rows older than 10 minutes back to `'scheduled'` so a single zombie write never permanently blocks re-attempts.
 - `createdAt: timestamp`
   Server timestamp on first save.
 - `updatedAt: timestamp`
   Server timestamp on each save.
 
+**Optional fields (additive; written by the background scheduler):**
+- `contentSnapshot: map<string, string>`
+  Per-platform copy captured at schedule time so a later edit to the parent adaptation doc cannot change what the background scheduler actually posts. Keys match the platform slugs used in `platforms` (currently only `linkedin` is read by the scheduler). The Publish UI writes this map at schedule time.
+- `visibility: 'PUBLIC' | 'CONNECTIONS'`
+  LinkedIn UGC visibility; passed through to LinkedIn when the scheduler publishes the row. Defaults to `'PUBLIC'` when absent.
+- `attemptCount: number`
+  Increments on every publish attempt (success or failure). Initialized to `0` at schedule time.
+- `lastAttemptAtMs: number`
+  Set when a row is CAS-flipped to `'publishing'`. The zombie sweeper uses this to detect stuck rows (`status == 'publishing' AND lastAttemptAtMs < now - 10min`).
+- `postUrn: string`
+  LinkedIn ugcPosts URN returned on success.
+- `postUrl: string`
+  Human-clickable `https://www.linkedin.com/feed/update/<url-encoded-urn>` built from `postUrn`.
+- `failureReason: 'token_expired' | 'rate_limited' | 'invalid_payload' | 'provider_unavailable' | 'missing_author_urn' | 'unknown'`
+  Canonical slug describing why a scheduled publish failed. Mirrors the error slugs returned by `linkedin_publisher.publish_linkedin_text`.
+- `providerError: any`
+  Sanitized LinkedIn error payload (dict keys matching `/token|secret|authorization/i` stripped; string bodies capped at 500 chars). Set alongside `failureReason` when LinkedIn returned a non-2xx.
+- `publishedAtMs: number`
+  Server time (ms) at which the scheduler finalized this row as `'published'`.
+- `eventBridgeScheduleName: string | null`
+  Deterministic AWS EventBridge schedule name (`publish-<scheduledPostId>`) when the row was written by `POST /api/v1/publish/schedule` in Pattern B (one-shot EventBridge) and the backend AWS env was configured. `null` when the backend ran in local-dev no-op mode (AWS env vars unset) — the row still exists and the legacy sweeper / Pattern B fallback can still publish it. Absent on rows written by the legacy direct-Firestore path (X / Twitter / Medium / Newsletter / Blog) since those platforms do not provision EventBridge schedules. Read-tolerant; consumers must treat both `null` and `undefined` as "no EventBridge schedule attached". Used by the future `delete_schedule` / `update_schedule` helpers and for diagnostic surfacing.
+
 **Current query patterns:**
 - `query(collection(db, 'users', uid, 'scheduledPosts'), orderBy('scheduledForMs', 'asc'))` (Dashboard, Publish, Notifications).
-- Notifications classifies records as `dueNow` (within ±15 min of now), `upcomingSoon` (next 24 h), and `missed` (older than now − 15 min).
+- Notifications classifies records as `dueNow` (within ±15 min of now), `upcomingSoon` (next 24 h), and `missed` (older than now − 15 min). Rows with `status` set to `'published'`, `'failed'`, or `'cancelled'` are excluded from those buckets and surfaced in dedicated `failedScheduled` / `recentlyPublished` cards instead.
+- Backend scheduler: collection-group query `status == 'scheduled' AND scheduledForMs <= now`, ordered by `scheduledForMs` ascending, limited.
 
 ### `users/{uid}/adaptations/{adaptationId}`
 **Purpose:** Persist per-platform adaptation content and active-tab state for the signed-in user.
@@ -254,6 +282,7 @@ This document defines the schema, relationships, and data requirements for the M
 - `userId` must match the parent UID path and authenticated user UID.
 - `createdAtMs` should always be present so ordering is stable even before server timestamps resolve.
 - The current implementation only needs Firestore's default single-field indexes for `createdAtMs`, `updatedAt`, and `scheduledForMs`.
+- **Composite index (required by the background scheduler):** a `COLLECTION_GROUP` index on `scheduledPosts` with `(status ASC, scheduledForMs ASC)`. Required by `POST /api/v1/publish/scheduled/run` so it can run a collection-group query for `status == 'scheduled' AND scheduledForMs <= now`. Declared in `firestore.indexes.json`.
 - The drafts and adaptations flows use deterministic document IDs (`${ideaId}_${angleId}`) so revisiting the same draft/angle pair reopens the same persisted state.
 - `scheduledPosts` document IDs are auto-generated; uniqueness comes from Firestore.
 
@@ -280,6 +309,8 @@ Account deletion is fully client-side. When the user confirms the modal in Setti
 
 Steps 1–9 are issued in `writeBatch` chunks of up to 400 ops to stay under the Firestore 500-op batch limit. Every step is idempotent so a partial failure is safe to retry.
 
+`linkedinLoginStates/*` docs are intentionally NOT cleaned up by this flow: they are CSRF state created BEFORE any user is authenticated (during a "Sign in with LinkedIn" attempt), carry no `userId` field, and contain only a state hash plus `createdAtMs`/`expiresAtMs`. They contain no PII and expire naturally — out-of-band cleanup (e.g., a future scheduled job) is responsible for them.
+
 ## Migration Strategy
 - Enable Cloud Firestore in the Firebase project before using the ideas page.
 - Deploy Firestore security rules before production use so user A cannot read or write user B's idea documents.
@@ -289,7 +320,7 @@ Steps 1–9 are issued in `writeBatch` chunks of up to 400 ops to stay under the
 - All client reads and writes must occur under `users/{request.auth.uid}/*`.
 - Unauthenticated clients must not be able to read or write user documents.
 - User A must not be able to read or write user B's subtree.
-- Top-level `integrationSecrets/` token contents are NEVER readable from the client — the encrypted blob can only be written by the FastAPI backend (running with Firebase Admin credentials). The signed-in user can `list` and `delete` their own secret docs (those whose ID is prefixed by `${request.auth.uid}__`) for self-service account deletion.
+- Top-level `integrationSecrets/` token contents are NEVER readable from the client — the encrypted blob can only be written by the FastAPI backend (running with Firebase Admin credentials). The signed-in user can `list` and `delete` their own secret docs (those whose ID is prefixed by `${request.auth.uid}__`) for self-service account deletion. **`read` / `get` access is denied by default and is NOT granted by any rule**, even for the row owner — the only way to read the decrypted access token is through the backend's `integration_connection_service.get_decrypted_tokens` helper, which runs under service-account credentials.
 - Top-level `integrationAuthStates/` are written/consumed only by the backend OAuth flow. The signed-in user can `list` (the query-as-a-whole rule) and `delete` rows whose `userId` field equals their `auth.uid`, for self-service account deletion. They cannot create or update these docs.
 
 **Deployed Firestore rules:**
@@ -333,5 +364,6 @@ service cloud.firestore {
 - Adaptation persistence includes `selectedPlatforms` so the selected gate scope is restored on revisit.
 - Revisiting `/adapt/<ideaId>?angleId=<angleId>` reloads the saved platform texts and `activePlatform` from the corresponding adaptation document for the authenticated user.
 - Scheduling a publish reminder writes a new doc under `users/{uid}/scheduledPosts/{auto}` with `scheduledForMs > Date.now()`; the Dashboard, Publish upcoming list, and Notifications page all read from this collection.
+- For LinkedIn schedules created via `POST /api/v1/publish/schedule` (Pattern B), the new doc additionally carries `eventBridgeScheduleName: 'publish-<scheduledPostId>'` when the backend AWS env is configured, or `null` in local-dev no-op mode. Non-LinkedIn schedules written by the legacy direct-Firestore path do not carry this field.
 - Saving or autofilling the Company Profile in Settings writes the `companyContext` field on `users/{uid}` (with `setDoc(..., { merge: true })`) and mirrors it to the local cache.
 - Security rules must reject cross-user reads and writes for `users/{uid}/**`, and clients must NOT be able to read `integrationSecrets/*` or `integrationAuthStates/*`.

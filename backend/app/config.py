@@ -1,5 +1,12 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.services.secrets_loader import load_secrets_into_env
+
+# Hydrate environment variables from Secrets Manager BEFORE Settings reads
+# from the environment. No-op in local dev (when SECRETS_MANAGER_SECRET_ID
+# is unset).
+load_secrets_into_env()
+
 
 class Settings(BaseSettings):
     secret_key: str = "changeme"
@@ -18,6 +25,11 @@ class Settings(BaseSettings):
     linkedin_client_secret: str | None = None
     linkedin_redirect_uri: str | None = None
     linkedin_scopes: str = "openid profile email w_member_social"
+
+    # Shared secret required by POST /api/v1/publish/scheduled/run. Set in
+    # production via secret manager -- when unset, the route fails closed with
+    # a 503 (`scheduler_disabled`).
+    scheduler_secret: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

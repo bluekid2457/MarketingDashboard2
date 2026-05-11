@@ -28,20 +28,33 @@ Browser ──HTTP──▶ Next.js (port 3000)
          │                └─▶ AI providers (OpenAI, Gemini, Claude, Ollama)
          │                    DuckDuckGo / Bing News (research, trends)
          │
-         ├──HTTP──▶ FastAPI (port 8000)
+         ├──HTTP──▶ FastAPI (local: port 8000 / prod: Lambda Function URL)
          │            │
-         │            ├─▶ /api/v1/auth/linkedin/* (OAuth)
-         │            └─▶ /api/v1/integrations/* (status, tokens, disconnect)
+         │            ├─▶ /api/v1/auth/linkedin/*    (OAuth)
+         │            ├─▶ /api/v1/integrations/*    (status, tokens, disconnect)
+         │            ├─▶ /api/v1/publish/linkedin/now    (sync direct publish)
+         │            ├─▶ /api/v1/publish/schedule        (Pattern B — provision EventBridge + Firestore row)
+         │            └─▶ /api/v1/publish/scheduled/run   (safety-net sweeper)
          │
          └──Firebase SDK──▶ Firestore
                               ├─ users/{uid}/** (client-readable subtree)
                               ├─ integrationSecrets/** (backend-only)
                               └─ integrationAuthStates/** (backend-only)
 
-FastAPI ──Firebase Admin──▶ Firestore (writes secrets, reads/writes connection summaries)
+FastAPI ──Firebase Admin──▶ Firestore (writes secrets, reads/writes connection + schedule docs)
+
+FastAPI ──boto3──▶ AWS EventBridge Scheduler (creates per-post one-shot schedules)
+                       │
+                       └─ at(scheduledForMs) ──▶ marketing-dashboard-scheduler Lambda
+                                                        │
+                                                        └─ publish_one(uid, scheduledPostId)
+                                                              ├─ Firestore (CAS, finalize)
+                                                              └─ LinkedIn UGC API
 ```
 
-Key rule: **AI never runs in FastAPI; OAuth tokens never live outside FastAPI.** The two backends are deliberately disjoint.
+Key rules:
+- **AI never runs in FastAPI; OAuth tokens never live outside FastAPI.** The two backends are deliberately disjoint.
+- **Scheduled publishes fire via a per-post EventBridge schedule, not a polling cron.** The legacy sweeper at `POST /api/v1/publish/scheduled/run` is retained as a safety net and for local-dev manual ticks.
 
 ---
 
@@ -282,24 +295,54 @@ Browser → LinkedIn → GET /api/v1/auth/linkedin/callback?code=…&state=…
   → 302 → /settings?integration=linkedin&status=connected
 ```
 
-### 8.3 Schedule reminder loop
+### 8.3 Schedule + publish loop (Pattern B — one-shot EventBridge)
 ```
-User → /publish (Schedule button)
-  → setDoc users/{uid}/scheduledPosts/{auto} { scheduledForMs, … }
+User → /publish (Schedule button, LinkedIn card)
+  → scheduleLinkedInPost() in src/lib/publish.ts
+  → POST /api/v1/publish/schedule  (Firebase ID token in Authorization)
+       ├─ verify_firebase_id_token + uid == body.userId
+       ├─ scheduledForMs > now + 60s (422 scheduled_too_soon otherwise)
+       ├─ contentSnapshot.linkedin non-empty (422 missing_linkedin_snapshot otherwise)
+       ├─ eventbridge_scheduler.create_one_shot_schedule(...) [no-op in local dev]
+       └─ setDoc users/{uid}/scheduledPosts/{auto} { …, eventBridgeScheduleName }
+  ← { success: true, scheduledPostId, eventBridgeScheduleName }
+
+EventBridge Scheduler (at scheduledForMs UTC)
+  → invokes marketing-dashboard-scheduler Lambda with {"scheduledPostId","userId"}
+  → app.lambda_scheduler.handler
+       → publish_one(uid, scheduledPostId)
+             ├─ CAS row scheduled → publishing
+             ├─ linkedin_publisher.publish_linkedin_text(...)
+             └─ finalize: published / failed (failureReason, attemptCount += 1)
+  → ActionAfterCompletion="DELETE" auto-removes the schedule
+
+Safety net: POST /api/v1/publish/scheduled/run (cron / manual via npm run scheduler:tick)
+  → sweeps zombie `publishing` rows older than 10 min back to `scheduled`
+  → per-row dispatch via the same publish_one worker as the Lambda
+
+Non-LinkedIn platforms still write users/{uid}/scheduledPosts/{auto} directly via the
+Firebase Web SDK on /publish and rely on the legacy reminder + handoff path.
 
 /notifications page → setInterval(60s)
   → reads users/{uid}/scheduledPosts ordered by scheduledForMs
   → buckets into dueNow / upcomingSoon / missed using the wall clock
 ```
 
-There is **no server-side scheduler** firing publishes; every publish today is either a clipboard handoff (LinkedIn / X) or "copy + reminder" (Medium / Newsletter / Blog). Direct publishing for stored OAuth tokens is the next planned automation milestone — see [automation.md](automation.md) and `docs/Automation_Tasks.md`.
+Direct publish (`POST /api/v1/publish/linkedin/now`) is the synchronous LinkedIn path — distinct from the schedule path — and is unchanged by Pattern B.
 
 ---
 
 ## 9. Deployment
 
 - **Frontend:** AWS Amplify (`amplify.yml`). The build step injects the six required `NEXT_PUBLIC_FIREBASE_*` env vars into a generated `.env.local` before `npm run build` runs.
-- **Backend:** Any Python host running uvicorn. No managed deploy is committed to this repo.
+- **Backend (local dev):** uvicorn on port 8000 — `cd backend && uvicorn app.main:app --reload`.
+- **Backend (deployed):** **two AWS Lambda functions** from one container image (`backend/Dockerfile.lambda`, `public.ecr.aws/lambda/python:3.11`, arm64):
+  - `marketing-dashboard-http` — `CMD: ["app.main.handler"]`. The FastAPI app wrapped by `mangum.Mangum(app, lifespan="off")` and exported as `handler`. Fronted by a **Lambda Function URL** (auth: `NONE`; CORS still enforced by FastAPI). `NEXT_PUBLIC_API_URL` in the Amplify build env points at this URL.
+  - `marketing-dashboard-scheduler` — `CMD: ["app.lambda_scheduler.handler"]`. Triggered directly by EventBridge Scheduler (no HTTP wrapper). Invoked once per scheduled post with `{"scheduledPostId","userId"}`.
+- **Schedule provisioning:** AWS EventBridge Scheduler. One schedule per scheduled LinkedIn post (`publish-<scheduledPostId>`), `ScheduleExpression=at(<UTC>)`, `ActionAfterCompletion="DELETE"`, `MaximumRetryAttempts=0`. Schedule group defaults to `default` (override via `EVENTBRIDGE_SCHEDULE_GROUP_NAME`). An IAM role (`EVENTBRIDGE_INVOKER_ROLE_ARN`) grants EventBridge `lambda:InvokeFunction` on the scheduler Lambda.
+- **Secrets management:** **AWS Secrets Manager**. One JSON secret holds `FIREBASE_SERVICE_ACCOUNT_JSON`, `ENCRYPTION_KEY`, `LINKEDIN_CLIENT_SECRET`, `SCHEDULER_SECRET`, etc. Both Lambdas read `SECRETS_MANAGER_SECRET_ID` at cold start; `secrets_loader.load_secrets_into_env()` hydrates the secret's keys into `os.environ` BEFORE `Settings()` is instantiated. Explicit env vars win over Secrets Manager.
+- **No IaC committed.** EventBridge / Lambda / IAM / Secrets Manager provisioning is done manually via the AWS console + CLI today. Terraform / CDK / SAM is a documented follow-up.
+- **Local-dev fallback:** `SCHEDULER_LAMBDA_ARN` and `EVENTBRIDGE_INVOKER_ROLE_ARN` unset → `eventbridge_scheduler` no-ops with a log line. `POST /api/v1/publish/schedule` still 200s and writes the Firestore row with `eventBridgeScheduleName: null`. The legacy sweeper / `npm run scheduler:tick` continues to fire the row.
 - **Persistence:** Firestore is the only persistence layer. There is no SSR database or relational store.
 - **GitHub Actions:** `.github/workflows/pr-version-bump.yml` runs on PR open/reopen for non-fork branches and bumps `frontend/package.json` patch version on the PR branch (see [automation.md](automation.md) §3.4).
 
