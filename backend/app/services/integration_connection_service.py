@@ -244,6 +244,12 @@ class IntegrationConnectionService:
             "metadata": payload.get("metadata") or {},
         }
 
+    def get_decrypted_access_token(self, user_id: str, provider: str) -> str | None:
+        tokens = self.get_decrypted_tokens(user_id, provider)
+        if not tokens:
+            return None
+        return tokens.get("accessToken")
+
     def disconnect(self, user_id: str, provider: str) -> dict[str, Any]:
         get_provider_definition(provider)
         now_ms = self._now_ms()
