@@ -310,6 +310,130 @@ async def cancel_scheduled_post(
 
 
 # ---------------------------------------------------------------------------
+# PATCH /publish/schedule/{id} -- reschedule a scheduled post
+# ---------------------------------------------------------------------------
+
+
+class RescheduleRequest(BaseModel):
+    """Request body for PATCH /publish/schedule/{id}."""
+
+    scheduled_for_ms: int = Field(alias="scheduledForMs", gt=0)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+@router.patch("/publish/schedule/{scheduled_post_id}")
+async def reschedule_scheduled_post(
+    scheduled_post_id: str,
+    body: RescheduleRequest,
+    verified_uid: str = Depends(verify_firebase_id_token),
+) -> dict[str, Any]:
+    """Reschedule a scheduled post to a new future time.
+
+    Auth: Firebase ID token. The post is looked up under
+    ``users/{verified_uid}/scheduledPosts`` so cross-user PATCH is
+    structurally impossible.
+
+    Validation:
+      * 404 ``not_found`` if no such doc.
+      * 422 ``scheduled_too_soon`` if ``scheduledForMs <= now + 60_000``.
+      * 409 ``status_not_reschedulable`` if the row is ``publishing`` or
+        ``published``. ``scheduled``, ``failed``, and ``cancelled`` rows
+        are reschedulable.
+
+    Side effects:
+      * Best-effort re-provision of the EventBridge schedule via
+        ``eventbridge_scheduler.update_schedule`` (delete-then-create
+        against the deterministic name ``publish-<id>``). A
+        ``create_schedule`` failure raises ``502
+        reschedule_provisioning_failed`` and the Firestore row is NOT
+        touched. ``delete_schedule`` failures are swallowed inside the
+        helper.
+      * Firestore ``ref.update`` (NOT ``set(merge=True)``) writes
+        ``scheduledForMs``, ``scheduledForIso``, ``status='scheduled'``,
+        ``updatedAt``. ``attemptCount``, ``failureReason``,
+        ``eventBridgeScheduleName``, ``createdAt``, ``contentSnapshot``,
+        ``platforms``, and the rest are preserved.
+
+    Returns
+    ``{success, scheduledPostId, scheduledForMs, eventBridgeScheduleName}``.
+    """
+    db = get_firestore_client()
+    ref = (
+        db.collection("users")
+        .document(verified_uid)
+        .collection("scheduledPosts")
+        .document(scheduled_post_id)
+    )
+
+    snapshot = ref.get()
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    now_ms = _now_ms()
+    if body.scheduled_for_ms <= now_ms + _MIN_SCHEDULE_LEAD_MS:
+        raise HTTPException(status_code=422, detail="scheduled_too_soon")
+
+    row = snapshot.to_dict() or {}
+    current_status = str(row.get("status") or "scheduled")
+    if current_status in {"publishing", "published"}:
+        raise HTTPException(status_code=409, detail="status_not_reschedulable")
+
+    # Provision EventBridge BEFORE the Firestore write so that an AWS
+    # failure does not leave the Firestore row out of sync with a
+    # non-existent schedule. The helper internally delete-then-create's
+    # against the deterministic name; a delete failure is swallowed inside
+    # the helper, so this except branch only fires on a create failure.
+    try:
+        eventbridge_scheduler.update_schedule(
+            scheduled_post_id=scheduled_post_id,
+            user_id=verified_uid,
+            new_fire_at_ms=body.scheduled_for_ms,
+        )
+    except Exception as exc:
+        print(
+            f"[publish.reschedule] EventBridge provisioning failed for "
+            f"{scheduled_post_id}: {type(exc).__name__}",
+        )
+        raise HTTPException(status_code=502, detail="reschedule_provisioning_failed") from exc
+
+    iso_string = datetime.fromtimestamp(body.scheduled_for_ms / 1000, tz=timezone.utc).isoformat()
+
+    update_payload: dict[str, Any] = {
+        "scheduledForMs": body.scheduled_for_ms,
+        "scheduledForIso": iso_string,
+        "status": "scheduled",
+        "updatedAt": firestore.SERVER_TIMESTAMP,
+    }
+
+    try:
+        ref.update(update_payload)
+    except Exception as exc:
+        # NOTE: unlike the POST handler we do NOT roll back the EventBridge
+        # change here. ``update_schedule`` is idempotent (delete-then-create
+        # against the same deterministic name), and the user can retry safely.
+        # Logged-only — the schedule fires for the new time, the Firestore
+        # row still has the old time; the safety-net sweeper / next user
+        # retry corrects it.
+        print(
+            f"[publish.reschedule] Firestore write failed for "
+            f"{scheduled_post_id}: {type(exc).__name__}",
+        )
+        raise HTTPException(status_code=500, detail="reschedule_write_failed") from exc
+
+    return {
+        "success": True,
+        "scheduledPostId": scheduled_post_id,
+        "scheduledForMs": body.scheduled_for_ms,
+        "eventBridgeScheduleName": (
+            eventbridge_scheduler._schedule_name(scheduled_post_id)
+            if eventbridge_scheduler._aws_config_ready()[0] is not None
+            else None
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # /publish/scheduled/run -- scheduler-driven publish drain (legacy/sweeper)
 # ---------------------------------------------------------------------------
 

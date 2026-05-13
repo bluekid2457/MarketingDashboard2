@@ -26,6 +26,10 @@ This table centralizes the current frontend `(TODO)` items for quick planning an
 | Publishing & Scheduling | Visual Content Calendar | DONE |
 | Publishing & Scheduling | Gap Detection Alerts | DONE |
 | Publishing & Scheduling | Submit to Search Engines | TODO |
+| Scheduled Posts Calendar | Month grid + detail panel | DONE |
+| Scheduled Posts Calendar | Reschedule (move) | DONE |
+| Scheduled Posts Calendar | Cancel from calendar | DONE |
+| Scheduled Posts Calendar | Drag-to-reschedule | TODO |
 | Review & Approval Workflow | Draft Queue | DONE |
 | Review & Approval Workflow | Inline Editor | TODO |
 | Review & Approval Workflow | Version History | TODO |
@@ -152,6 +156,8 @@ frontend/
             page.tsx        # Screen 6 â€” Multi-Channel Adaptation (dynamic [id])
         publish/
           page.tsx          # Screen 7 â€” Publishing & Scheduling
+        calendar/
+          page.tsx          # Screen 7.5 — Scheduled Posts Calendar
         review/
           page.tsx          # Screen 8 â€” Review & Approval Workflow
         analytics/
@@ -577,6 +583,37 @@ These landing pages replace the previous `redirect('/storyboard')` stubs, ensuri
 Implementation notes:
 - Publish page now runs as a client component and uses Firebase Auth + Firestore browser SDK lookups.
 - One-click publish behavior is strictly handoff-based (open compose/share surfaces) and does not attempt direct API posting/OAuth account publishing.
+- Shared scheduled-post types live in `frontend/src/lib/scheduledPosts.ts` (`PlatformKey`, `ScheduledPostStatus`, `ScheduledFailureReason`, `ScheduledPostRecord`, plus `parseScheduledPostRecord`, `formatPlatformLabel`, type-guards). The `/publish` Firestore listener calls `parseScheduledPostRecord(doc.id, doc.data())` and filters out `null` returns; the same module is consumed by the `/calendar` page (Screen 7.5).
+
+---
+
+### Screen 7.5 — Scheduled Posts Calendar (`/calendar`)
+**Route:** `src/app/(app)/calendar/page.tsx`
+**Layout Notes:** Month-grid calendar view of every scheduled / publishing / published / failed LinkedIn post for the signed-in user. Reuses the existing `(app)/layout.tsx` shell (sidebar / mobile top bar / auth guard) — no new layout. The page is a client component using `onSnapshot` against `users/{uid}/scheduledPosts` (ordered by `scheduledForMs asc`) and `parseScheduledPostRecord` from `frontend/src/lib/scheduledPosts.ts`.
+**Sections:**
+1. **Header card** (`surface-card p-6`) — eyebrow `Screen 7.5`, H1 `Scheduled Posts Calendar`, subtitle, and a notice banner (success / error / info) identical in tone+styling to the one on `/publish`.
+2. **Toolbar card** — left side: prev-month `←`, `Month Year` label, next-month `→`, `Today` button (resets `viewMonth` to `startOfMonth(new Date())`). Right side: status filter chips `All | Scheduled | Publishing | Published | Failed`; active chip uses emerald background, inactive chips use slate border (`surface-card`/`pill` utility classes).
+3. **Calendar grid** — `grid grid-cols-7 gap-2 text-center text-xs` matching the existing Dashboard Activity Calendar shape. Headers are Mon-first (`Mon Tue Wed Thu Fri Sat Sun`) to match `dashboard/page.tsx`. Day cells are `min-h-[100px] rounded-xl border border-slate-200 bg-white p-2` with date label top-right and `ring-2 ring-emerald-400` on the today cell. Each day cell renders up to 3 post pills + an optional `+N more` button that opens the detail panel on the first hidden post.
+4. **Post pill** — a `<button>` (NOT an anchor) with `data-testid="calendar-post-pill-<id>"`. Status-driven colors: `scheduled` teal, `publishing` amber, `published` emerald, `failed` red, `cancelled` slate. Content: small status dot, `HH:MM` local time, truncated `articleTitle`, plus a `↗` glyph when `status === 'published' && post.postUrl` (the pill click still opens the detail panel — only the "View on LinkedIn" link inside the panel opens the URL). `title` attribute carries hover info (status + scheduled time + failure reason when present).
+5. **Empty states** — `No scheduled posts yet.` + `Go to Publish →` link when the user has no rows; `No posts in this month. Use the arrows to navigate.` when the user has rows but none in the visible month under the current filter.
+6. **Detail modal** — rendered conditionally when `selectedPostId` matches a current row. Centered modal (`fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center`, inner `surface-card max-w-2xl w-full mx-4 p-6 max-h-[85vh] overflow-y-auto`). Backdrop click + Esc close it; inner card uses `stopPropagation`. Header shows status badge + article title + close `×`. Body shows idea topic, angle title, scheduled time (local + UTC tooltip), platform chips, content snapshot in a read-only `<pre>`. Status-conditional sections:
+   - `published`: emerald "Published" banner, `publishedAtMs` line, `View on LinkedIn →` link when `postUrl` is set.
+   - `failed`: red "Failed" banner, failure-reason line, `Reconnect LinkedIn →` to `/settings#integrations` when `failureReason === 'token_expired'`.
+7. **Reschedule section** — rendered inside the modal when `isReschedulable(post.status) && (post.status === 'failed' || post.scheduledForMs > Date.now())`. `<input type="datetime-local">` prefilled to the current `scheduledForMs`, three quick-preset buttons `+1h`, `+1d`, `+1w` (each compute `new Date(Math.max(Date.now(), post.scheduledForMs) + delta)`), and a `Save reschedule` button (disabled when `parseScheduledAtInputValue(rescheduleInput) <= Date.now() + 60_000`, when unchanged from the current scheduled time, or while the save is in flight). On Save the page calls `rescheduleScheduledPost(postId, newMs)` from `frontend/src/lib/publish.ts`; success surfaces a `Scheduled post moved to <local time>` notice and the Firestore listener moves the pill to the new day (the modal stays open). Backend slugs are mapped to actionable copy: `status_not_reschedulable` / `not_found` / `scheduled_too_soon` / `reschedule_provisioning_failed` / `reschedule_write_failed` / `not_signed_in` / `network`.
+8. **Cancel section** — rendered inside the modal when `isCancellable(post.status)`. Identical inline two-step confirm pattern to `/publish`: red outlined `Cancel` button reveals red filled `Confirm cancel` + neutral `Keep`. Confirming calls `cancelScheduledPost(id)` from `frontend/src/lib/publish.ts`; on success the Firestore listener removes the row and the modal closes. Backend slugs `status_not_cancellable` / `not_found` / `not_signed_in` / `network` get explicit user-facing copy.
+
+Implementation notes:
+- The page does NOT extract a shared `useScheduledPosts(uid)` hook — the listener is inline, matching `/publish`. The shared parser (`parseScheduledPostRecord`) is the only dedupe.
+- `Date.now() + 60_000` guard mirrors the backend's `_MIN_SCHEDULE_LEAD_MS` floor (POST + PATCH both reject anything inside 60 s of "now").
+- Pill color palette deliberately mirrors `/publish`'s per-section card colors (`bg-emerald-50` published / `bg-red-50` failed / teal scheduled / amber publishing) so the visual language is consistent across the two screens.
+- No drag-to-reschedule, no recurring schedules, no iCal export, no multi-platform — see TODO Tracker.
+
+### `frontend/src/lib/publish.ts` — `rescheduleScheduledPost(scheduledPostId, newScheduledForMs)` wrapper
+
+- **Location**: `frontend/src/lib/publish.ts` (appended after `cancelScheduledPost`).
+- **HTTP**: `PATCH /api/v1/publish/schedule/{id}` with body `{ scheduledForMs: number }` and an `Authorization: Bearer <Firebase ID token>` header. Resolves the backend base URL via `getBackendApiBaseUrl()` (same as the other wrappers).
+- **Contract**: Never throws. Resolves to `RescheduleResult = RescheduleSuccess | RescheduleFailure`. Successes carry `{ scheduledPostId, scheduledForMs, eventBridgeScheduleName: string | null }`. Failures carry `{ error, status }` where `error` is the backend slug (`not_found` / `status_not_reschedulable` / `scheduled_too_soon` / `reschedule_provisioning_failed` / `reschedule_write_failed`) or one of the client-only slugs `not_signed_in` (no current Firebase user / `getIdToken` failed) or `network` (`fetch` / JSON parse threw).
+- **Consumed by**: `/calendar` detail-modal Save-reschedule button.
 
 ---
 

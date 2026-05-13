@@ -12,15 +12,14 @@ import { getActiveAIKey } from '@/lib/aiConfig';
 import { findOrphanAdaptations } from '@/lib/orphans';
 import { listIntegrationConnections, type IntegrationConnection } from '@/lib/integrations';
 import { cancelScheduledPost as cancelScheduledPostApi, publishLinkedInNow, scheduleLinkedInPost } from '@/lib/publish';
+import {
+  PLATFORM_KEYS,
+  formatPlatformLabel,
+  parseScheduledPostRecord,
+  type PlatformKey,
+  type ScheduledPostRecord,
+} from '@/lib/scheduledPosts';
 import { getWorkflowContext, type WorkflowContext } from '@/lib/workflowContext';
-
-type PlatformKey = 'linkedin' | 'twitter' | 'medium' | 'newsletter' | 'blog';
-
-const PLATFORM_KEYS: readonly PlatformKey[] = ['linkedin', 'twitter', 'medium', 'newsletter', 'blog'] as const;
-
-function isPlatformKey(value: unknown): value is PlatformKey {
-  return typeof value === 'string' && (PLATFORM_KEYS as readonly string[]).includes(value);
-}
 
 type PlatformContent = Partial<Record<PlatformKey, string>>;
 
@@ -40,48 +39,6 @@ type PublishNotice = {
   linkHref?: string;
   linkText?: string;
 };
-
-type ScheduledPostStatus = 'scheduled' | 'publishing' | 'published' | 'failed' | 'cancelled';
-
-type ScheduledFailureReason =
-  | 'token_expired'
-  | 'rate_limited'
-  | 'invalid_payload'
-  | 'provider_unavailable'
-  | 'missing_author_urn'
-  | 'unknown';
-
-type ScheduledPostRecord = {
-  id: string;
-  articleTitle: string;
-  scheduledForMs: number;
-  platforms: PlatformKey[];
-  status?: ScheduledPostStatus;
-  failureReason?: ScheduledFailureReason;
-  postUrl?: string;
-  publishedAtMs?: number;
-};
-
-function isScheduledStatus(value: unknown): value is ScheduledPostStatus {
-  return (
-    value === 'scheduled' ||
-    value === 'publishing' ||
-    value === 'published' ||
-    value === 'failed' ||
-    value === 'cancelled'
-  );
-}
-
-function isScheduledFailureReason(value: unknown): value is ScheduledFailureReason {
-  return (
-    value === 'token_expired' ||
-    value === 'rate_limited' ||
-    value === 'invalid_payload' ||
-    value === 'provider_unavailable' ||
-    value === 'missing_author_urn' ||
-    value === 'unknown'
-  );
-}
 
 type StringMap = Record<string, string>;
 type BooleanMap = Record<string, boolean>;
@@ -149,18 +106,6 @@ function parseScheduledAtInputValue(value: string): number {
   const asDate = new Date(value);
   const ms = asDate.getTime();
   return Number.isFinite(ms) ? ms : 0;
-}
-
-const PLATFORM_LABELS: Record<PlatformKey, string> = {
-  linkedin: 'LinkedIn',
-  twitter: 'X / Twitter',
-  medium: 'Medium',
-  newsletter: 'Newsletter',
-  blog: 'Blog',
-};
-
-function formatPlatformLabel(platform: PlatformKey): string {
-  return PLATFORM_LABELS[platform];
 }
 
 // Per-platform UI metadata used to render publish cards. Compose-URL handoff
@@ -371,38 +316,12 @@ export default function PublishPage() {
 
     const scheduledQuery = query(collection(db, 'users', currentUid, 'scheduledPosts'), orderBy('scheduledForMs', 'asc'));
     const unsubscribe = onSnapshot(scheduledQuery, (snapshot) => {
-      setScheduledPosts(
-        snapshot.docs
-          .map((documentSnapshot) => {
-            const data = documentSnapshot.data() as Record<string, unknown>;
-            const rawPlatforms = Array.isArray(data.platforms)
-              ? data.platforms
-              : [];
-            const platforms = rawPlatforms.filter(isPlatformKey);
-
-            const status = isScheduledStatus(data.status) ? data.status : undefined;
-            const failureReason = isScheduledFailureReason(data.failureReason)
-              ? data.failureReason
-              : undefined;
-            const postUrl = asTrimmedString(data.postUrl);
-            const publishedAtMs =
-              typeof data.publishedAtMs === 'number' && Number.isFinite(data.publishedAtMs)
-                ? data.publishedAtMs
-                : undefined;
-
-            return {
-              id: documentSnapshot.id,
-              articleTitle: asTrimmedString(data.articleTitle) || asTrimmedString(data.ideaTopic) || 'Untitled article',
-              scheduledForMs: typeof data.scheduledForMs === 'number' ? data.scheduledForMs : 0,
-              platforms,
-              status,
-              failureReason,
-              postUrl: postUrl || undefined,
-              publishedAtMs,
-            } satisfies ScheduledPostRecord;
-          })
-          .filter((item) => item.scheduledForMs > 0),
-      );
+      const next: ScheduledPostRecord[] = [];
+      for (const documentSnapshot of snapshot.docs) {
+        const parsed = parseScheduledPostRecord(documentSnapshot.id, documentSnapshot.data() as Record<string, unknown>);
+        if (parsed) next.push(parsed);
+      }
+      setScheduledPosts(next);
     });
 
     return unsubscribe;

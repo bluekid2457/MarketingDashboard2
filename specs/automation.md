@@ -133,7 +133,7 @@ This sweeper is **not implemented in this slice**. It is documented here so down
 - **Resolution:** Per-minute clock tick on the Notifications page; per-render on Publish/Dashboard.
 - **Time zone handling:** All stored times are absolute (`scheduledForMs` is a UNIX millisecond timestamp). The UI renders via `toLocaleString()` and the date/time picker writes through `parseScheduledAtInputValue`.
 - **Cancellation:** DONE for `scheduled` and `failed` rows. The Publish page surfaces a per-row `Cancel` (upcoming) / `Remove` (failed) button with an inline two-step confirm. Confirming fires `DELETE /api/v1/publish/schedule/{id}` which (a) best-effort deletes the EventBridge schedule and (b) deletes the Firestore document. Rows in `publishing` or `published` state return HTTP 409 `status_not_cancellable`. `eventbridge_scheduler.delete_schedule` swallows `ResourceNotFoundException`, so cancelling a row whose schedule has already auto-deleted (after firing, or because `ActionAfterCompletion=DELETE` already ran) still cleanly removes the Firestore row.
-- **Edit/reschedule:** Currently TODO — `eventbridge_scheduler.update_schedule` exists (delete-then-create) but has no UI caller yet. Users today cancel + re-create.
+- **Edit/reschedule:** DONE. The new `/calendar` page surfaces every scheduled / publishing / published / failed row on a month grid and exposes a Reschedule control (datetime-local + quick presets `+1h`/`+1d`/`+1w`) in the per-post detail panel. Confirming calls `PATCH /api/v1/publish/schedule/{id}` which atomically updates Firestore + recreates the EventBridge schedule via `eventbridge_scheduler.update_schedule` (delete-then-create on the deterministic name `publish-<id>`). Only rows with `status ∈ {scheduled, failed}` are reschedulable; `publishing` and `published` return HTTP 409 `status_not_reschedulable`.
 - **Background firing:** DONE for LinkedIn. `POST /api/v1/publish/scheduled/run` (server-to-server, shared-secret authed) drains due LinkedIn rows on every Cloud Scheduler tick (see §5). Other platforms still rely on the reminder + handoff path.
 
 ---
@@ -153,6 +153,7 @@ This sweeper is **not implemented in this slice**. It is documented here so down
 | Scheduled LinkedIn publish (Pattern B — primary) | `POST /api/v1/publish/schedule` | `scheduleLinkedInPost()` (`src/lib/publish.ts`) | DONE |
 | Scheduled LinkedIn publish (safety net / local dev) | `POST /api/v1/publish/scheduled/run` | (server-to-server; no client wrapper) | DONE |
 | Cancel scheduled post | `DELETE /api/v1/publish/schedule/{id}` | `cancelScheduledPost(id)` (`src/lib/publish.ts`) | DONE |
+| Reschedule scheduled post | `PATCH /api/v1/publish/schedule/{id}` | `rescheduleScheduledPost(id, newMs)` (`src/lib/publish.ts`) | DONE |
 | X / Twitter / Medium / WordPress / Ghost / Substack OAuth | TODO | TODO | TODO |
 | Search engine submission (IndexNow) | TODO | TODO | TODO |
 
@@ -199,6 +200,15 @@ This sweeper is **not implemented in this slice**. It is documented here so down
   - With no `Authorization` header, returns HTTP 401 from the Firebase ID-token dependency.
   - With `body.userId` not matching the decoded `uid`, returns HTTP 403 `uid_mismatch`.
   - With both AWS env vars set AND boto3's `create_schedule` raising, returns HTTP 502 `schedule_provisioning_failed` and does NOT write to Firestore.
+- Backend `PATCH /api/v1/publish/schedule/{id}`:
+  - With no `Authorization` header, returns HTTP 401 from the Firebase ID-token dependency.
+  - With a valid token but an `id` that doesn't exist under the verified user, returns HTTP 404 `not_found`.
+  - With a valid token + existing doc + `scheduledForMs <= now + 60_000`, returns HTTP 422 `scheduled_too_soon`. The Firestore row is NOT modified.
+  - With a valid token + existing doc whose `status ∈ {publishing, published}`, returns HTTP 409 `status_not_reschedulable`. The Firestore row is NOT modified.
+  - With a valid token + existing doc whose `status === 'failed'` + `scheduledForMs > now + 60_000`, returns HTTP 200 `{ success: true, scheduledPostId, scheduledForMs, eventBridgeScheduleName }` and updates the Firestore row's `scheduledForMs`, `scheduledForIso`, `status` (now `'scheduled'`), and `updatedAt` (server timestamp). `attemptCount`, `failureReason`, `eventBridgeScheduleName`, `createdAt`, `platforms`, and `contentSnapshot.linkedin` are unchanged.
+  - With AWS env configured AND boto3's `create_schedule` raising (mocked), returns HTTP 502 `reschedule_provisioning_failed`. The Firestore row is NOT modified.
+  - With AWS env configured AND boto3 succeeding AND Firestore `update()` raising (mocked), returns HTTP 500 `reschedule_write_failed`. EventBridge state may have drifted ahead of Firestore — acceptable because `update_schedule` is idempotent on the deterministic name.
+  - Two PATCH calls in sequence against the same row both succeed (idempotent: `update_schedule` is delete-then-create against the same name).
 - Scheduler Lambda (`backend/app/lambda_scheduler.py`):
   - `handler({"scheduledPostId": "x", "userId": "y"}, None)` returns the outcome dict from `publish_one(...)` (smoke-test with a mocked `publish_linkedin_text`).
   - `handler({}, None)` returns `{"status": "skipped", "reason": "invalid_input"}` without raising.
@@ -222,7 +232,8 @@ This sweeper is **not implemented in this slice**. It is documented here so down
 - **Safety-net sweeper for Pattern B** — planned but not yet implemented (see §5.5). Today, an EventBridge fire that fails or never delivers leaves the row in `status: 'scheduled'` or `'publishing'` with `attemptCount` bumped, and the user must manually reschedule. The planned sweeper will requeue stuck rows after a backoff.
 - No retry policy for failed scheduled rows — a `status: 'failed'` row stays failed until the user reschedules. `attemptCount` is recorded for future use.
 - No multi-platform single schedule (current schedule writes one platform per record even though the field is an array).
-- Cancel UI is DONE (see Scheduling Logic). Reschedule UI is still TODO — `eventbridge_scheduler.update_schedule` (delete + recreate) is exported but unused by the frontend.
+- Cancel UI is DONE (see Scheduling Logic). Reschedule UI is DONE — the `/calendar` page exposes a datetime-local input + `+1h`/`+1d`/`+1w` quick presets in the per-post detail modal, wired to `PATCH /api/v1/publish/schedule/{id}` via `rescheduleScheduledPost` (`src/lib/publish.ts`).
+- Drag-to-reschedule on the calendar grid is still TODO — only the explicit datetime input + presets are wired today. Pills are click-to-open-detail-modal; dragging a pill between days is planned future work.
 - No IndexNow / search engine submission on publish.
 - No audit log entry on the synchronous "Publish now" success path (database.md does not yet define an audit collection). The scheduler path DOES persist `postUrn`, `postUrl`, and `publishedAtMs` on the originating `scheduledPosts` row.
 - No automatic refresh of expired LinkedIn access tokens; on a 401 from LinkedIn the user is prompted to reconnect via `/settings#integrations` (and any scheduled row that hit 401 is flagged with `failureReason: 'token_expired'`).

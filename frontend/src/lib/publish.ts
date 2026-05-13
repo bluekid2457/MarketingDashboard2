@@ -304,3 +304,101 @@ export async function cancelScheduledPost(scheduledPostId: string): Promise<Canc
       : 'unknown';
   return { success: false, error: detail, status: response.status || 0 };
 }
+
+// ---------------------------------------------------------------------------
+// rescheduleScheduledPost — PATCH /api/v1/publish/schedule/{id}
+// Updates the EventBridge schedule (best-effort delete+create) AND the
+// Firestore row's scheduledForMs/scheduledForIso/status/updatedAt.
+// ---------------------------------------------------------------------------
+
+export type RescheduleSuccess = {
+  success: true;
+  scheduledPostId: string;
+  scheduledForMs: number;
+  eventBridgeScheduleName: string | null;
+};
+
+export type RescheduleFailure = {
+  success: false;
+  error: string;
+  status: number;
+};
+
+export type RescheduleResult = RescheduleSuccess | RescheduleFailure;
+
+/**
+ * Reschedule a scheduled post to a new future time. Never throws.
+ *
+ * Backend refuses when the row is mid-publish or already published
+ * (409 status_not_reschedulable), when the doc doesn't exist (404 not_found),
+ * when the new time is too soon (422 scheduled_too_soon), when EventBridge
+ * provisioning fails (502 reschedule_provisioning_failed), or when the
+ * Firestore write fails (500 reschedule_write_failed). All are surfaced as
+ * typed failure outcomes the caller can branch on.
+ */
+export async function rescheduleScheduledPost(
+  scheduledPostId: string,
+  newScheduledForMs: number,
+): Promise<RescheduleResult> {
+  const auth = getFirebaseAuth();
+  const currentUser = auth?.currentUser ?? null;
+  if (!currentUser) {
+    return { success: false, error: 'not_signed_in', status: 401 };
+  }
+
+  let idToken: string;
+  try {
+    idToken = await currentUser.getIdToken();
+  } catch {
+    return { success: false, error: 'not_signed_in', status: 401 };
+  }
+
+  const baseUrl = getBackendApiBaseUrl();
+  let response: Response;
+  try {
+    response = await fetch(
+      `${baseUrl}/api/v1/publish/schedule/${encodeURIComponent(scheduledPostId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({ scheduledForMs: newScheduledForMs }),
+      },
+    );
+  } catch {
+    return { success: false, error: 'network', status: 0 };
+  }
+
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    parsed = (await response.json()) as Record<string, unknown>;
+  } catch {
+    parsed = null;
+  }
+
+  if (response.ok && parsed && parsed.success === true) {
+    const returnedMs =
+      typeof parsed.scheduledForMs === 'number' && Number.isFinite(parsed.scheduledForMs)
+        ? (parsed.scheduledForMs as number)
+        : newScheduledForMs;
+    return {
+      success: true,
+      scheduledPostId: asString(parsed.scheduledPostId) || scheduledPostId,
+      scheduledForMs: returnedMs,
+      eventBridgeScheduleName:
+        typeof parsed.eventBridgeScheduleName === 'string'
+          ? parsed.eventBridgeScheduleName
+          : null,
+    };
+  }
+
+  const detail =
+    typeof parsed?.detail === 'string'
+      ? parsed.detail
+      : typeof parsed?.error === 'string'
+      ? parsed.error
+      : 'unknown';
+  return { success: false, error: detail, status: response.status || 0 };
+}

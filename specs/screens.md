@@ -172,6 +172,28 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
+## 7.5 — Scheduled Posts Calendar (`/calendar`) — DONE
+**Purpose:** Single visual surface for every scheduled / publishing / published / failed LinkedIn post for the signed-in user, with per-post reschedule and cancel actions.
+**Components:**
+- Sidebar nav entry `Calendar` (between `Settings` and `Notifications`) — DONE
+- Month-grid layout (Mon-first headers, today highlighted with an emerald ring, leading + trailing blanks to keep 7-column rows) — DONE
+- Status filter chips `All | Scheduled | Publishing | Published | Failed` — DONE
+- Prev/next month + Today nav buttons — DONE
+- Per-day cells with up to 3 status-colored post pills + `+N more` overflow control — DONE
+- Status-driven pill palette: scheduled = teal, publishing = amber, published = emerald, failed = red, cancelled = slate. `↗` glyph appears on published pills with a `postUrl`. — DONE
+- Centered detail modal (Esc + backdrop click close): status badge, article title, idea topic + angle, scheduled time (local + UTC tooltip), platform chips, content snapshot preview (`<pre>`), and status-conditional banners (`Published` + `View on LinkedIn →` or `Failed` + `Reconnect LinkedIn →` for `token_expired`) — DONE
+- Reschedule section (only when row status is `scheduled` or `failed` AND new time would be in the future): `<input type="datetime-local">` prefilled to current time, quick-preset buttons `+1h` / `+1d` / `+1w`, `Save reschedule` button (disabled when the new time is within 60 s of now, unchanged from current, or while the save is in flight). Calls `PATCH /api/v1/publish/schedule/{id}` via `rescheduleScheduledPost`. — DONE
+- Cancel section (only when row status is `scheduled` or `failed`): inline two-step confirm (`Cancel` → `Confirm cancel` + `Keep`), calls `DELETE /api/v1/publish/schedule/{id}` via `cancelScheduledPost`. — DONE
+- Drag-to-reschedule on the calendar grid — TODO (future work)
+- Recurring schedules / iCal export / multi-platform — TODO (future work)
+**Main Actions:**
+- Navigate months and filter by status
+- Open any post's detail modal
+- Reschedule a scheduled or failed post to a new future time (Firestore + EventBridge stay in sync via `eventbridge_scheduler.update_schedule`)
+- Cancel a scheduled or failed post (best-effort EventBridge delete + Firestore delete)
+
+---
+
 ## 8. Review & Approval Workflow Screen — PLACEHOLDER (queue only)
 **Purpose:** Manage draft approvals, version history, and comments.
 **Components:**

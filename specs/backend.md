@@ -38,7 +38,7 @@ backend/
       __init__.py           # router package
       linkedin.py           # LinkedIn OAuth start/callback endpoints
       integrations.py       # Provider registry + status/token/disconnect endpoints
-      publish.py            # /publish/linkedin/now, /publish/schedule, /publish/scheduled/run
+      publish.py            # /publish/linkedin/now, /publish/schedule (POST/DELETE/PATCH), /publish/scheduled/run
     services/
       encryption.py         # Fernet-compatible token encryption helper
       firebase_service.py   # Firebase Admin / Firestore lazy initialization
@@ -207,13 +207,30 @@ Copy `backend/.env.example` → `backend/.env` before running.
 ### `DELETE /api/v1/publish/schedule/{scheduled_post_id}`
 - **Location**: `backend/app/routers/publish.py`
 - **Auth**: `Authorization: Bearer <Firebase ID token>` via `verify_firebase_id_token`. The lookup uses `users/{verified_uid}/scheduledPosts/{scheduled_post_id}`, so cross-user access is structurally impossible (a different uid's doc simply won't exist for the verified user). No body.
-- **Purpose**: Cancel / remove a scheduled post. Used by the per-post `Cancel` button in the Upcoming Scheduled Posts list and the `Remove` button in the Failed Scheduled Posts list on `/publish`.
+- **Purpose**: Cancel / remove a scheduled post. Used by the per-post `Cancel` button in the Upcoming Scheduled Posts list and the `Remove` button in the Failed Scheduled Posts list on `/publish`, and the Cancel section in the `/calendar` per-post detail modal.
 - **Validation order**: identity-dependent lookup → 404 `not_found` if doc absent → 409 `status_not_cancellable` if `status` in `{publishing, published}` (the row has already left the queue; cancellation would race the publisher / be meaningless).
 - **Side effects** (only when validation passes):
   1. Best-effort `eventbridge_scheduler.delete_schedule(scheduled_post_id)`. Already-fired schedules (auto-deleted via `ActionAfterCompletion=DELETE`) and unconfigured-AWS local-dev mode both result in a no-op. Non-`ResourceNotFoundException` errors are swallowed and logged so the Firestore delete still runs.
   2. `ref.delete()` on the Firestore document. On failure → HTTP 500 `firestore_delete_failed`.
 - **Success response (HTTP 200)**: `{ success: true, scheduledPostId, eventBridgeScheduleDeleted: bool }`. `eventBridgeScheduleDeleted` is `true` when `delete_schedule` raised no exception (including the silent `ResourceNotFoundException` and local-dev no-op paths); `false` only when a non-NotFound boto3 error was swallowed.
 - **Error responses**: 401 (auth dependency), 404 `not_found`, 409 `status_not_cancellable`, 500 `firestore_delete_failed`.
+
+### `PATCH /api/v1/publish/schedule/{scheduled_post_id}`
+- **Location**: `backend/app/routers/publish.py` — handler `reschedule_scheduled_post`, located between the `DELETE` handler and the `POST /publish/scheduled/run` block.
+- **Auth**: `Authorization: Bearer <Firebase ID token>` via `verify_firebase_id_token`. The lookup uses `users/{verified_uid}/scheduledPosts/{scheduled_post_id}`, so cross-user PATCH is structurally impossible. No body `uid` field — the path id + verified token are sufficient (matches the DELETE handler pattern).
+- **Purpose**: Reschedule a scheduled post to a new future time. Used by the Reschedule section in the `/calendar` per-post detail modal. Allowed for rows whose `status ∈ {scheduled, failed, cancelled}` (a `failed` row flips back to `scheduled` and re-queues; `publishing` and `published` rows return 409).
+- **Request schema** (Pydantic `RescheduleRequest`):
+  - `scheduledForMs: int > 0` (alias `scheduled_for_ms`)
+- **Validation order**:
+  1. Doc lookup at `users/{verified_uid}/scheduledPosts/{scheduled_post_id}` → 404 `not_found` if absent.
+  2. `scheduled_for_ms > now + 60_000` (the existing `_MIN_SCHEDULE_LEAD_MS` floor) — else 422 `scheduled_too_soon`.
+  3. `current_status not in {publishing, published}` — else 409 `status_not_reschedulable`.
+- **Side effects** (only when validation passes):
+  1. Call `eventbridge_scheduler.update_schedule(scheduled_post_id, verified_uid, scheduled_for_ms)` (delete-then-create against the deterministic name `publish-<id>`). On a create-half failure (only when AWS env is configured), raise HTTP 502 `reschedule_provisioning_failed` and SKIP the Firestore write. The `delete_schedule` half swallows its own errors inside the helper. Local-dev no-op mode returns `None` silently and proceeds.
+  2. `ref.update({scheduledForMs, scheduledForIso, status='scheduled', updatedAt: SERVER_TIMESTAMP})` (NOT `set(merge=True)` — `update` so unset fields are not clobbered). Status is always reset to `'scheduled'` so a `failed` row gets re-queued. `attemptCount`, `failureReason`, `eventBridgeScheduleName`, `createdAt`, `contentSnapshot`, `platforms`, `ideaId`, `angleId`, `articleTitle`, `ideaTopic`, `angleTitle`, `visibility`, `postUrl`, `postUrn`, and `publishedAtMs` are preserved.
+  3. On Firestore write failure after EventBridge succeeded, the route does NOT roll back the schedule (`update_schedule` is idempotent on the deterministic name; the user can simply retry). Logged-only, returns HTTP 500 `reschedule_write_failed`.
+- **Success response (HTTP 200)**: `{ success: true, scheduledPostId, scheduledForMs, eventBridgeScheduleName }`. `eventBridgeScheduleName` is `null` in local-dev no-op mode and the deterministic `publish-<id>` string in production mode.
+- **Error responses**: 401 (auth dependency), 404 `not_found`, 409 `status_not_reschedulable`, 422 `scheduled_too_soon`, 502 `reschedule_provisioning_failed`, 500 `reschedule_write_failed`.
 
 ### `POST /api/v1/publish/scheduled/run`
 - **Location**: `backend/app/routers/publish.py`

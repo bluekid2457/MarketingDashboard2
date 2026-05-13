@@ -34,6 +34,7 @@ const moreLinks: SidebarLink[] = [
   { href: '/analytics', label: 'Analytics', icon: '↗' },
   { href: '/collaboration', label: 'Collaboration', icon: '⊙' },
   { href: '/settings', label: 'Settings', icon: '⚙' },
+  { href: '/calendar', label: 'Calendar', icon: '🗓' },
   { href: '/notifications', label: 'Notifications', icon: '🔔' },
 ];
 
