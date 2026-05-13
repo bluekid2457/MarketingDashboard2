@@ -162,6 +162,8 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Gap detection alerts — DONE
 - Submit to search engines button (IndexNow) — TODO
 - Per-card LinkedIn / X-Twitter publish — DONE as a manual handoff (clipboard + open compose URL); no direct posting to provider APIs
+- Per-card plagiarism check — optional, **not a publish/schedule prerequisite**. The "Run plagiarism check" button still runs the check and surfaces the verdict pill; "Publish to LinkedIn", "Publish to X / Twitter", and "Schedule" are NOT gated on a passing result. The pre-check hint reads "Optional: run a plagiarism check…" rather than the old "must run before publishing" warning.
+- Per-row `Cancel` button on each item in the `Upcoming Scheduled Posts` list and `Remove` button on each item in the `Failed Scheduled Posts` list. Click reveals inline two-step confirm (`Confirm cancel`/`Confirm remove` + `Keep`); confirming calls `DELETE /api/v1/publish/schedule/{id}` which deletes the EventBridge schedule (best-effort) AND the Firestore row. The Firestore listener updates the UI automatically. Returns a clear error if the row is already `publishing` or `published`.
 - Persistent sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" + "Step 6 of 6" pill) at the top of the page when the user arrived from a single-adaptation Adapt → Publish jump (workflow context has `ideaId`); hidden in the multi-adaptation library view
 **Main Actions:**
 - Schedule or publish content

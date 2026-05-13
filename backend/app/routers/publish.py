@@ -237,6 +237,79 @@ async def schedule_publish(
 
 
 # ---------------------------------------------------------------------------
+# /publish/schedule/{id} -- cancel/remove a scheduled post
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/publish/schedule/{scheduled_post_id}")
+async def cancel_scheduled_post(
+    scheduled_post_id: str,
+    verified_uid: str = Depends(verify_firebase_id_token),
+) -> dict[str, Any]:
+    """Cancel/remove a scheduled post.
+
+    Auth: Firebase ID token. The post is looked up under the verified user's
+    ``users/{uid}/scheduledPosts`` collection, so cross-user access is
+    structurally impossible (the doc simply won't exist for the other uid).
+
+    Behavior:
+      * 404 ``not_found`` if no such doc.
+      * 409 ``status_not_cancellable`` if the row is mid-publish or already
+        published (``status`` in {publishing, published}). The frontend
+        should refresh state instead of letting the user race the publisher.
+      * Otherwise: best-effort delete of the EventBridge schedule, then
+        delete the Firestore doc. Schedule deletion errors are swallowed
+        and logged (the scheduler auto-deletes after firing anyway, so a
+        ResourceNotFound is normal for ``failed`` rows).
+
+    Returns ``{success: true, scheduledPostId, eventBridgeScheduleDeleted}``.
+    """
+    db = get_firestore_client()
+    ref = (
+        db.collection("users")
+        .document(verified_uid)
+        .collection("scheduledPosts")
+        .document(scheduled_post_id)
+    )
+
+    snapshot = ref.get()
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    row = snapshot.to_dict() or {}
+    status = str(row.get("status") or "scheduled")
+    if status in {"publishing", "published"}:
+        raise HTTPException(status_code=409, detail="status_not_cancellable")
+
+    # Best-effort delete of the EventBridge schedule. The service catches
+    # ResourceNotFoundException internally; other errors are caught here.
+    schedule_deleted = False
+    try:
+        eventbridge_scheduler.delete_schedule(scheduled_post_id)
+        schedule_deleted = True
+    except Exception as exc:
+        print(
+            f"[publish.cancel] EventBridge delete swallowed for "
+            f"{scheduled_post_id}: {type(exc).__name__}",
+        )
+
+    try:
+        ref.delete()
+    except Exception as exc:
+        print(
+            f"[publish.cancel] Firestore delete failed for "
+            f"{scheduled_post_id}: {type(exc).__name__}",
+        )
+        raise HTTPException(status_code=500, detail="firestore_delete_failed") from exc
+
+    return {
+        "success": True,
+        "scheduledPostId": scheduled_post_id,
+        "eventBridgeScheduleDeleted": schedule_deleted,
+    }
+
+
+# ---------------------------------------------------------------------------
 # /publish/scheduled/run -- scheduler-driven publish drain (legacy/sweeper)
 # ---------------------------------------------------------------------------
 

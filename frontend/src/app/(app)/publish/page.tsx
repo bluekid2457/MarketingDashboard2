@@ -11,7 +11,7 @@ import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
 import { getActiveAIKey } from '@/lib/aiConfig';
 import { findOrphanAdaptations } from '@/lib/orphans';
 import { listIntegrationConnections, type IntegrationConnection } from '@/lib/integrations';
-import { publishLinkedInNow, scheduleLinkedInPost } from '@/lib/publish';
+import { cancelScheduledPost as cancelScheduledPostApi, publishLinkedInNow, scheduleLinkedInPost } from '@/lib/publish';
 import { getWorkflowContext, type WorkflowContext } from '@/lib/workflowContext';
 
 type PlatformKey = 'linkedin' | 'twitter' | 'medium' | 'newsletter' | 'blog';
@@ -229,6 +229,8 @@ export default function PublishPage() {
   const [deletingByKey, setDeletingByKey] = useState<BooleanMap>({});
   const [schedulingByKey, setSchedulingByKey] = useState<BooleanMap>({});
   const [publishingByKey, setPublishingByKey] = useState<BooleanMap>({});
+  const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
+  const [confirmingCancelId, setConfirmingCancelId] = useState<string | null>(null);
   const [scheduledPosts, setScheduledPosts] = useState<ScheduledPostRecord[]>([]);
   const [plagiarismByKey, setPlagiarismByKey] = useState<Record<string, PlagiarismResult>>({});
   const [plagiarismRunningByKey, setPlagiarismRunningByKey] = useState<BooleanMap>({});
@@ -487,19 +489,35 @@ export default function PublishPage() {
     }
   }, []);
 
-  const isPlagiarismCleared = useCallback(
-    (key: string, text: string): boolean => {
-      const result = plagiarismByKey[key];
-      if (!result) return false;
-      if (result.verdict === 'high-risk') return false;
-      // Stale results (older than 30 minutes) require a re-check.
-      if (Date.now() - result.checkedAt > 30 * 60 * 1000) return false;
-      // Length changes invalidate the prior check.
-      if (Math.abs(result.flags.reduce((acc, flag) => acc + flag.passage.length, 0)) === 0 && text.length === 0) return false;
-      return true;
-    },
-    [plagiarismByKey],
-  );
+  const cancelScheduledPost = useCallback(async (postId: string) => {
+    if (!currentUid) {
+      setNotice({ tone: 'error', message: 'Sign in to cancel a scheduled post.' });
+      return;
+    }
+    setCancellingScheduledId(postId);
+    try {
+      const result = await cancelScheduledPostApi(postId);
+      if (result.success) {
+        setNotice({ tone: 'success', message: 'Scheduled post cancelled.' });
+        // The Firestore listener will remove the row from the list automatically.
+      } else if (result.error === 'status_not_cancellable') {
+        setNotice({ tone: 'error', message: 'This post is already publishing or published and can\'t be cancelled.' });
+      } else if (result.error === 'not_found') {
+        setNotice({ tone: 'error', message: 'Scheduled post not found (it may have already been cancelled).' });
+      } else if (result.error === 'not_signed_in') {
+        setNotice({ tone: 'error', message: 'Sign in to cancel a scheduled post.' });
+      } else if (result.error === 'network') {
+        setNotice({ tone: 'error', message: 'Network error while cancelling. Check your connection and try again.' });
+      } else {
+        setNotice({ tone: 'error', message: `Failed to cancel scheduled post: ${result.error}` });
+      }
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Failed to cancel scheduled post.' });
+    } finally {
+      setCancellingScheduledId(null);
+      setConfirmingCancelId(null);
+    }
+  }, [currentUid]);
 
   const openTwitterIntent = useCallback((text: string) => {
     if (!asTrimmedString(text)) {
@@ -950,7 +968,6 @@ export default function PublishPage() {
                         const isDeleting = Boolean(deletingByKey[cardKey]);
                         const isScheduling = Boolean(schedulingByKey[cardKey]);
                         const plagiarism = plagiarismByKey[cardKey];
-                        const cleared = isPlagiarismCleared(cardKey, text);
                         const hasPublishHandoff = platform === 'linkedin' || platform === 'twitter';
 
                         return (
@@ -997,8 +1014,8 @@ export default function PublishPage() {
                                   : ''}
                               </p>
                             ) : (
-                              <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                Plagiarism check has not been run on this {platformLabel} copy. Click &ldquo;Run plagiarism check&rdquo; before publishing or scheduling.
+                              <p className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                                Optional: run a plagiarism check on this {platformLabel} copy before publishing.
                               </p>
                             )}
 
@@ -1020,14 +1037,11 @@ export default function PublishPage() {
                                 const liDisabled =
                                   text.length === 0 ||
                                   !liConnected ||
-                                  !cleared ||
                                   Boolean(publishingByKey[cardKey]);
                                 const liTitle = liLoading
                                   ? 'Checking LinkedIn connection…'
                                   : !liConnected
                                   ? 'Connect LinkedIn in Settings to post directly.'
-                                  : !cleared
-                                  ? 'Run a passing plagiarism check before publishing.'
                                   : undefined;
                                 return (
                                   <>
@@ -1063,8 +1077,7 @@ export default function PublishPage() {
                                   onClick={() => {
                                     openTwitterIntent(text);
                                   }}
-                                  disabled={text.length === 0 || !cleared}
-                                  title={!cleared ? 'Run a passing plagiarism check before publishing.' : undefined}
+                                  disabled={text.length === 0}
                                 >
                                   Publish to X / Twitter
                                 </button>
@@ -1152,8 +1165,7 @@ export default function PublishPage() {
                                   onClick={() => {
                                     void schedulePost(adaptation, platform, articleTitle, angleLabel);
                                   }}
-                                  disabled={isScheduling || text.length === 0 || !cleared}
-                                  title={!cleared ? 'Run a passing plagiarism check before scheduling.' : undefined}
+                                  disabled={isScheduling || text.length === 0}
                                 >
                                   {isScheduling ? 'Scheduling...' : 'Schedule'}
                                 </button>
@@ -1184,14 +1196,52 @@ export default function PublishPage() {
           <h2 className="section-title">Upcoming Scheduled Posts</h2>
           <p className="mt-1 text-xs text-slate-600">These will appear on your dashboard calendar and surface as reminders in notifications when due.</p>
           <ul className="mt-4 space-y-2 text-sm">
-            {upcomingScheduledPosts.map((item) => (
-              <li key={item.id} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                <p className="font-medium text-slate-800">{item.articleTitle}</p>
-                <p className="text-xs text-slate-600">
-                  {new Date(item.scheduledForMs).toLocaleString()} · {item.platforms.map((platform) => formatPlatformLabel(platform)).join(', ')}
-                </p>
-              </li>
-            ))}
+            {upcomingScheduledPosts.map((item) => {
+              const isCancelling = cancellingScheduledId === item.id;
+              const isConfirming = confirmingCancelId === item.id;
+              return (
+                <li key={item.id} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-slate-800">{item.articleTitle}</p>
+                    <p className="text-xs text-slate-600">
+                      {new Date(item.scheduledForMs).toLocaleString()} · {item.platforms.map((platform) => formatPlatformLabel(platform)).join(', ')}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {isConfirming ? (
+                      <>
+                        <button
+                          type="button"
+                          className="rounded-lg bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+                          onClick={() => { void cancelScheduledPost(item.id); }}
+                          disabled={isCancelling}
+                          data-testid="scheduled-post-confirm-cancel"
+                        >
+                          {isCancelling ? 'Cancelling…' : 'Confirm cancel'}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                          onClick={() => setConfirmingCancelId(null)}
+                          disabled={isCancelling}
+                        >
+                          Keep
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="rounded-lg border border-red-300 bg-white px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
+                        onClick={() => setConfirmingCancelId(item.id)}
+                        data-testid="scheduled-post-cancel"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}
@@ -1201,22 +1251,60 @@ export default function PublishPage() {
           <h2 className="section-title text-red-900">Failed Scheduled Posts</h2>
           <p className="mt-1 text-xs text-red-800">These scheduled posts could not be published automatically.</p>
           <ul className="mt-4 space-y-2 text-sm">
-            {failedScheduledPosts.map((item) => (
-              <li key={item.id} className="rounded-xl border border-red-300 bg-white px-3 py-2">
-                <p className="font-medium text-red-900">{item.articleTitle}</p>
-                <p className="text-xs text-red-800">
-                  {new Date(item.scheduledForMs).toLocaleString()} · {item.platforms.map((platform) => formatPlatformLabel(platform)).join(', ')}
-                  {item.failureReason ? ` · ${item.failureReason.replace(/_/g, ' ')}` : ''}
-                </p>
-                {item.failureReason === 'token_expired' ? (
-                  <p className="mt-1 text-xs">
-                    <Link href="/settings#integrations" className="font-semibold text-blue-700 hover:underline">
-                      Reconnect LinkedIn →
-                    </Link>
-                  </p>
-                ) : null}
-              </li>
-            ))}
+            {failedScheduledPosts.map((item) => {
+              const isCancelling = cancellingScheduledId === item.id;
+              const isConfirming = confirmingCancelId === item.id;
+              return (
+                <li key={item.id} className="flex items-start justify-between gap-3 rounded-xl border border-red-300 bg-white px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-red-900">{item.articleTitle}</p>
+                    <p className="text-xs text-red-800">
+                      {new Date(item.scheduledForMs).toLocaleString()} · {item.platforms.map((platform) => formatPlatformLabel(platform)).join(', ')}
+                      {item.failureReason ? ` · ${item.failureReason.replace(/_/g, ' ')}` : ''}
+                    </p>
+                    {item.failureReason === 'token_expired' ? (
+                      <p className="mt-1 text-xs">
+                        <Link href="/settings#integrations" className="font-semibold text-blue-700 hover:underline">
+                          Reconnect LinkedIn →
+                        </Link>
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {isConfirming ? (
+                      <>
+                        <button
+                          type="button"
+                          className="rounded-lg bg-red-700 px-3 py-1 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+                          onClick={() => { void cancelScheduledPost(item.id); }}
+                          disabled={isCancelling}
+                          data-testid="failed-post-confirm-cancel"
+                        >
+                          {isCancelling ? 'Removing…' : 'Confirm remove'}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-lg border border-red-300 bg-white px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60"
+                          onClick={() => setConfirmingCancelId(null)}
+                          disabled={isCancelling}
+                        >
+                          Keep
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="rounded-lg border border-red-400 bg-white px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
+                        onClick={() => setConfirmingCancelId(item.id)}
+                        data-testid="failed-post-remove"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}

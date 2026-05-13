@@ -132,7 +132,8 @@ This sweeper is **not implemented in this slice**. It is documented here so down
 - **Source of truth:** `users/{uid}/scheduledPosts` ordered by `scheduledForMs` ascending.
 - **Resolution:** Per-minute clock tick on the Notifications page; per-render on Publish/Dashboard.
 - **Time zone handling:** All stored times are absolute (`scheduledForMs` is a UNIX millisecond timestamp). The UI renders via `toLocaleString()` and the date/time picker writes through `parseScheduledAtInputValue`.
-- **Cancellation/edit:** Currently TODO — there is no UI to cancel or reschedule a `scheduledPost` once written. Users would have to delete the document directly.
+- **Cancellation:** DONE for `scheduled` and `failed` rows. The Publish page surfaces a per-row `Cancel` (upcoming) / `Remove` (failed) button with an inline two-step confirm. Confirming fires `DELETE /api/v1/publish/schedule/{id}` which (a) best-effort deletes the EventBridge schedule and (b) deletes the Firestore document. Rows in `publishing` or `published` state return HTTP 409 `status_not_cancellable`. `eventbridge_scheduler.delete_schedule` swallows `ResourceNotFoundException`, so cancelling a row whose schedule has already auto-deleted (after firing, or because `ActionAfterCompletion=DELETE` already ran) still cleanly removes the Firestore row.
+- **Edit/reschedule:** Currently TODO — `eventbridge_scheduler.update_schedule` exists (delete-then-create) but has no UI caller yet. Users today cancel + re-create.
 - **Background firing:** DONE for LinkedIn. `POST /api/v1/publish/scheduled/run` (server-to-server, shared-secret authed) drains due LinkedIn rows on every Cloud Scheduler tick (see §5). Other platforms still rely on the reminder + handoff path.
 
 ---
@@ -151,6 +152,7 @@ This sweeper is **not implemented in this slice**. It is documented here so down
 | Direct LinkedIn publish | `POST /api/v1/publish/linkedin/now` | `publishLinkedInNow()` (`src/lib/publish.ts`) | DONE |
 | Scheduled LinkedIn publish (Pattern B — primary) | `POST /api/v1/publish/schedule` | `scheduleLinkedInPost()` (`src/lib/publish.ts`) | DONE |
 | Scheduled LinkedIn publish (safety net / local dev) | `POST /api/v1/publish/scheduled/run` | (server-to-server; no client wrapper) | DONE |
+| Cancel scheduled post | `DELETE /api/v1/publish/schedule/{id}` | `cancelScheduledPost(id)` (`src/lib/publish.ts`) | DONE |
 | X / Twitter / Medium / WordPress / Ghost / Substack OAuth | TODO | TODO | TODO |
 | Search engine submission (IndexNow) | TODO | TODO | TODO |
 
@@ -220,7 +222,7 @@ This sweeper is **not implemented in this slice**. It is documented here so down
 - **Safety-net sweeper for Pattern B** — planned but not yet implemented (see §5.5). Today, an EventBridge fire that fails or never delivers leaves the row in `status: 'scheduled'` or `'publishing'` with `attemptCount` bumped, and the user must manually reschedule. The planned sweeper will requeue stuck rows after a backoff.
 - No retry policy for failed scheduled rows — a `status: 'failed'` row stays failed until the user reschedules. `attemptCount` is recorded for future use.
 - No multi-platform single schedule (current schedule writes one platform per record even though the field is an array).
-- No reschedule/cancel UI for an existing `scheduledPost`. The `eventbridge_scheduler.delete_schedule` and `update_schedule` helpers are exported and importable for the future UI but have no caller besides the `create_one_shot_schedule` rollback path on Firestore-write failure.
+- Cancel UI is DONE (see Scheduling Logic). Reschedule UI is still TODO — `eventbridge_scheduler.update_schedule` (delete + recreate) is exported but unused by the frontend.
 - No IndexNow / search engine submission on publish.
 - No audit log entry on the synchronous "Publish now" success path (database.md does not yet define an audit collection). The scheduler path DOES persist `postUrn`, `postUrl`, and `publishedAtMs` on the originating `scheduledPosts` row.
 - No automatic refresh of expired LinkedIn access tokens; on a 401 from LinkedIn the user is prompted to reconnect via `/settings#integrations` (and any scheduled row that hit 401 is flagged with `failureReason: 'token_expired'`).

@@ -204,6 +204,17 @@ Copy `backend/.env.example` → `backend/.env` before running.
 - **Success response (HTTP 200)**: `{ success: true, scheduledPostId, eventBridgeScheduleName }`.
 - **Error responses**: 401 (auth dependency), 403 `uid_mismatch`, 422 `scheduled_too_soon` / `missing_linkedin_snapshot` / `unsupported_platform`, 502 `schedule_provisioning_failed`, 500 `schedule_write_failed`.
 
+### `DELETE /api/v1/publish/schedule/{scheduled_post_id}`
+- **Location**: `backend/app/routers/publish.py`
+- **Auth**: `Authorization: Bearer <Firebase ID token>` via `verify_firebase_id_token`. The lookup uses `users/{verified_uid}/scheduledPosts/{scheduled_post_id}`, so cross-user access is structurally impossible (a different uid's doc simply won't exist for the verified user). No body.
+- **Purpose**: Cancel / remove a scheduled post. Used by the per-post `Cancel` button in the Upcoming Scheduled Posts list and the `Remove` button in the Failed Scheduled Posts list on `/publish`.
+- **Validation order**: identity-dependent lookup → 404 `not_found` if doc absent → 409 `status_not_cancellable` if `status` in `{publishing, published}` (the row has already left the queue; cancellation would race the publisher / be meaningless).
+- **Side effects** (only when validation passes):
+  1. Best-effort `eventbridge_scheduler.delete_schedule(scheduled_post_id)`. Already-fired schedules (auto-deleted via `ActionAfterCompletion=DELETE`) and unconfigured-AWS local-dev mode both result in a no-op. Non-`ResourceNotFoundException` errors are swallowed and logged so the Firestore delete still runs.
+  2. `ref.delete()` on the Firestore document. On failure → HTTP 500 `firestore_delete_failed`.
+- **Success response (HTTP 200)**: `{ success: true, scheduledPostId, eventBridgeScheduleDeleted: bool }`. `eventBridgeScheduleDeleted` is `true` when `delete_schedule` raised no exception (including the silent `ResourceNotFoundException` and local-dev no-op paths); `false` only when a non-NotFound boto3 error was swallowed.
+- **Error responses**: 401 (auth dependency), 404 `not_found`, 409 `status_not_cancellable`, 500 `firestore_delete_failed`.
+
 ### `POST /api/v1/publish/scheduled/run`
 - **Location**: `backend/app/routers/publish.py`
 - **Auth**: Shared-secret header `X-Scheduler-Secret` matched against `SCHEDULER_SECRET`. `SCHEDULER_SECRET` unset → HTTP 503 `scheduler_disabled`. Header missing/mismatched → HTTP 401 `unauthorized_scheduler`. No Firebase auth.

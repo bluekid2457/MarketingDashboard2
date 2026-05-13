@@ -224,3 +224,83 @@ export async function scheduleLinkedInPost(
       : 'unknown';
   return { success: false, error: detail, status: response.status || 0 };
 }
+
+// ---------------------------------------------------------------------------
+// cancelScheduledPost — DELETE /api/v1/publish/schedule/{id}
+// Deletes the EventBridge schedule (best-effort) AND the Firestore row.
+// ---------------------------------------------------------------------------
+
+export type CancelScheduleSuccess = {
+  success: true;
+  scheduledPostId: string;
+  eventBridgeScheduleDeleted: boolean;
+};
+
+export type CancelScheduleFailure = {
+  success: false;
+  error: string;
+  status: number;
+};
+
+export type CancelScheduleResult = CancelScheduleSuccess | CancelScheduleFailure;
+
+/**
+ * Cancel a scheduled post by id. Never throws.
+ *
+ * Backend refuses when the row is mid-publish (409 status_not_cancellable)
+ * or when it doesn't exist (404 not_found); both are surfaced as typed
+ * failure outcomes the caller can branch on.
+ */
+export async function cancelScheduledPost(scheduledPostId: string): Promise<CancelScheduleResult> {
+  const auth = getFirebaseAuth();
+  const currentUser = auth?.currentUser ?? null;
+  if (!currentUser) {
+    return { success: false, error: 'not_signed_in', status: 401 };
+  }
+
+  let idToken: string;
+  try {
+    idToken = await currentUser.getIdToken();
+  } catch {
+    return { success: false, error: 'not_signed_in', status: 401 };
+  }
+
+  const baseUrl = getBackendApiBaseUrl();
+  let response: Response;
+  try {
+    response = await fetch(
+      `${baseUrl}/api/v1/publish/schedule/${encodeURIComponent(scheduledPostId)}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      },
+    );
+  } catch {
+    return { success: false, error: 'network', status: 0 };
+  }
+
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    parsed = (await response.json()) as Record<string, unknown>;
+  } catch {
+    parsed = null;
+  }
+
+  if (response.ok && parsed && parsed.success === true) {
+    return {
+      success: true,
+      scheduledPostId: asString(parsed.scheduledPostId) || scheduledPostId,
+      eventBridgeScheduleDeleted: parsed.eventBridgeScheduleDeleted === true,
+    };
+  }
+
+  const detail =
+    typeof parsed?.detail === 'string'
+      ? parsed.detail
+      : typeof parsed?.error === 'string'
+      ? parsed.error
+      : 'unknown';
+  return { success: false, error: detail, status: response.status || 0 };
+}

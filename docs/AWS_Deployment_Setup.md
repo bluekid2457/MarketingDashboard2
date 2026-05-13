@@ -365,11 +365,12 @@ Wait for `State: Active` (same as before).
 
 ## 12. Create the Function URL
 
+> **Important — do NOT set CORS at the Function URL layer.** The FastAPI app in `backend/app/main.py` already configures `CORSMiddleware` allowing `settings.frontend_url` and `http://localhost:3000`. If you also set CORS at the Function URL layer, both layers add an `Access-Control-Allow-Origin` header to the response. The browser sees two values and blocks the request with `The 'Access-Control-Allow-Origin' header contains multiple values …, but only one is allowed`. Let FastAPI/Mangum be the single CORS source of truth.
+
 ```bash
 aws lambda create-function-url-config \
   --function-name marketing-dashboard-http \
   --auth-type NONE \
-  --cors "{\"AllowOrigins\":[\"https://$AMPLIFY_DOMAIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\"],\"AllowHeaders\":[\"authorization\",\"content-type\"],\"MaxAge\":86400}" \
   --region $AWS_REGION
 
 # Allow public invocation of the URL
@@ -385,7 +386,16 @@ export FUNCTION_URL=$(aws lambda get-function-url-config --function-name marketi
 echo "Function URL: $FUNCTION_URL"
 ```
 
-**Save the Function URL.** This is your `NEXT_PUBLIC_API_URL`. It looks like `https://abc123xyz.lambda-url.us-east-1.on.aws/`.
+**Save the Function URL.** This is your `NEXT_PUBLIC_API_URL`. It looks like `https://abc123xyz.lambda-url.us-east-2.on.aws/`.
+
+If you accidentally created the Function URL with CORS configured (or inherited an older setup), clear it with:
+
+```bash
+aws lambda update-function-url-config \
+  --function-name marketing-dashboard-http \
+  --cors '{"AllowOrigins":[],"AllowMethods":[],"AllowHeaders":[]}' \
+  --region $AWS_REGION
+```
 
 ---
 
@@ -558,7 +568,8 @@ aws lambda update-function-configuration --function-name marketing-dashboard-sch
 | LinkedIn connect fails with `redirect_uri_mismatch` | LinkedIn app doesn't have the new callback URL | Step 14 — add `<function-url>/api/v1/auth/linkedin/callback` to LinkedIn app authorized redirect URLs |
 | Scheduler Lambda fires but post doesn't appear on LinkedIn | LinkedIn API 401 (token expired) | Check the Firestore doc — `status` should be `failed` with `failureReason: token_expired`. User needs to reconnect via `/settings#integrations`. |
 | Schedule fires at wrong time | Time zone confusion. `scheduledForMs` is UTC ms, EventBridge uses UTC. | Confirm the doc's `scheduledForMs` matches what you intended. The Publish page's date picker writes UTC ms via `parseScheduledAtInputValue`. |
-| Frontend → backend call fails with CORS error | CORS allowlist on Function URL doesn't include the Amplify domain | Step 12, re-run `update-function-url-config` with the correct AllowOrigins |
+| Frontend → backend call fails with `Access-Control-Allow-Origin … contains multiple values` | Both FastAPI `CORSMiddleware` AND Function URL CORS are adding the header — they collide. | Clear Function URL CORS (see §12 "If you accidentally created…"). FastAPI handles CORS by itself. |
+| Frontend → backend call fails with other CORS errors | FastAPI `CORSMiddleware` allowlist doesn't include the requesting origin | Edit `backend/app/main.py`, redeploy the Lambda container image (§17a) |
 | `AccessDeniedException` on schedule create | The HTTP Lambda's execution role lacks `scheduler:CreateSchedule` or `iam:PassRole` | Step 10b — re-attach `ManageScheduledPostSchedules` policy |
 
 ---
