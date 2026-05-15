@@ -90,3 +90,6 @@ $RECYCLE.BIN/
 .cache/
 coverage/
 .playwright-mcp/*
+
+# === Claude Code ===
+.claude/worktrees/

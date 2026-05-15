@@ -5,9 +5,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, deleteField, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 
+import { MarkdownPostPreview } from '@/components/MarkdownPostPreview';
+import { UnicodePostPreview } from '@/components/UnicodePostPreview';
+import { ChevronToggleIcon } from '@/components/ChevronToggleIcon';
 import { Spinner } from '@/components/Spinner';
 import DocumentContextHeader from '@/components/DocumentContextHeader';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { usePersistentToggle } from '@/lib/usePersistentToggle';
 import { getActiveAIKey } from '@/lib/aiConfig';
 import { findOrphanAdaptations } from '@/lib/orphans';
 import { listIntegrationConnections, type IntegrationConnection } from '@/lib/integrations';
@@ -131,6 +135,12 @@ const PLATFORM_CARD_META: Record<PlatformKey, PlatformCardMeta> = {
     emptyPlaceholder: 'No X/Twitter-ready content found yet. Generate platform copy in Adapt first.',
     copyButtonLabel: 'Copy X Text',
   },
+  instagram: {
+    badgeClassName: 'bg-pink-100 text-pink-800',
+    description: 'Copy your Instagram caption, then paste it into the Instagram app or Creator Studio. Schedule a reminder here.',
+    emptyPlaceholder: 'No Instagram-ready content found yet. Generate platform copy in Adapt first.',
+    copyButtonLabel: 'Copy Instagram Text',
+  },
   medium: {
     badgeClassName: 'bg-emerald-100 text-emerald-800',
     description: 'Copy your Medium draft, then paste it into your Medium editor and schedule a reminder here.',
@@ -150,6 +160,9 @@ const PLATFORM_CARD_META: Record<PlatformKey, PlatformCardMeta> = {
     copyButtonLabel: 'Copy Blog Text',
   },
 };
+
+// Bucket A — plain-text feed platforms get a Unicode-substitution preview.
+const UNICODE_PLATFORMS: ReadonlySet<PlatformKey> = new Set(['linkedin', 'twitter', 'instagram']);
 
 export default function PublishPage() {
   const [currentUid, setCurrentUid] = useState<string | null>(null);
@@ -181,6 +194,15 @@ export default function PublishPage() {
   const [plagiarismRunningByKey, setPlagiarismRunningByKey] = useState<BooleanMap>({});
   const [workflowContext, setWorkflowContextState] = useState<WorkflowContext | null>(null);
   const [linkedinConnection, setLinkedinConnection] = useState<IntegrationConnection | null>(null);
+
+  // Persistent collapse state for the per-card preview block. One state for
+  // the whole publish page — collapsing on the LinkedIn card also collapses
+  // the Twitter, Instagram, Medium, etc. cards. Stored in localStorage so
+  // the preference survives reloads (key: ``mdash:previewCollapse:publish``).
+  const [cardPreviewCollapsed, setCardPreviewCollapsed] = usePersistentToggle(
+    'mdash:previewCollapse:publish',
+    false,
+  );
 
   useEffect(() => {
     setWorkflowContextState(getWorkflowContext());
@@ -914,6 +936,40 @@ export default function PublishPage() {
                                 setDraftByKey((previous) => ({ ...previous, [cardKey]: event.target.value }));
                               }}
                             />
+
+                            <div
+                              className="mt-3 rounded-xl border border-slate-200 bg-white p-3"
+                              data-testid={`publish-preview-${platform}`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setCardPreviewCollapsed()}
+                                aria-expanded={!cardPreviewCollapsed}
+                                aria-controls={`publish-preview-body-${cardKey}`}
+                                className="flex w-full items-center justify-between text-left"
+                              >
+                                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                                  {UNICODE_PLATFORMS.has(platform)
+                                    ? `${platformLabel} preview (Unicode)`
+                                    : `${platformLabel} preview`}
+                                </span>
+                                <ChevronToggleIcon collapsed={cardPreviewCollapsed} />
+                              </button>
+                              {!cardPreviewCollapsed ? (
+                                <div id={`publish-preview-body-${cardKey}`} className="mt-2">
+                                  {UNICODE_PLATFORMS.has(platform) ? (
+                                    <UnicodePostPreview
+                                      platform={platform as 'linkedin' | 'twitter' | 'instagram'}
+                                      markdown={isEditingCard ? (draftByKey[cardKey] ?? text) : text}
+                                    />
+                                  ) : (
+                                    <MarkdownPostPreview
+                                      markdown={isEditingCard ? (draftByKey[cardKey] ?? text) : text}
+                                    />
+                                  )}
+                                </div>
+                              ) : null}
+                            </div>
 
                             {plagiarism ? (
                               <p

@@ -7,6 +7,7 @@
 
 import { getFirebaseAuth } from '@/lib/firebase';
 import { getBackendApiBaseUrl } from '@/lib/integrations';
+import { markdownToLinkedInUnicode } from '@/lib/linkedinFormat';
 
 export type PublishVisibility = 'PUBLIC' | 'CONNECTIONS';
 
@@ -73,6 +74,12 @@ export async function publishLinkedInNow(
   const baseUrl = getBackendApiBaseUrl();
   const visibility: PublishVisibility = opts?.visibility ?? 'PUBLIC';
 
+  // Convert markdown -> LinkedIn-Unicode BEFORE the POST so the wire payload
+  // already contains Math-Sans Bold codepoints (no raw `**bold**`). The
+  // backend route ALSO converts as defense-in-depth; the converter is
+  // idempotent so double-conversion is a safe no-op.
+  const convertedText = markdownToLinkedInUnicode(text);
+
   let response: Response;
   try {
     response = await fetch(`${baseUrl}/api/v1/publish/linkedin/now`, {
@@ -81,7 +88,7 @@ export async function publishLinkedInNow(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${idToken}`,
       },
-      body: JSON.stringify({ userId, text, visibility }),
+      body: JSON.stringify({ userId, text: convertedText, visibility }),
     });
   } catch {
     return { success: false, error: 'network', status: 0 };
@@ -171,6 +178,7 @@ export async function scheduleLinkedInPost(
   }
 
   const baseUrl = getBackendApiBaseUrl();
+  // markdown stored as-is; scheduler converts at fire time
   const body = {
     userId: args.userId,
     scheduledForMs: args.scheduledForMs,

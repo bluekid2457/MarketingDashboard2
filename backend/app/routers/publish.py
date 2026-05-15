@@ -33,6 +33,7 @@ from app.services.linkedin_publisher import (
     PublishOutcome,
     publish_linkedin_text,
 )
+from app.services.linkedin_text_format import markdown_to_linkedin_unicode
 from app.services.scheduler_worker import publish_one
 
 router = APIRouter(tags=["Publish"])
@@ -92,9 +93,19 @@ async def publish_linkedin_now(
     if verified_uid != body.user_id:
         raise HTTPException(status_code=403, detail="uid_mismatch")
 
+    # Convert markdown -> LinkedIn-Unicode BEFORE the LinkedIn API call. The
+    # frontend wrapper already converts as part of `publishLinkedInNow`; the
+    # converter is idempotent so this branch is also a safe no-op when the
+    # caller already converted. Re-check length AFTER conversion because
+    # strikethrough appends a combining mark per grapheme and can push past
+    # the 3000-char ceiling Pydantic enforced on the pre-conversion body.
+    converted_text = markdown_to_linkedin_unicode(body.text)
+    if len(converted_text) > 3000:
+        raise HTTPException(status_code=422, detail="payload_too_long")
+
     outcome = await publish_linkedin_text(
         user_id=body.user_id,
-        text=body.text,
+        text=converted_text,
         visibility=body.visibility,
     )
     return _outcome_to_response(outcome)

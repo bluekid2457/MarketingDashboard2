@@ -64,8 +64,10 @@ This table centralizes the current frontend `(TODO)` items for quick planning an
 - **Styling**: Tailwind CSS v3
 - **State Management**: Zustand v4
 - **Authentication**: Firebase Auth (Email/Password)
+- **Markdown rendering**: `react-markdown` v9 + `remark-gfm` v4 (used by `<MarkdownPostPreview>` for Medium / Newsletter / Blog previews; no `rehype-raw`, so raw HTML is sanitized to literal text by default).
 - **Linting**: ESLint (`next/core-web-vitals`)
 - **Formatting**: Prettier
+- **Unit tests**: Vitest with jsdom (`@testing-library/react`, `@testing-library/jest-dom`) — config in `vitest.config.ts`, setup in `src/test-setup.ts` (auto-cleanup via `afterEach`). Uses `@vitejs/plugin-react` to compile JSX in test files.
 
 ---
 
@@ -176,6 +178,9 @@ frontend/
       DocumentContextHeader.tsx # Sticky "Editing: <idea topic> Â· <angle title>" context header rendered beneath the WorkflowStepper on Storyboard / Adapt / Publish (single-doc) so the user keeps a persistent anchor across the Storyboard â†’ Adapt â†’ Publish jump. Right-aligned step indicator ("Step N of 6") derived from `PIPELINE_STEPS`.
       DraftChatPanel.tsx        # Reusable AI chat panel with pending sentence-diff status for in-editor Keep/Undo
       InlineEditPanel.tsx       # Floating inline edit prompt + proposal queue used by Storyboard and Adapt
+      LinkedInPreview.tsx       # Thin backwards-compat delegate around `<UnicodePostPreview platform="linkedin">`; preserves the original `LinkedInPreview` / `LinkedInPreviewCaveat` exports so legacy call sites keep compiling. New call sites should prefer `UnicodePostPreview` directly.
+      MarkdownPostPreview.tsx   # Bucket-B rendered-markdown preview for long-form platforms (Medium / Newsletter / Blog). Wraps `react-markdown` with `remark-gfm` (no `rehype-raw`, so raw `<script>` is sanitized to literal text). Inline utility classes style headings/lists/links/code/strong/em/del. Anchor renderer is overridden to open links in `_blank` with `rel="noopener noreferrer"`. Renders the caveat copy `Preview reflects rendered markdown. The destination platform may apply its own styling on publish.` as a sibling unless `showCaveat={false}`. `data-testid="markdown-preview"`.
+      UnicodePostPreview.tsx    # Bucket-A plain-text Unicode preview for feed platforms (LinkedIn / X-Twitter / Instagram). Calls the platform-neutral `markdownToLinkedInUnicode` converter from `lib/linkedinFormat.ts` and renders the converted text. Caveat copy is platform-aware (`Unicode formatting is not searchable on {platform label} and reduces screen-reader accessibility.`). `data-testid` is `linkedin-preview` for the LinkedIn variant (back-compat) and `unicode-preview-{platform}` for X / Instagram. `data-platform` attribute is always set. Companion `UnicodePostPreviewCaveat({ platform })` is exported for queue-level callers that render the caveat once at the top.
       Nav.tsx                   # Sidebar navigation component
       Spinner.tsx               # Shared loading spinner used across pages
       WorkflowStepper.tsx       # Sticky horizontal stepper (Ideas â†’ Angles â†’ Storyboard â†’ Adapt â†’ Review â†’ Publish) â€” reads step list from `lib/pipeline.ts`
@@ -185,11 +190,13 @@ frontend/
       chatSpanDiff.ts       # Sentence/span diff extraction + rebased span-apply helpers for AI chat previews
       firebase.ts           # Browser-only Firebase Web SDK initialization + lazy auth and Firestore getters
       firebaseServer.ts     # Server-safe Firebase app/Firestore initializer for Next.js route handlers
+      linkedinFormat.ts     # Pure markdown -> Unicode-feed converter (Math Sans Bold / Italic / Bold-Italic / strike, with link-extract + protected-region masking + flanking-strict inline transforms). The converter is platform-neutral — LinkedIn, Twitter, and Instagram captions all run through the same code path and produce byte-identical output. The original `markdownToLinkedInUnicode` export is preserved for back-compat and re-exported as `markdownToUnicodePost`; new call sites should prefer the alias. Byte-for-byte mirror of backend/app/services/linkedin_text_format.py. Tests at src/lib/__tests__/linkedinFormat.test.ts (vitest).
       prompts/
         platforms/
-          index.ts          # Platform prompt resolver + platform key guard
+          index.ts          # Platform prompt resolver + platform key guard. Canonical `PlatformPromptKey` order: linkedin | twitter | instagram | medium | newsletter | blog (6 platforms).
           linkedin.ts       # LinkedIn adaptation prompt rules
           twitter.ts        # X/Twitter adaptation prompt rules
+          instagram.ts      # Instagram caption prompt rules (mobile-first hook, ≤2,200 chars, 3–8 hashtags, no in-body URLs, ends in CTA)
           medium.ts         # Medium adaptation prompt rules
           newsletter.ts     # Newsletter adaptation prompt rules
           blog.ts           # Blog adaptation prompt rules
@@ -206,6 +213,7 @@ frontend/
 | `npm run build`  | `next build`      |
 | `npm run start`  | `next start`      |
 | `npm run lint`   | `next lint`       |
+| `npm test`       | `vitest`          |
 
 ---
 
@@ -533,7 +541,7 @@ These landing pages replace the previous `redirect('/storyboard')` stubs, ensuri
 1. Uses `localStorage['adapt_draft_context']` as a fast-path when it matches the route (`ideaId` + `angleId`). If local context is missing, invalid, or route-mismatched, the page falls back to Firebase lookups (`users/{uid}/ideas/{ideaId}`, `users/{uid}/ideas/{ideaId}/workflow/angles`, and `users/{uid}/drafts/{ideaId}_{angleId}`) to rebuild a valid adaptation context instead of hard-failing immediately.
 2. If the storyboard draft document is missing during Firebase fallback resolution, Adapt builds a deterministic scaffold draft from idea + selected angle summary/sections so platform generation remains usable.
 3. Uses Firestore `users/{uid}/adaptations/{ideaId}_{angleId}` to load previously saved adaptation state for the signed-in user and merge saved platform copy over the draft-seeded defaults.
-4. Seeds `linkedin`, `twitter`, `medium`, `newsletter`, and `blog` platform editors from the current draft content when no adaptation doc exists yet.
+4. Seeds `linkedin`, `twitter`, `instagram`, `medium`, `newsletter`, and `blog` platform editors from the current draft content when no adaptation doc exists yet. `PLATFORM_CONFIG` has 6 entries in this canonical order; Instagram sits between X/Twitter and Medium and uses the `bg-pink-600` accent class.
 5. Platform tab buttons are fully stateful; clicking a tab changes the active platform and swaps the center editor/preview to that platform only. Only platform tabs are rendered now; persona rewrites apply directly into the active platform editor and do not create extra tabs or side variants.
 6. Editing updates only the currently active platform text. The textarea is disabled (`disabled={isAdaptationLoading}`) while the Firestore adaptation document is still being fetched, preventing any user input from being silently overwritten by the async load.
 7. Each active platform exposes an explicit `Generate <Platform>` button that calls `POST /api/drafts/adapt` using the original draft source (`adapt_draft_context.draftContent`) plus platform-specific prompt rules; the API route aborts provider calls after 5 minutes (300 seconds) and returns HTTP 504 with a timeout-specific error, while the client keeps a slightly longer local `AbortController` guard (~302 seconds) so the normal slow-provider path still surfaces the server timeout response first. Hung requests still clear the generating spinner, timeout/failure feedback is shown inline near the editor controls, and healthy providers still replace the active platform copy with the returned AI output.
@@ -550,7 +558,11 @@ These landing pages replace the previous `redirect('/storyboard')` stubs, ensuri
    - `ðŸ”— Source Check`
    When a configured non-Ollama AI key exists, the route keeps using the existing AI-backed prompt/call/parse flow. When the active provider is non-Ollama and no key is configured, the route returns deterministic, schema-compatible fallback outputs per tool based on the currently active platform copy instead of surfacing a shared missing-key failure.
 16. The active platform editor also shows a right-side AI timeline that records applied AI changes from generation, toolbox actions, chat-diff keeps, and accepted inline edits; selecting a timeline item restores that active-platform snapshot.
-17. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content.
+17. Preview card renders the active platform copy and a per-platform word-count snapshot, with no hardcoded demo content. **Preview is always rendered** (no `activePlatform === 'linkedin'` gate) and is bucket-routed by platform:
+    - **Bucket A — plain-text feed platforms (`linkedin`, `twitter`, `instagram`)** render the converted Math-Sans-Bold/Italic/Bold-Italic substitutions via `markdownToLinkedInUnicode` (`frontend/src/lib/linkedinFormat.ts`) and the `<UnicodePostPreview platform={activePlatform}>` component (`frontend/src/components/UnicodePostPreview.tsx`). The caveat strip reads `Unicode formatting is not searchable on {platform label} and reduces screen-reader accessibility.` and is platform-aware.
+    - **Bucket B — long-form platforms (`medium`, `newsletter`, `blog`)** render the markdown directly via `<MarkdownPostPreview>` (`frontend/src/components/MarkdownPostPreview.tsx`), which uses `react-markdown` + `remark-gfm`. The caveat reads `Preview reflects rendered markdown. The destination platform may apply its own styling on publish.`.
+    - On the `xl` right-hand column the live preview sits above the AI Edit Timeline, backed by a 150 ms-debounced mirror of the active platform's text (`debouncedActiveText`). The wrapper testid is `adapt-live-preview-{activePlatform}`. Heading: `{platform label} preview (Unicode)` for Bucket A, `{platform label} preview` for Bucket B. The heading is rendered as a `<button>` that toggles a chevron and collapses the preview body (`id="adapt-live-preview-body"`). Collapse state is persisted to `localStorage` under `mdash:previewCollapse:adapt` via the shared `usePersistentToggle` hook (`frontend/src/lib/usePersistentToggle.ts`) and applied across all platforms — one collapse state per surface, not per platform. The shared chevron glyph lives at `frontend/src/components/ChevronToggleIcon.tsx`.
+    - On sub-`xl` viewports the existing Edit/Preview toggle continues to work; the Preview tab swaps to `<UnicodePostPreview>` or `<MarkdownPostPreview>` per bucket. `<CitationHighlightPreview>` is no longer consumed on Adapt (it remains in use on Storyboard). The sub-`xl` Edit/Preview toggle is independent of the xl+ collapse state above.
 18. Right-hand trends sidebar consumes live `/api/trends` data and shows truthful loading, error, or empty states instead of placeholder topics/articles.
 19. Breadcrumb marks `Multi-Channel Adaptation` as the active workflow step; the primary completion CTA saves the current adaptation, preserves exact `ideaId` + `angleId` workflow context, and routes directly to `/publish`.
 20. The Adapt editor shares Storyboard inline editing UX: floating in-place prompt/diff controls anchored near current selection, red/green inline diff preview in the floating panel, and direct textarea editability while AI proposals are pending.
@@ -564,17 +576,20 @@ These landing pages replace the previous `redirect('/storyboard')` stubs, ensuri
 **Sections:**
 1. Loads all adaptation documents in realtime from `users/{uid}/adaptations` ordered by `updatedAt desc` and renders each adaptation as its own scheduling block.
 2. Each adaptation block shows idea + angle labels and an `Edit Adaptation` route action that deep-links to `/adapt/{ideaId}?angleId={angleId}`.
-3. Per-adaptation cards render for every platform present in the adaptation's `platforms` map. The canonical platform list is `linkedin | twitter | medium | newsletter | blog` (matching `frontend/src/lib/prompts/platforms/index.ts`); a card renders when there is saved content for that platform OR when the user has clicked Edit on a previously-empty platform.
+3. Per-adaptation cards render for every platform present in the adaptation's `platforms` map. The canonical platform list is `linkedin | twitter | instagram | medium | newsletter | blog` (6 platforms, matching `frontend/src/lib/prompts/platforms/index.ts` and `frontend/src/lib/scheduledPosts.ts`); a card renders when there is saved content for that platform OR when the user has clicked Edit on a previously-empty platform.
 4. LinkedIn card has a one-click compose handoff:
   - attempts `navigator.clipboard.writeText(linkedinText)`
   - opens `https://www.linkedin.com/feed/?shareActive=true` in a new tab
   - shows explicit status message for copied-success or clipboard-blocked fallback guidance
 5. X/Twitter card has a one-click intent handoff: opens `https://twitter.com/intent/tweet?text=...` with URL-encoded prefilled text.
-6. Medium / Newsletter / Blog cards have NO provider compose-URL handoff (those platforms do not expose a one-click intent URL) â€” they offer "Copy text" + "Schedule reminder" instead, so users paste into their own publishing tool (Medium editor, email tool, or CMS).
-7. All platform cards include content textareas, explicit `Copy` buttons (label adapts per platform), and card-level `Edit` / `Delete` controls.
+6. Instagram / Medium / Newsletter / Blog cards have NO provider compose-URL handoff and NO direct publish button — they offer "Copy text" + "Schedule reminder" only, so users paste into the Instagram app / Creator Studio / their own publishing tool. `hasPublishHandoff` is true only for `platform === 'linkedin' || platform === 'twitter'`; Instagram intentionally never renders a publish button despite being a Bucket-A Unicode platform.
+7. All platform cards include content textareas, explicit `Copy` buttons (label adapts per platform), and card-level `Edit` / `Delete` controls. **Every platform card renders a live preview below its textarea**, bucket-routed:
+   - **Bucket A (LinkedIn / X-Twitter / Instagram)** → `<UnicodePostPreview platform={platform}>` titled `{platform label} preview (Unicode)`.
+   - **Bucket B (Medium / Newsletter / Blog)** → `<MarkdownPostPreview>` titled `{platform label} preview`.
+   The wrapper testid is `publish-preview-{platform}`. Conversion for the LinkedIn publish handoff still happens inside `frontend/src/lib/publish.ts::publishLinkedInNow` (frontend-side, via `markdownToLinkedInUnicode`) before the POST and again on the backend as defense-in-depth. The wire-format contract — "the JSON body sent over the network MUST already contain Math-Sans Unicode glyphs, never raw `**…**`" — is locked down by `frontend/src/lib/__tests__/publish.test.ts`, which stubs `fetch` and asserts on the captured POST body for `**sdf**`, `** sdf **`, and a mid-sentence bold input. The preview reads from `isEditingCard ? draftByKey[cardKey] : text` so unsaved edits are reflected immediately. The preview heading on each card is a `<button>` with a chevron that collapses the preview body (`id="publish-preview-body-{cardKey}"`, where `cardKey` is the per-card identifier — `${adaptationId}:${platform}` — so the id stays unique even when multiple adaptations expose the same platform, keeping the `aria-controls` contract valid); collapse state is persisted to `localStorage` under `mdash:previewCollapse:publish` via `usePersistentToggle` (`frontend/src/lib/usePersistentToggle.ts`) and applies to every platform card on the page at once (one preference per surface, not per platform).
 8. Card-level `Edit` enables in-card text editing for the selected adaptation + platform and persists to `users/{uid}/adaptations/{adaptationId}`.
 9. Card-level `Delete` removes the selected platform field from `users/{uid}/adaptations/{adaptationId}`; once removed, that platform card is hidden from the Publish UI.
-10. Platform-specific schedule pickers persist reminders to `users/{uid}/scheduledPosts` with adaptation/article metadata, `scheduledForMs` timestamp, and `platforms: [<platformKey>]` where `<platformKey>` is one of `linkedin | twitter | medium | newsletter | blog`.
+10. Platform-specific schedule pickers persist reminders to `users/{uid}/scheduledPosts` with adaptation/article metadata, `scheduledForMs` timestamp, and `platforms: [<platformKey>]` where `<platformKey>` is one of `linkedin | twitter | instagram | medium | newsletter | blog`.
 11. Publish renders upcoming scheduled posts from Firestore so users can verify queued reminders and dates across all adaptations.
 12. Clear UX states are present for loading, signed-out/config errors, empty adaptation library, schedule validation errors, and successful publish/schedule actions.
 13. Per-card plagiarism check is **optional**: the `Run plagiarism check` button still runs `/api/drafts/plagiarism` and the verdict pill still renders (clean / medium / high-risk), but the `Publish to LinkedIn`, `Publish to X / Twitter`, and `Schedule` buttons are NOT gated on a passing result. The pre-check inline hint (when no check has been run) reads "Optional: run a plagiarism check on this {platform} copy before publishing." in neutral slate styling — not the previous amber "must run before publishing" warning.
@@ -621,7 +636,12 @@ Implementation notes:
 **Route:** `src/app/(app)/review/page.tsx`
 **Layout Notes:** Queue and editor area with side stack for workflow controls.
 **Sections:**
-1. Draft Queue (Firestore-backed `users/{uid}/drafts` list, sorted by `updatedAt` desc; each row opens `/drafts/<ideaId>?angleId=<angleId>`)
+1. Draft Queue (Firestore-backed `users/{uid}/drafts` list, sorted by `updatedAt` desc; each row opens `/drafts/<ideaId>?angleId=<angleId>`). Each draft row reads the full `data.platforms` map (iterating canonical `PLATFORM_KEYS` from `frontend/src/lib/scheduledPosts.ts`) into a `platformContent: Partial<Record<PlatformKey, string>>` and renders:
+   - **Per-row platform pills** (testid `review-platform-pills-{storyboardId}`) — one pill per platform that has non-empty content for that row. Pills are clickable buttons that call `event.stopPropagation()` so clicking a pill swaps the preview without navigating into the storyboard editor. The active pill uses `bg-emerald-100 text-emerald-700`; inactive pills use `bg-slate-100 text-slate-600 hover:bg-slate-200`. Selected platform per row is tracked in page-level state (`selectedPreviewPlatformByRow: Record<string, PlatformKey>`); the default is `availablePlatforms[0]`.
+   - **Bucket-routed preview** — when the row has at least one available platform, a clamped (`max-h-32 overflow-hidden`) preview surface renders below the pill row. The component is `<UnicodePostPreview platform={selected}>` for Bucket A (`linkedin / twitter / instagram`) and `<MarkdownPostPreview>` for Bucket B (`medium / newsletter / blog`). Both are rendered with `showCaveat={false}` so the queue-level caveat block at the top is the only one. The clamped preview body lives at `id="review-row-preview-{storyboardId}"`.
+   - **Per-queue Show / Hide preview toggle** — rendered next to the pill row (testid `review-preview-toggle-{storyboardId}`) as a `<button>` carrying `aria-expanded` + `aria-controls` and a chevron via `<ChevronToggleIcon>`. Clicking the toggle calls `event.stopPropagation()` so it does not trigger the row click. The toggle drives a single page-level `rowPreviewCollapsed` boolean (one state for the whole queue — collapsing on any row hides the clamped preview on every row). The state is persisted to `localStorage` under `mdash:previewCollapse:review` via the shared `usePersistentToggle` hook (`frontend/src/lib/usePersistentToggle.ts`). The pill row stays visible when collapsed so a user can still pre-select a preview platform.
+   - Rows with no platform content render no pills, no toggle, and no preview box.
+   - A single caveat block (testid `review-preview-caveat`) renders **once at the top of the queue**, with two lines: `Preview reflects how this post will render on the selected platform.` and `Plain-text platforms (LinkedIn, X/Twitter, Instagram) substitute Unicode for visual bold/italic — not searchable and reduces screen-reader accessibility. Long-form platforms (Medium, Newsletter, Blog) render the markdown directly; destination styling may differ on publish.`.
 2. Inline Editor (TODO)
 3. Version History (TODO)
 4. Approval Chain Controls (TODO)

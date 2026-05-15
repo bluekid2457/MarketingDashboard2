@@ -80,6 +80,10 @@ This document defines the schema, relationships, and data requirements for the M
 - `updatedAt: timestamp`
   Server timestamp on each save.
 
+**Optional fields:**
+- `platforms: map<string, string>`
+  Per-platform raw markdown copy. When present, valid keys are `linkedin`, `twitter`, `instagram`, `medium`, `newsletter`, and `blog`. The Review queue reads this map (iterating canonical `PLATFORM_KEYS`) to render per-row platform pills + a bucket-routed preview. Most legacy storyboard documents do NOT carry this map (per-platform copy lives on the parallel `adaptations/` document for the same `ideaId_angleId` pair); rows without it render no preview pills. The same Unicode-vs-markdown rules from `adaptations.platforms` apply: values are raw markdown, conversion is preview/publish-time only.
+
 ### `users/{uid}` (root user document fields)
 **Purpose:** Persist signed-in user profile data that is not naturally a subcollection.
 
@@ -154,7 +158,7 @@ This document defines the schema, relationships, and data requirements for the M
 - `articleTitle: string`
   Display title used by Publish/Notifications panels (defaults to `ideaTopic` when missing).
 - `platforms: string[]`
-  One-or-more platform keys. Valid keys are `linkedin`, `twitter`, `medium`, `newsletter`, and `blog` (matching the Adapt platform schema in `frontend/src/lib/prompts/platforms/index.ts`). Current Publish UI schedules one platform per record (e.g. `['linkedin']`, `['newsletter']`); the field is an array for future multi-platform expansion.
+  One-or-more platform keys. Valid keys are `linkedin`, `twitter`, `instagram`, `medium`, `newsletter`, and `blog` (6 platforms, matching the Adapt platform schema in `frontend/src/lib/prompts/platforms/index.ts` and the `PlatformKey` union in `frontend/src/lib/scheduledPosts.ts`). Current Publish UI schedules one platform per record (e.g. `['linkedin']`, `['instagram']`, `['newsletter']`); the field is an array for future multi-platform expansion.
 - `scheduledForMs: number`
   Client timestamp (ms) of the scheduled publish moment. Used for ordering and "due now / upcoming / missed" classification.
 - `scheduledForIso: string`
@@ -168,7 +172,7 @@ This document defines the schema, relationships, and data requirements for the M
 
 **Optional fields (additive; written by the background scheduler):**
 - `contentSnapshot: map<string, string>`
-  Per-platform copy captured at schedule time so a later edit to the parent adaptation doc cannot change what the background scheduler actually posts. Keys match the platform slugs used in `platforms` (currently only `linkedin` is read by the scheduler). The Publish UI writes this map at schedule time.
+  Per-platform copy captured at schedule time so a later edit to the parent adaptation doc cannot change what the background scheduler actually posts. Keys match the platform slugs used in `platforms` (`linkedin`, `twitter`, `instagram`, `medium`, `newsletter`, `blog`). Currently only `contentSnapshot.linkedin` is **read** by the scheduler — the other platforms (`twitter`, `instagram`, `medium`, `newsletter`, `blog`) are **persisted but not parsed** until provider publishers ship. The Publish UI writes this map at schedule time. **All values are stored as raw markdown** — the same text the user typed in the Adapt platform card. The scheduler converts LinkedIn to LinkedIn-Unicode at fire time via `app.services.linkedin_text_format.markdown_to_linkedin_unicode(text)`; the Firestore value is never rewritten. When Twitter / Instagram publishers ship, they will run the same converter (the converter is platform-neutral) at publish time. Medium / Newsletter / Blog publishers will NOT apply the Unicode conversion.
 - `visibility: 'PUBLIC' | 'CONNECTIONS'`
   LinkedIn UGC visibility; passed through to LinkedIn when the scheduler publishes the row. Defaults to `'PUBLIC'` when absent.
 - `attemptCount: number`
@@ -209,7 +213,7 @@ This document defines the schema, relationships, and data requirements for the M
 - `angleTitle: string`
   Snapshot of the selected angle title for quick rendering.
 - `platforms: map<string, string>`
-  Platform-to-copy map. Current keys are `linkedin`, `twitter`, `medium`, `newsletter`, and `blog`.
+  Platform-to-copy map. Current keys are `linkedin`, `twitter`, `instagram`, `medium`, `newsletter`, and `blog` (6 platforms). **All values are stored as raw markdown** — Adapt persists exactly what the user typed in each platform card. The Math-Sans Unicode substitution (Math Sans Bold/Italic/Bold-Italic + combining strikethrough) is applied only at publish/preview time by `markdownToLinkedInUnicode` (frontend, platform-neutral, re-exported as `markdownToUnicodePost`) or `markdown_to_linkedin_unicode` (backend), never at save time. The converter is shared across all three Bucket-A plain-text platforms (LinkedIn, Twitter, Instagram); Bucket-B long-form platforms (Medium, Newsletter, Blog) render the markdown natively and the Unicode conversion must NOT be applied to them.
 - `activePlatform: string`
   The platform tab last active in the adaptation editor.
 - `selectedPlatforms: string[]`

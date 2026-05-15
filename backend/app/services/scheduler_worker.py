@@ -12,6 +12,7 @@ from firebase_admin import firestore
 
 from app.services.firebase_service import get_firestore_client
 from app.services.linkedin_publisher import publish_linkedin_text
+from app.services.linkedin_text_format import markdown_to_linkedin_unicode
 
 
 def _now_ms() -> int:
@@ -121,6 +122,12 @@ async def publish_one(user_id: str, scheduled_post_id: str) -> dict[str, Any]:
             pass
         print(f"[scheduler_worker] {scheduled_post_id} ({user_id}) -> failed (invalid_payload)")
         return {"status": "failed", "scheduledPostId": scheduled_post_id, "userId": user_id, "error": "invalid_payload"}
+
+    # Convert markdown -> LinkedIn-Unicode at fire time. The Firestore snapshot
+    # stores raw markdown so the user can still search/edit/diff their copy;
+    # the LinkedIn API only renders bold/italic/strike via Math Sans codepoints,
+    # so we substitute right before handing off to publish_linkedin_text.
+    text = markdown_to_linkedin_unicode(text)
 
     visibility = _resolve_visibility(claimed)
     outcome = await publish_linkedin_text(user_id=user_id, text=text, visibility=visibility)

@@ -6,11 +6,18 @@
  * dedupe — the two pages still own their own UI state and listeners.
  */
 
-export type PlatformKey = 'linkedin' | 'twitter' | 'medium' | 'newsletter' | 'blog';
+export type PlatformKey =
+  | 'linkedin'
+  | 'twitter'
+  | 'instagram'
+  | 'medium'
+  | 'newsletter'
+  | 'blog';
 
 export const PLATFORM_KEYS: readonly PlatformKey[] = [
   'linkedin',
   'twitter',
+  'instagram',
   'medium',
   'newsletter',
   'blog',
@@ -74,6 +81,7 @@ export function isScheduledFailureReason(value: unknown): value is ScheduledFail
 const PLATFORM_LABELS: Record<PlatformKey, string> = {
   linkedin: 'LinkedIn',
   twitter: 'X / Twitter',
+  instagram: 'Instagram',
   medium: 'Medium',
   newsletter: 'Newsletter',
   blog: 'Blog',
