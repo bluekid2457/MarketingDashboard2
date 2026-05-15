@@ -10,7 +10,11 @@ import { AIEditTimeline } from '@/components/AIEditTimeline';
 import { InlineEditPanel } from '@/components/InlineEditPanel';
 import { DraftChatPanel, type DraftChatMessage } from '@/components/DraftChatPanel';
 import { AIToolbox, type PlagiarismResult } from '@/components/AIToolbox';
-import { CitationHighlightPreview } from '@/components/CitationHighlightPreview';
+import { MarkdownPostPreview } from '@/components/MarkdownPostPreview';
+import { UnicodePostPreview } from '@/components/UnicodePostPreview';
+import { ChevronToggleIcon } from '@/components/ChevronToggleIcon';
+import { formatPlatformLabel } from '@/lib/scheduledPosts';
+import { usePersistentToggle } from '@/lib/usePersistentToggle';
 import { getActiveAIKey } from '@/lib/aiConfig';
 import { loadExaKey } from '@/lib/exaConfig';
 import { appendAIEditHistory, createEmptyAIEditHistoryState, type AIEditHistoryState } from '@/lib/aiEditHistory';
@@ -45,7 +49,7 @@ type AdaptDraftContext = {
   draftContent: string;
 };
 
-type PlatformKey = 'linkedin' | 'twitter' | 'medium' | 'newsletter' | 'blog';
+type PlatformKey = 'linkedin' | 'twitter' | 'instagram' | 'medium' | 'newsletter' | 'blog';
 type PlatformContent = Record<PlatformKey, string>;
 type PlatformStateMap = Record<PlatformKey, PlatformState>;
 type SeoStateMap = Record<PlatformKey, SeoState>;
@@ -114,15 +118,22 @@ const SAVE_DEBOUNCE_MS = 1500;
 const PLATFORM_CONFIG: Array<{ key: PlatformKey; label: string; accentClass: string }> = [
   { key: 'linkedin', label: 'LinkedIn', accentClass: 'bg-blue-700' },
   { key: 'twitter', label: 'X / Twitter', accentClass: 'bg-slate-900' },
+  { key: 'instagram', label: 'Instagram', accentClass: 'bg-pink-600' },
   { key: 'medium', label: 'Medium', accentClass: 'bg-emerald-700' },
   { key: 'newsletter', label: 'Newsletter', accentClass: 'bg-amber-600' },
   { key: 'blog', label: 'Blog', accentClass: 'bg-violet-700' },
 ];
 
+// Bucket A — plain-text feed platforms get a Unicode-substitution preview.
+const UNICODE_PLATFORMS: ReadonlySet<PlatformKey> = new Set(['linkedin', 'twitter', 'instagram']);
+// Bucket B — long-form platforms get a rendered-markdown preview.
+const MARKDOWN_PLATFORMS: ReadonlySet<PlatformKey> = new Set(['medium', 'newsletter', 'blog']);
+
 function createSeededPlatforms(seedText: string): PlatformContent {
   return {
     linkedin: seedText,
     twitter: seedText,
+    instagram: seedText,
     medium: seedText,
     newsletter: seedText,
     blog: seedText,
@@ -133,6 +144,7 @@ function createEmptyPlatformState(): PlatformStateMap {
   return {
     linkedin: { status: 'idle', error: null, generatedAt: null },
     twitter: { status: 'idle', error: null, generatedAt: null },
+    instagram: { status: 'idle', error: null, generatedAt: null },
     medium: { status: 'idle', error: null, generatedAt: null },
     newsletter: { status: 'idle', error: null, generatedAt: null },
     blog: { status: 'idle', error: null, generatedAt: null },
@@ -143,6 +155,7 @@ function createEmptySeoState(): SeoStateMap {
   return {
     linkedin: { status: 'idle', error: null, result: null, requestVersion: 0 },
     twitter: { status: 'idle', error: null, result: null, requestVersion: 0 },
+    instagram: { status: 'idle', error: null, result: null, requestVersion: 0 },
     medium: { status: 'idle', error: null, result: null, requestVersion: 0 },
     newsletter: { status: 'idle', error: null, result: null, requestVersion: 0 },
     blog: { status: 'idle', error: null, result: null, requestVersion: 0 },
@@ -153,6 +166,7 @@ function createEmptyVersionState(): PlatformVersionMap {
   return {
     linkedin: 0,
     twitter: 0,
+    instagram: 0,
     medium: 0,
     newsletter: 0,
     blog: 0,
@@ -163,6 +177,7 @@ function createEmptyChatDiffState(): PlatformChatDiffMap {
   return {
     linkedin: [],
     twitter: [],
+    instagram: [],
     medium: [],
     newsletter: [],
     blog: [],
@@ -173,6 +188,7 @@ function createEmptyAIHistoryMap(): PlatformAIHistoryMap {
   return {
     linkedin: createEmptyAIEditHistoryState(),
     twitter: createEmptyAIEditHistoryState(),
+    instagram: createEmptyAIEditHistoryState(),
     medium: createEmptyAIEditHistoryState(),
     newsletter: createEmptyAIEditHistoryState(),
     blog: createEmptyAIEditHistoryState(),
@@ -277,6 +293,7 @@ export default function AdaptPage() {
   const [chatHistoryByPlatform, setChatHistoryByPlatform] = useState<Record<PlatformKey, DraftChatMessage[]>>({
     linkedin: [],
     twitter: [],
+    instagram: [],
     medium: [],
     newsletter: [],
     blog: [],
@@ -284,6 +301,7 @@ export default function AdaptPage() {
   const [chatInputByPlatform, setChatInputByPlatform] = useState<Record<PlatformKey, string>>({
     linkedin: '',
     twitter: '',
+    instagram: '',
     medium: '',
     newsletter: '',
     blog: '',
@@ -292,6 +310,7 @@ export default function AdaptPage() {
   const [chatProviderByPlatform, setChatProviderByPlatform] = useState<Record<PlatformKey, string | null>>({
     linkedin: null,
     twitter: null,
+    instagram: null,
     medium: null,
     newsletter: null,
     blog: null,
@@ -303,6 +322,7 @@ export default function AdaptPage() {
   const [toolboxNoticeByPlatform, setToolboxNoticeByPlatform] = useState<Record<PlatformKey, string | null>>({
     linkedin: null,
     twitter: null,
+    instagram: null,
     medium: null,
     newsletter: null,
     blog: null,
@@ -310,6 +330,7 @@ export default function AdaptPage() {
   const [plagiarismByPlatform, setPlagiarismByPlatform] = useState<Record<PlatformKey, PlagiarismResult | null>>({
     linkedin: null,
     twitter: null,
+    instagram: null,
     medium: null,
     newsletter: null,
     blog: null,
@@ -317,17 +338,43 @@ export default function AdaptPage() {
   const [previewModeByPlatform, setPreviewModeByPlatform] = useState<Record<PlatformKey, boolean>>({
     linkedin: false,
     twitter: false,
+    instagram: false,
     medium: false,
     newsletter: false,
     blog: false,
   });
+  // Persistent collapse state for the xl+ right-column live preview block.
+  // Stored in localStorage under ``mdash:previewCollapse:adapt`` so a user
+  // who hides the preview keeps it hidden across reloads. One state for the
+  // whole surface — collapsing while on LinkedIn also collapses Twitter,
+  // Instagram, etc. The sub-xl Preview tab uses its own Edit/Preview toggle
+  // (see ``previewModeByPlatform``) and is intentionally NOT touched by
+  // this collapse state.
+  const [livePreviewCollapsed, setLivePreviewCollapsed] = usePersistentToggle(
+    'mdash:previewCollapse:adapt',
+    false,
+  );
   const [researchLogByPlatform, setResearchLogByPlatform] = useState<Record<PlatformKey, ResearchLog | null>>({
     linkedin: null,
     twitter: null,
+    instagram: null,
     medium: null,
     newsletter: null,
     blog: null,
   });
+
+  // Debounced mirror of the active platform's editor text — feeds the
+  // bucket-routed preview component (Unicode for plain-text feeds, rendered
+  // markdown for long-form). We debounce by 150ms so the converter does not
+  // run on every keystroke for long posts. The stored value is raw markdown;
+  // conversion is the preview's own responsibility.
+  const [debouncedActiveText, setDebouncedActiveText] = useState<string>('');
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedActiveText(platforms[activePlatform] ?? '');
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [platforms, activePlatform]);
 
   useEffect(() => {
     const refreshKey = (): void => {
@@ -1570,7 +1617,11 @@ export default function AdaptPage() {
 
                         {previewModeByPlatform[activePlatform] ? (
                           <div className="min-h-[180px] rounded-xl border border-slate-300 bg-white p-4">
-                            <CitationHighlightPreview content={text} />
+                            {UNICODE_PLATFORMS.has(activePlatform) ? (
+                              <UnicodePostPreview platform={activePlatform as 'linkedin' | 'twitter' | 'instagram'} markdown={text} />
+                            ) : (
+                              <MarkdownPostPreview markdown={text} />
+                            )}
                           </div>
                         ) : (
                           <>
@@ -1660,7 +1711,38 @@ export default function AdaptPage() {
                         )}
                       </div>
 
-                      <div className="xl:sticky xl:top-5">
+                      <div className="space-y-4 xl:sticky xl:top-5">
+                        <div
+                          className="hidden rounded-xl border border-slate-300 bg-white p-4 xl:block"
+                          data-testid={`adapt-live-preview-${activePlatform}`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setLivePreviewCollapsed()}
+                            aria-expanded={!livePreviewCollapsed}
+                            aria-controls="adapt-live-preview-body"
+                            className="flex w-full items-center justify-between text-left"
+                          >
+                            <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                              {UNICODE_PLATFORMS.has(activePlatform)
+                                ? `${formatPlatformLabel(activePlatform)} preview (Unicode)`
+                                : `${formatPlatformLabel(activePlatform)} preview`}
+                            </span>
+                            <ChevronToggleIcon collapsed={livePreviewCollapsed} />
+                          </button>
+                          {!livePreviewCollapsed ? (
+                            <div id="adapt-live-preview-body" className="mt-2">
+                              {UNICODE_PLATFORMS.has(activePlatform) ? (
+                                <UnicodePostPreview
+                                  platform={activePlatform as 'linkedin' | 'twitter' | 'instagram'}
+                                  markdown={debouncedActiveText}
+                                />
+                              ) : (
+                                <MarkdownPostPreview markdown={debouncedActiveText} />
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
                         <AIEditTimeline
                           entries={activeAiHistory.entries}
                           activeEntryId={activeAiHistory.activeEntryId}

@@ -129,17 +129,17 @@ This document describes the main screens required for the Marketing Dashboard, b
 **Components:**
 - Route/context validation against draft handoff data in `localStorage['adapt_draft_context']`
 - Firestore-backed per-platform adaptation document at `users/{uid}/adaptations/{ideaId}_{angleId}`
-- Platform selector for LinkedIn, X/Twitter, Medium, Newsletter, and Blog
+- Platform selector for LinkedIn, X/Twitter, Instagram, Medium, Newsletter, and Blog (6 tabs in canonical order; Instagram sits between X/Twitter and Medium).
 - Explicit Generate action for the active platform (calls AI adaptation endpoint)
 - Platform-specific editor where only the active tab's copy is edited
 - Persona rewrites apply directly to the active platform editor without creating extra persona tabs
 - Right-side AI change timeline for applied AI edits with restore actions
-- Prompt-template resolver under `src/lib/prompts/platforms` with concise per-platform rules (LinkedIn, X/Twitter, Medium, Newsletter, Blog)
+- Prompt-template resolver under `src/lib/prompts/platforms` with concise per-platform rules (LinkedIn, X/Twitter, Instagram, Medium, Newsletter, Blog).
 - Visible autosave/manual-save status for adaptation persistence
 - AI chat for editing/adapting the currently active platform version
 - AI tooling panel includes a Similar posts tab on Adapt that finds linked comparable posts, highlights competitor matches, and summarizes draft overlap and differentiation opportunities
 - Optimization tools for SEO Optimizer, AI Check, and Source Check with on-screen results; each tool analyzes the currently active platform copy, uses the configured AI provider when a valid key exists, and falls back to deterministic per-tool results when a non-Ollama key is missing
-- Live preview of the active platform copy plus per-platform word counts
+- Live preview of the active platform copy plus per-platform word counts. The right-column live preview on `xl+` is always rendered (no LinkedIn-only gate) and is bucket-routed: Bucket A (LinkedIn, X/Twitter, Instagram) renders `<UnicodePostPreview>` with the Math-Sans Unicode substitution; Bucket B (Medium, Newsletter, Blog) renders `<MarkdownPostPreview>` with `react-markdown` + `remark-gfm`. The sub-`xl` Preview tab uses the same bucket router.
 - Live trends and relevant articles panel sourced from `/api/trends`
 - Persistent sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" + "Step 4 of 6" pill) below the WorkflowStepper, mirroring Storyboard, so the editing anchor stays visible across the Storyboard → Adapt → Publish jump
 **Main Actions:**
@@ -161,7 +161,10 @@ This document describes the main screens required for the Marketing Dashboard, b
 - Visual content calendar — DONE (Dashboard `Activity Calendar` aggregates `scheduledPosts` + `adaptations`)
 - Gap detection alerts — DONE
 - Submit to search engines button (IndexNow) — TODO
-- Per-card LinkedIn / X-Twitter publish — DONE as a manual handoff (clipboard + open compose URL); no direct posting to provider APIs
+- Per-card LinkedIn / X-Twitter publish — DONE as a manual handoff (clipboard + open compose URL); no direct posting to provider APIs. Instagram has a card with Copy + Schedule but NO publish/intent button (`hasPublishHandoff` is true only for LinkedIn and X/Twitter).
+- Per-card preview — every card carries a live preview titled `{platform label} preview (Unicode)` for Bucket A (LinkedIn / X-Twitter / Instagram) or `{platform label} preview` for Bucket B (Medium / Newsletter / Blog). Wrapper testid is `publish-preview-{platform}`.
+- Per-card plagiarism check — optional, **not a publish/schedule prerequisite**. The "Run plagiarism check" button still runs the check and surfaces the verdict pill; "Publish to LinkedIn", "Publish to X / Twitter", and "Schedule" are NOT gated on a passing result. The pre-check hint reads "Optional: run a plagiarism check…" rather than the old "must run before publishing" warning.
+- Per-row `Cancel` button on each item in the `Upcoming Scheduled Posts` list and `Remove` button on each item in the `Failed Scheduled Posts` list. Click reveals inline two-step confirm (`Confirm cancel`/`Confirm remove` + `Keep`); confirming calls `DELETE /api/v1/publish/schedule/{id}` which deletes the EventBridge schedule (best-effort) AND the Firestore row. The Firestore listener updates the UI automatically. Returns a clear error if the row is already `publishing` or `published`.
 - Persistent sticky `<DocumentContextHeader />` ("Editing: <idea topic> · <angle title>" + "Step 6 of 6" pill) at the top of the page when the user arrived from a single-adaptation Adapt → Publish jump (workflow context has `ideaId`); hidden in the multi-adaptation library view
 **Main Actions:**
 - Schedule or publish content
@@ -170,10 +173,32 @@ This document describes the main screens required for the Marketing Dashboard, b
 
 ---
 
+## 7.5 — Scheduled Posts Calendar (`/calendar`) — DONE
+**Purpose:** Single visual surface for every scheduled / publishing / published / failed LinkedIn post for the signed-in user, with per-post reschedule and cancel actions.
+**Components:**
+- Sidebar nav entry `Calendar` (between `Settings` and `Notifications`) — DONE
+- Month-grid layout (Mon-first headers, today highlighted with an emerald ring, leading + trailing blanks to keep 7-column rows) — DONE
+- Status filter chips `All | Scheduled | Publishing | Published | Failed` — DONE
+- Prev/next month + Today nav buttons — DONE
+- Per-day cells with up to 3 status-colored post pills + `+N more` overflow control — DONE
+- Status-driven pill palette: scheduled = teal, publishing = amber, published = emerald, failed = red, cancelled = slate. `↗` glyph appears on published pills with a `postUrl`. — DONE
+- Centered detail modal (Esc + backdrop click close): status badge, article title, idea topic + angle, scheduled time (local + UTC tooltip), platform chips, content snapshot preview (`<pre>`), and status-conditional banners (`Published` + `View on LinkedIn →` or `Failed` + `Reconnect LinkedIn →` for `token_expired`) — DONE
+- Reschedule section (only when row status is `scheduled` or `failed` AND new time would be in the future): `<input type="datetime-local">` prefilled to current time, quick-preset buttons `+1h` / `+1d` / `+1w`, `Save reschedule` button (disabled when the new time is within 60 s of now, unchanged from current, or while the save is in flight). Calls `PATCH /api/v1/publish/schedule/{id}` via `rescheduleScheduledPost`. — DONE
+- Cancel section (only when row status is `scheduled` or `failed`): inline two-step confirm (`Cancel` → `Confirm cancel` + `Keep`), calls `DELETE /api/v1/publish/schedule/{id}` via `cancelScheduledPost`. — DONE
+- Drag-to-reschedule on the calendar grid — TODO (future work)
+- Recurring schedules / iCal export / multi-platform — TODO (future work)
+**Main Actions:**
+- Navigate months and filter by status
+- Open any post's detail modal
+- Reschedule a scheduled or failed post to a new future time (Firestore + EventBridge stay in sync via `eventbridge_scheduler.update_schedule`)
+- Cancel a scheduled or failed post (best-effort EventBridge delete + Firestore delete)
+
+---
+
 ## 8. Review & Approval Workflow Screen — PLACEHOLDER (queue only)
 **Purpose:** Manage draft approvals, version history, and comments.
 **Components:**
-- Draft queue/list sourced from the signed-in user's Firestore drafts (`users/{uid}/drafts`) — DONE
+- Draft queue/list sourced from the signed-in user's Firestore drafts (`users/{uid}/drafts`) — DONE. Each row now renders **per-row platform pills** (one pill per platform with non-empty content in the row's `platforms` map) and a bucket-routed preview below the pills: `<UnicodePostPreview>` for LinkedIn / X-Twitter / Instagram, `<MarkdownPostPreview>` for Medium / Newsletter / Blog. Pills `event.stopPropagation()` so clicking them swaps the preview without navigating into the storyboard editor. A combined caveat block at the top of the queue (testid `review-preview-caveat`) explains both buckets in one place.
 - Inline editor for review — PLACEHOLDER (rendered via `<PlaceholderCard>` with a `Coming soon` badge and an editor-silhouette decoration so it visually recedes from the working queue)
 - Version history panel — PLACEHOLDER (`<PlaceholderCard>` + `Coming soon` badge)
 - Approval chain controls — PLACEHOLDER (`<PlaceholderCard>` + `Coming soon` badge)

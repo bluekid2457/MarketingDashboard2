@@ -8,6 +8,8 @@ This document defines the requirements, architecture, and key behaviors for the 
 
 - **Framework**: FastAPI 0.111.0
 - **Server**: Uvicorn 0.29.0 (with standard extras)
+- **Lambda adapter**: Mangum >=0.17,<0.18 (wraps the FastAPI app for AWS Lambda; exported as `app.main.handler`)
+- **AWS SDK**: boto3 >=1.34,<2.0 (used by `eventbridge_scheduler` and `secrets_loader`; lazy-imported so local dev without AWS credentials still works)
 - **Language**: Python 3.10+
 - **Config**: pydantic-settings 2.2.1 (reads from `.env`)
 - **Validation**: Pydantic 2.7.1
@@ -22,22 +24,32 @@ This document defines the requirements, architecture, and key behaviors for the 
 
 ```
 backend/
-  requirements.txt          # pinned dependencies
+  requirements.txt          # pinned dependencies (incl. mangum, boto3)
   .env.example              # template for environment variables
+  Dockerfile                # local-dev image (uvicorn)
+  Dockerfile.lambda         # AWS Lambda container image (arm64); one image, two functions
   app/
     __init__.py
-    main.py                 # FastAPI app, CORS, /health endpoint
-    config.py               # Settings via pydantic-settings
+    main.py                 # FastAPI app, CORS, /health, router includes, `handler = Mangum(app)`
+    config.py               # Settings via pydantic-settings; calls secrets_loader BEFORE Settings()
+    auth.py                 # Firebase ID-token bearer-verification dependency
+    lambda_scheduler.py     # Scheduler Lambda entry point (publish_one bridge for EventBridge)
     routers/
       __init__.py           # router package
       linkedin.py           # LinkedIn OAuth start/callback endpoints
       integrations.py       # Provider registry + status/token/disconnect endpoints
+      publish.py            # /publish/linkedin/now, /publish/schedule (POST/DELETE/PATCH), /publish/scheduled/run
     services/
       encryption.py         # Fernet-compatible token encryption helper
       firebase_service.py   # Firebase Admin / Firestore lazy initialization
       provider_registry.py  # Shared provider capability registry
       integration_connection_service.py  # Firestore-backed connection + secret storage
       linkedin_oauth_service.py          # LinkedIn OAuth exchange + userinfo persistence
+      linkedin_publisher.py              # Shared LinkedIn UGC publisher (used by /publish/*)
+      linkedin_text_format.py            # Pure markdown -> Math-Sans-Unicode converter (mirror of frontend/src/lib/linkedinFormat.ts). NOTE: the converter is platform-neutral — it applies identically to LinkedIn, Twitter, and Instagram captions (all three are plain-text feeds). The module name is retained for back-compat; future Twitter / Instagram publishers MUST run their bodies through `markdown_to_linkedin_unicode` at publish time. Medium / Newsletter / Blog publishers MUST NOT — those platforms render markdown natively.
+      scheduler_worker.py                # Pure per-post publish worker (publish_one)
+      eventbridge_scheduler.py           # boto3 wrapper for EventBridge one-shot schedules
+      secrets_loader.py                  # Hydrates env vars from AWS Secrets Manager
 ```
 
 ---
@@ -60,23 +72,18 @@ backend/
 | `LINKEDIN_CLIENT_SECRET` | unset | LinkedIn app client secret |
 | `LINKEDIN_REDIRECT_URI` | `BACKEND_URL + /api/v1/auth/linkedin/callback` | Optional explicit LinkedIn callback URL override |
 | `LINKEDIN_SCOPES` | `openid profile email w_member_social` | Scopes requested during LinkedIn OAuth |
+| `SCHEDULER_SECRET` | unset | Shared secret required by `POST /api/v1/publish/scheduled/run`. Unset → the route 503s with `scheduler_disabled` |
+| `AWS_REGION` | auto-discovered | AWS region for boto3 (`scheduler` and `secretsmanager` clients). In Lambda this is set automatically |
+| `SCHEDULER_LAMBDA_ARN` | unset | Full ARN of the scheduler Lambda invoked by EventBridge. Unset (with `EVENTBRIDGE_INVOKER_ROLE_ARN`) → `eventbridge_scheduler` no-ops in local dev |
+| `EVENTBRIDGE_INVOKER_ROLE_ARN` | unset | IAM role EventBridge Scheduler assumes to invoke the scheduler Lambda. Unset (with `SCHEDULER_LAMBDA_ARN`) → `eventbridge_scheduler` no-ops |
+| `EVENTBRIDGE_SCHEDULE_GROUP_NAME` | `default` | Optional EventBridge schedule group name |
+| `SECRETS_MANAGER_SECRET_ID` | unset | If set, `secrets_loader.load_secrets_into_env()` hydrates this JSON secret's keys into `os.environ` at import time (explicit env vars still win) |
 
 Copy `backend/.env.example` → `backend/.env` before running.
 
 ---
 
-## Endpoint Surfaces
-
-This project mixes two API tiers, both of which are documented below:
-
-- **FastAPI backend** at `http://localhost:8000` — namespaces under `/api/v1/*`, `/health`. Owns OAuth/integration token storage (encrypted) and provider registry. See "FastAPI endpoints" below.
-- **Next.js route handlers** under `frontend/src/app/api/*` — namespaces include `/api/angles`, `/api/drafts/*`, `/api/ideas/*`, `/api/trends`, `/api/company/autofill`. These are the AI provider proxies that build prompts, call OpenAI/Gemini/Claude/Ollama, and return parsed structured payloads to the UI. They ARE the public-facing API for the AI features. See "Next.js route handlers" below.
-
-There is currently no `/api/v1/*` proxy that forwards Next.js calls to FastAPI; the two tiers serve disjoint concerns.
-
----
-
-## FastAPI endpoints
+## Endpoints
 
 ### `GET /health`
 - **Tags**: Health
@@ -113,37 +120,6 @@ There is currently no `/api/v1/*` proxy that forwards Next.js calls to FastAPI; 
   - Persists a public connection summary under `users/{uid}/integrationConnections/linkedin`.
   - Persists encrypted token material under backend-only `integrationSecrets/{uid__linkedin}`.
   - Redirects back to the frontend with `integration=linkedin` and a `status` query parameter.
-
-### `POST /api/v1/auth/linkedin/login/start`
-- **Location**: `backend/app/routers/linkedin.py`
-- **Purpose**: Begin a LinkedIn-based sign-in flow. Used by the "Sign in with LinkedIn" button on the public login page. Distinct from `/auth/linkedin/start`, which connects an already-authenticated user's LinkedIn account for posting.
-- **Request schema**: empty JSON body (`{}`).
-- **Behavior**:
-  - Validates LinkedIn client configuration.
-  - Generates a CSRF-safe OAuth state token.
-  - Stores `{ purpose: 'login', createdAtMs, expiresAtMs }` in Firestore under `linkedinLoginStates/{sha256(state)}` (separate from the connect-flow `integrationAuthStates` collection so the two cannot be replayed against each other).
-  - Returns a LinkedIn authorization URL requesting the sign-in subset of scopes (`openid profile email`) — deliberately excludes `w_member_social` since posting permissions are not needed to authenticate.
-- **Response shape**:
-  - `{ provider: 'linkedin', purpose: 'login', authorizeUrl: string, scopes: string[] }`
-
-### `GET /api/v1/auth/linkedin/login/callback`
-- **Location**: `backend/app/routers/linkedin.py`
-- **Purpose**: Complete a LinkedIn sign-in attempt and hand the browser a Firebase custom token.
-- **Query params**:
-  - `code?: string`
-  - `state?: string`
-  - `error?: string`
-  - `error_description?: string`
-- **Behavior**:
-  - Pops and validates the login-purpose state from `linkedinLoginStates/{sha256(state)}`.
-  - Exchanges the code for an access token.
-  - Calls `https://api.linkedin.com/v2/userinfo` to read the member's email, name, and picture.
-  - Finds the matching Firebase Auth user by email or creates a new one (`email_verified=True`), updating `display_name` and `photo_url` from LinkedIn when they differ.
-  - Mints a Firebase custom token via `firebase_admin.auth.create_custom_token(uid)`.
-  - Redirects to `${FRONTEND_URL}/login?linkedinStatus=success&linkedinToken=<custom_token>` on success or `linkedinStatus=error&linkedinMessage=<reason>` on failure. The frontend completes the sign-in via `signInWithCustomToken`.
-- **Notes**:
-  - LinkedIn must return an email — the LinkedIn app must request the `email` scope and the LinkedIn member must have a verified email on file.
-  - Requires the Firebase Admin SDK to be initialized with service-account credentials capable of minting custom tokens. The same credentials used for Firestore access are sufficient.
 
 ### `GET /api/v1/integrations/providers`
 - **Location**: `backend/app/routers/integrations.py`
@@ -202,37 +178,85 @@ There is currently no `/api/v1/*` proxy that forwards Next.js calls to FastAPI; 
   - Deletes the backend-only secret document.
   - Marks the public connection summary as `status: 'disconnected'`.
 
-### Account deletion (no backend endpoint)
-- **Location**: client-side only — `frontend/src/lib/account.ts`.
-- **Why no backend**: Firebase Auth and the Firestore Web SDK already let the signed-in user delete their own data. Adding a backend endpoint would require running the FastAPI service with Firebase Admin service-account credentials, which is unnecessary for self-service deletion. Firestore security rules grant the user delete access to their own backend-only docs (`integrationSecrets/{uid}__*`, `integrationAuthStates` rows where `userId == auth.uid`) without exposing read/write access — see `firestore.rules` and `specs/database.md`.
+### `POST /api/v1/publish/linkedin/now`
+- **Location**: `backend/app/routers/publish.py`
+- **Auth**: `Authorization: Bearer <Firebase ID token>` via the `verify_firebase_id_token` dependency. The verified `uid` must equal `body.userId` else HTTP 403 `uid_mismatch`.
+- **Purpose**: Synchronous LinkedIn UGC publish for the signed-in user.
+- **Request schema**: `{ userId: string, text: string (1..3000), visibility?: 'PUBLIC' | 'CONNECTIONS' }`. The `text` field may be raw markdown (what the user typed in Adapt) or already-converted LinkedIn-Unicode — the route normalizes via `markdown_to_linkedin_unicode` before publishing, and the converter is idempotent so double-conversion is a safe no-op.
+- **Conversion**: Calls `app.services.linkedin_text_format.markdown_to_linkedin_unicode(body.text)` BEFORE invoking `publish_linkedin_text`. Re-checks `len(converted) <= 3000` after conversion — strikethrough markdown appends a combining U+0336 per grapheme, so the post-conversion length can exceed the pre-conversion Pydantic bound. Raises HTTP 422 `payload_too_long` when the converted text exceeds 3000 characters.
+- **Wire-format regression coverage**: `backend/tests/routers/test_publish_router_conversion.py` patches `publish_linkedin_text` and asserts the captured `text` argument is Math-Sans Unicode (never raw `**…**`) for the user-reported input `** sdf **`, the canonical `**sdf**`, mid-sentence `hello **world** ok`, and a plain-text no-op. The 50-case converter parity suite (`backend/tests/services/test_linkedin_text_format.py`, mirrored by `frontend/src/lib/__tests__/linkedinFormat.test.ts`) remains the authoritative byte-for-byte JS/Python parity floor.
+- **Response (HTTP 200 always for business outcomes)**: `{ success: true, postUrn, postUrl }` on success, or `{ success: false, error, status, providerError? }` on a LinkedIn-side failure. True 401/403 are reserved for auth/identity failures; 422 `payload_too_long` is reserved for the post-conversion length overflow above.
 
----
+### `POST /api/v1/publish/schedule`
+- **Location**: `backend/app/routers/publish.py`
+- **Auth**: `Authorization: Bearer <Firebase ID token>` via `verify_firebase_id_token`. The verified `uid` must equal `body.userId` else HTTP 403 `uid_mismatch`.
+- **Purpose**: Pattern B — provision a one-shot AWS EventBridge schedule AND write the `users/{uid}/scheduledPosts/{auto}` row in a single request.
+- **Request schema** (Pydantic `ScheduleRequest`):
+  - `userId: string` (alias `user_id`)
+  - `scheduledForMs: int > 0`
+  - `platforms: ["linkedin"]` (1..1 entry; LinkedIn only today)
+  - `ideaId: string`, `angleId: string`, `ideaTopic: string`, `angleTitle: string`, `articleTitle: string`
+  - `contentSnapshot: { linkedin: string (max 3000) }`
+  - `visibility: 'PUBLIC' | 'CONNECTIONS'` (default `PUBLIC`)
+- **Validation order**: identity match → `scheduled_for_ms > now + 60_000` (else 422 `scheduled_too_soon`) → non-empty `contentSnapshot.linkedin` when LinkedIn is in `platforms` (else 422 `missing_linkedin_snapshot`) → defensive 422 `unsupported_platform` for non-LinkedIn rows.
+- **Side effects**:
+  1. Generates a Firestore doc ref at `users/{uid}/scheduledPosts/{auto}` and captures the auto-id.
+  2. Calls `eventbridge_scheduler.create_one_shot_schedule(scheduled_post_id, uid, fire_at_ms)`. Returns `None` in local-dev no-op mode (when `SCHEDULER_LAMBDA_ARN` or `EVENTBRIDGE_INVOKER_ROLE_ARN` is unset). In prod mode a boto3 failure surfaces as HTTP 502 `schedule_provisioning_failed` and the Firestore write is skipped (atomic-ish guarantee).
+  3. Writes the Firestore row with `status: 'scheduled'`, `contentSnapshot.linkedin`, `visibility`, `attemptCount: 0`, `eventBridgeScheduleName` (the deterministic name `publish-<id>`, or `null`), `createdAt`/`updatedAt` server timestamps.
+  4. On a Firestore write failure after EventBridge provisioning succeeded, the route best-effort calls `delete_schedule(scheduled_post_id)` then returns HTTP 500 `schedule_write_failed`.
+- **Success response (HTTP 200)**: `{ success: true, scheduledPostId, eventBridgeScheduleName }`.
+- **Error responses**: 401 (auth dependency), 403 `uid_mismatch`, 422 `scheduled_too_soon` / `missing_linkedin_snapshot` / `unsupported_platform`, 502 `schedule_provisioning_failed`, 500 `schedule_write_failed`.
 
-## Next.js route handlers
+### `DELETE /api/v1/publish/schedule/{scheduled_post_id}`
+- **Location**: `backend/app/routers/publish.py`
+- **Auth**: `Authorization: Bearer <Firebase ID token>` via `verify_firebase_id_token`. The lookup uses `users/{verified_uid}/scheduledPosts/{scheduled_post_id}`, so cross-user access is structurally impossible (a different uid's doc simply won't exist for the verified user). No body.
+- **Purpose**: Cancel / remove a scheduled post. Used by the per-post `Cancel` button in the Upcoming Scheduled Posts list and the `Remove` button in the Failed Scheduled Posts list on `/publish`, and the Cancel section in the `/calendar` per-post detail modal.
+- **Validation order**: identity-dependent lookup → 404 `not_found` if doc absent → 409 `status_not_cancellable` if `status` in `{publishing, published}` (the row has already left the queue; cancellation would race the publisher / be meaningless).
+- **Side effects** (only when validation passes):
+  1. Best-effort `eventbridge_scheduler.delete_schedule(scheduled_post_id)`. Already-fired schedules (auto-deleted via `ActionAfterCompletion=DELETE`) and unconfigured-AWS local-dev mode both result in a no-op. Non-`ResourceNotFoundException` errors are swallowed and logged so the Firestore delete still runs.
+  2. `ref.delete()` on the Firestore document. On failure → HTTP 500 `firestore_delete_failed`.
+- **Success response (HTTP 200)**: `{ success: true, scheduledPostId, eventBridgeScheduleDeleted: bool }`. `eventBridgeScheduleDeleted` is `true` when `delete_schedule` raised no exception (including the silent `ResourceNotFoundException` and local-dev no-op paths); `false` only when a non-NotFound boto3 error was swallowed.
+- **Error responses**: 401 (auth dependency), 404 `not_found`, 409 `status_not_cancellable`, 500 `firestore_delete_failed`.
 
-The following endpoints live under `frontend/src/app/api/` and run inside the Next.js process (port 3000). They are the public-facing API for AI features. Each AI route accepts a `provider`/`apiKey`/`ollamaBaseUrl?`/`ollamaModel?` quartet describing which provider to call (OpenAI, Gemini, Claude, or local Ollama) and most accept an optional `companyContext: string[]` to ground prompts in the saved Company Profile.
+### `PATCH /api/v1/publish/schedule/{scheduled_post_id}`
+- **Location**: `backend/app/routers/publish.py` — handler `reschedule_scheduled_post`, located between the `DELETE` handler and the `POST /publish/scheduled/run` block.
+- **Auth**: `Authorization: Bearer <Firebase ID token>` via `verify_firebase_id_token`. The lookup uses `users/{verified_uid}/scheduledPosts/{scheduled_post_id}`, so cross-user PATCH is structurally impossible. No body `uid` field — the path id + verified token are sufficient (matches the DELETE handler pattern).
+- **Purpose**: Reschedule a scheduled post to a new future time. Used by the Reschedule section in the `/calendar` per-post detail modal. Allowed for rows whose `status ∈ {scheduled, failed, cancelled}` (a `failed` row flips back to `scheduled` and re-queues; `publishing` and `published` rows return 409).
+- **Request schema** (Pydantic `RescheduleRequest`):
+  - `scheduledForMs: int > 0` (alias `scheduled_for_ms`)
+- **Validation order**:
+  1. Doc lookup at `users/{verified_uid}/scheduledPosts/{scheduled_post_id}` → 404 `not_found` if absent.
+  2. `scheduled_for_ms > now + 60_000` (the existing `_MIN_SCHEDULE_LEAD_MS` floor) — else 422 `scheduled_too_soon`.
+  3. `current_status not in {publishing, published}` — else 409 `status_not_reschedulable`.
+- **Side effects** (only when validation passes):
+  1. Call `eventbridge_scheduler.update_schedule(scheduled_post_id, verified_uid, scheduled_for_ms)` (delete-then-create against the deterministic name `publish-<id>`). On a create-half failure (only when AWS env is configured), raise HTTP 502 `reschedule_provisioning_failed` and SKIP the Firestore write. The `delete_schedule` half swallows its own errors inside the helper. Local-dev no-op mode returns `None` silently and proceeds.
+  2. `ref.update({scheduledForMs, scheduledForIso, status='scheduled', updatedAt: SERVER_TIMESTAMP})` (NOT `set(merge=True)` — `update` so unset fields are not clobbered). Status is always reset to `'scheduled'` so a `failed` row gets re-queued. `attemptCount`, `failureReason`, `eventBridgeScheduleName`, `createdAt`, `contentSnapshot`, `platforms`, `ideaId`, `angleId`, `articleTitle`, `ideaTopic`, `angleTitle`, `visibility`, `postUrl`, `postUrn`, and `publishedAtMs` are preserved.
+  3. On Firestore write failure after EventBridge succeeded, the route does NOT roll back the schedule (`update_schedule` is idempotent on the deterministic name; the user can simply retry). Logged-only, returns HTTP 500 `reschedule_write_failed`.
+- **Success response (HTTP 200)**: `{ success: true, scheduledPostId, scheduledForMs, eventBridgeScheduleName }`. `eventBridgeScheduleName` is `null` in local-dev no-op mode and the deterministic `publish-<id>` string in production mode.
+- **Error responses**: 401 (auth dependency), 404 `not_found`, 409 `status_not_reschedulable`, 422 `scheduled_too_soon`, 502 `reschedule_provisioning_failed`, 500 `reschedule_write_failed`.
 
-| Route | Method | Purpose |
-|---|---|---|
-| `/api/angles` | POST | Generate or refine angle candidates from an idea. Provider-agnostic. Returns deterministic fallback when provider config is incomplete. |
-| `/api/angles/persist` | POST | Server-side persistence of the angle workflow doc (retained alongside the Angles page's direct Firestore writes). |
-| `/api/angles/select` | POST | Server-side angle selection finalization with hard/soft cleanup. |
-| `/api/ideas/rationale` | POST | AI rationale + improvement bullets for an idea score; deterministic fallback when no key. |
-| `/api/trends` | GET | Bing News RSS aggregator for the live trends panel. Accepts optional `companyTerms` query string. |
-| `/api/drafts` | POST | Long-form draft generation grounded in DuckDuckGo search results; returns `citationValidation` metadata. |
-| `/api/drafts/adapt` | POST | Per-platform adaptation using `src/lib/prompts/platforms/*` rules. 5-minute provider timeout → HTTP 504. |
-| `/api/drafts/chat` | POST | Conversational AI chat against the current draft; parses `<UPDATED_DRAFT>...</UPDATED_DRAFT>` tags. |
-| `/api/drafts/analyze` | POST | SEO / plagiarism / source-check analysis; deterministic fallback per type when no key. |
-| `/api/drafts/rewrite` | POST | Tone or readability rewrite of an existing draft. |
-| `/api/drafts/personas` | POST | Persona-targeted rewrite (current UI sends one persona at a time). |
-| `/api/drafts/headlines` | POST | A/B headline variant generator. |
-| `/api/drafts/research` | POST | DuckDuckGo-grounded research brief synthesizer. |
-| `/api/drafts/plagiarism` | POST | Verbatim-quote web search + AI heuristic AI-likelihood review. Does NOT accept `companyContext`. |
-| `/api/drafts/inline-edit` | POST | Shared inline-edit proposal endpoint for Storyboard and Adapt. |
-| `/api/drafts/similar-posts` | POST | Find linked similar posts and competitor matches; produces a comparison summary and recommended actions. |
-| `/api/company/autofill` | POST | Scrape a company website (homepage + optional about page) and extract a structured `CompanyProfile` via the configured AI provider. |
+### `POST /api/v1/publish/scheduled/run`
+- **Location**: `backend/app/routers/publish.py`
+- **Auth**: Shared-secret header `X-Scheduler-Secret` matched against `SCHEDULER_SECRET`. `SCHEDULER_SECRET` unset → HTTP 503 `scheduler_disabled`. Header missing/mismatched → HTTP 401 `unauthorized_scheduler`. No Firebase auth.
+- **Purpose**: Legacy / safety-net sweeper that drains due `scheduledPosts` rows. Pattern B (EventBridge one-shot) is now the primary fire path; this route remains for resilience and for local-dev manual ticks via `npm run scheduler:tick`.
+- **Request schema**: optional `{ limit?: int (1..500, default 50), nowMs?: int (test-only override) }`.
+- **Behavior** (idempotent):
+  1. Sweep zombies — any `status: 'publishing'` row with `lastAttemptAtMs < now - 10min` rolls back to `'scheduled'`.
+  2. Collection-group query for due rows: `status == 'scheduled' AND scheduledForMs <= now`, ordered ascending, limited.
+  3. For each row, delegate per-row work to `scheduler_worker.publish_one(user_id, scheduled_post_id)`. The same pure worker is invoked by the scheduler Lambda — both paths share identical CAS / idempotency / finalize logic.
+- **Response**: `{ processed, published, failed, results: [{ scheduledPostId, userId, status, postUrn?, postUrl?, error? }, …] }`.
 
-Detailed request/response shapes for each route follow.
+### Lambda / EventBridge surface (no HTTP routes)
+
+These modules are imported either by `app.main:handler` (HTTP Lambda) or `app.lambda_scheduler.handler` (scheduler Lambda) and are documented here so the deployed surface is discoverable.
+
+- **`backend/app/main.py::handler`** — `Mangum(app, lifespan="off")`. The HTTP Lambda entry point. CORS continues to be enforced inside FastAPI; the Lambda Function URL is opened with auth `NONE`.
+- **`backend/app/lambda_scheduler.py::handler(event, context)`** — Scheduler Lambda entry point. Normalizes the EventBridge event into `{"scheduledPostId": str, "userId": str}`, runs `asyncio.run(publish_one(...))`, returns the outcome dict. Returns `{"status": "skipped", "reason": "invalid_input"}` for empty or malformed payloads; never raises.
+- **`backend/app/services/scheduler_worker.py::publish_one(user_id, scheduled_post_id)`** — Pure, framework-agnostic per-post publish worker. CAS-claims the row (`scheduled` → `publishing`), short-circuits when `postUrn` already exists (`idempotent`), platform-gates to LinkedIn, **converts the resolved text via `linkedin_text_format.markdown_to_linkedin_unicode(text)` between `_resolve_text` and `publish_linkedin_text`**, calls `linkedin_publisher.publish_linkedin_text`, finalizes the row (`published` / `failed` with `failureReason` / `attemptCount += 1`). The conversion happens AFTER the `_resolve_text` non-empty check but BEFORE the platform-publisher call — the Firestore `contentSnapshot.linkedin` stays raw markdown, only the in-memory `text` is substituted. Idempotency short-circuit still skips the converter entirely. Returns a typed dict — one of `published`, `idempotent`, `skipped` (with `reason`), or `failed` (with `error`).
+- **`backend/app/services/linkedin_text_format.py::markdown_to_linkedin_unicode(md)`** — Pure markdown → LinkedIn-Unicode converter. Byte-for-byte mirror of `frontend/src/lib/linkedinFormat.ts`. Walks `md` through a five-stage pipeline (link extraction → protected-region masking → block transforms → inline transforms → restoration). Returns `""` for empty input. Idempotent: `f(f(x)) == f(x)`. Math Alphanumeric Symbols substitution uses the **sans family** (Math Sans Bold U+1D5D4+, Math Sans Italic U+1D608+, Math Sans Bold Italic U+1D63C+, plus combining strikethrough U+0336) — no Letterlike-Symbols collisions. Used by `routers/publish.py::publish_linkedin_now` (defense-in-depth, with a post-conversion 3000-char re-check) and `scheduler_worker.publish_one` (primary fire-time conversion). 23 golden inputs are exercised in `backend/tests/services/test_linkedin_text_format.py`.
+- **`backend/app/services/eventbridge_scheduler.py`** — boto3 wrapper. Exports `create_one_shot_schedule(scheduled_post_id, user_id, fire_at_ms) -> str | None`, `delete_schedule(scheduled_post_id) -> None` (best-effort; swallows `ResourceNotFoundException`), and `update_schedule(scheduled_post_id, user_id, new_fire_at_ms) -> None` (delete-then-create for the future reschedule UI). All functions no-op with a log line when `SCHEDULER_LAMBDA_ARN` or `EVENTBRIDGE_INVOKER_ROLE_ARN` is unset. Schedules are named deterministically `publish-<scheduledPostId>` with `at(YYYY-MM-DDTHH:MM:SS)` in UTC, `FlexibleTimeWindow.OFF`, `ActionAfterCompletion=DELETE`, `MaximumRetryAttempts=0`.
+- **`backend/app/services/secrets_loader.py::load_secrets_into_env()`** — Hydrates env vars from AWS Secrets Manager. Reads `SECRETS_MANAGER_SECRET_ID` (unset → no-op). Fetches a JSON secret and copies each top-level key into `os.environ` ONLY when the key is not already set (explicit env wins). All failures are caught and logged — never raises. Imported by `app.config` BEFORE `Settings()` is instantiated.
+- **`backend/app/auth.py::verify_firebase_id_token`** — FastAPI dependency that extracts a `Bearer <token>` from the `Authorization` header, verifies it via `firebase_admin.auth.verify_id_token`, and returns the decoded `uid`. Raises HTTP 401 (`missing_or_malformed_authorization` / `invalid_id_token`) on any failure. Used by `/publish/linkedin/now`, `/publish/schedule`, `/integrations/status`, and `/integrations/{provider}/disconnect`.
 
 ### `POST /api/drafts/inline-edit` (Next.js Route Handler)
 - **Location**: `frontend/src/app/api/drafts/inline-edit/route.ts`
@@ -281,52 +305,11 @@ Detailed request/response shapes for each route follow.
 - `POST /api/drafts/research` — appends a "Company context" block to the synthesis prompt so the brief biases toward findings relevant to the company's industry/audience/product. The DuckDuckGo search query itself is unchanged.
 - `POST /api/angles` — appends a "Company context" block to both the per-slot single-angle prompt and the refinement prompt so generated angles are grounded in the company's audience and product references.
 - `POST /api/ideas/rationale` — already accepts `personalizationContext.company` (string lines) and renders it in the rationale prompt. The Ideas page extractor reads from `users/{uid}.companyContext` (the same Firestore field that `saveCompanyProfile` writes).
-- `POST /api/drafts/similar-posts` — appends a "Company context" block to the synthesis prompt so the comparison summary and recommended actions reflect the company's positioning.
 
 ### Endpoints intentionally NOT receiving `companyContext`
 - `POST /api/drafts/plagiarism` — pure verbatim-quote web search + AI heuristic review of submitted text. Brand framing does not change exact-quote matching or AI-pattern detection and would only add prompt noise.
 - `GET /api/trends` — RSS-only Bing News fetcher; no AI provider call, so the request body never carries `companyContext`. The route DOES, however, accept an optional `companyTerms` query string (comma-separated keyword list, normalized to entries of length 2–60). When present it (a) issues up to four extra Bing News queries built from those terms (`"<term> marketing"`, `"<term> content strategy"`), (b) boosts ranking of articles whose title contains any term, and (c) prepends per-term topic-rule labels so the trend cluster panel surfaces company-relevant clusters first. The response payload includes `companyTermsApplied: string[]` for transparency.
 - `POST /api/angles/persist` and `POST /api/angles/select` — pure persistence/state-cleanup endpoints; no prompt construction.
-
-### `POST /api/drafts/similar-posts`
-- **Location**: `frontend/src/app/api/drafts/similar-posts/route.ts`
-- **Purpose**: Power the Adapt page's `Similar posts` AI Toolbox tab — search for topic-adjacent published content, optionally biasing toward provided competitor terms, and produce a comparison summary plus recommended differentiation moves against the current draft.
-- **Request schema**:
-  - `provider`/`apiKey`/`ollamaBaseUrl?`/`ollamaModel?` (standard provider quartet)
-  - `draft?: string`
-  - `topic?: string`
-  - `audience?: string`
-  - `format?: string`
-  - `query?: string` (explicit search query override; otherwise derived from topic/draft)
-  - `competitors?: string` (comma-separated terms used to label competitor matches)
-  - `companyContext?: string[]`
-- **Behavior**:
-  - Runs a DuckDuckGo search (`searchDuckDuckGo()`) for the resolved query.
-  - Scores each result against the draft via lexical overlap (stop-word-filtered token sets).
-  - Calls the configured AI provider to synthesize a `comparisonMarkdown` summary and `recommendedActions[]` for differentiation.
-  - When the AI provider is unavailable, returns a deterministic fallback summary while preserving `matches[]`.
-- **Response shape**:
-  - `{ query, matches: SimilarPostMatch[], comparisonMarkdown, recommendedActions: string[], provider, searchProvider, usedFallback?: boolean }`
-  - `SimilarPostMatch = { title, url, snippet, similarityScore, overlapTerms[], sourceType: 'similar-post' | 'competitor', comparisonNote }`
-
-### `POST /api/company/autofill`
-- **Location**: `frontend/src/app/api/company/autofill/route.ts`
-- **Purpose**: Scrape a company website (homepage + optional about page) and extract a structured `CompanyProfile` payload that Settings can drop into the Company Profile form. Used by the "Autofill from website" affordance in `/settings`.
-- **Request schema**:
-  - `provider`/`apiKey`/`ollamaBaseUrl?`/`ollamaModel?` (standard provider quartet)
-  - `websiteUrl: string` (required; must pass `isValidHttpUrl`)
-- **Behavior**:
-  - Fetches the homepage HTML (and best-effort about page when discoverable), strips to plain text.
-  - Sends the text to the configured AI provider with a strict system prompt that demands JSON-only output matching the `AutofillProfile` shape.
-  - Refuses to invent fields: missing-information slots are returned as empty strings.
-  - Returns `fetchedUrls[]` for transparency and `provider` metadata.
-- **Response shape**:
-  - `{ profile: AutofillProfile, fetchedUrls: string[], provider: string }`
-  - `AutofillProfile` mirrors the `CompanyProfile` shape: `companyName, companyDescription, industry, products, services, valueProposition, targetMarket, keyDifferentiators, brandVoice` (all strings).
-- **Failure mode**:
-  - Validation errors (missing/invalid URL, unreachable site) return HTTP `400` or `502` with an `error` message.
-  - Provider failures return an empty profile + `error` field rather than throwing, so the Settings UI can offer a retry without losing form state.
-- **Note**: This endpoint does NOT accept `companyContext` (the user is filling in their own company profile, so there is no existing profile to ground against).
 
 ### `companyContext` shape contract
 - Always optional `string[]` in the request body.
@@ -391,6 +374,8 @@ Detailed request/response shapes for each route follow.
 
 ## Running the Backend
 
+### Local (uvicorn)
+
 ```bash
 cd backend
 pip install -r requirements.txt
@@ -399,6 +384,30 @@ uvicorn app.main:app --reload
 ```
 
 API available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+
+### Lambda (deployed)
+
+Two AWS Lambda functions share a single container image built from `backend/Dockerfile.lambda`:
+
+```bash
+docker buildx build --platform linux/arm64 \
+  -f backend/Dockerfile.lambda \
+  -t marketing-dashboard:latest backend/
+```
+
+Push the image to ECR, then create two Lambda functions from it. The Dockerfile intentionally has no `CMD` — the per-function entry point is set in Lambda configuration:
+
+| Function | CMD | Trigger |
+|---|---|---|
+| `marketing-dashboard-http` | `app.main.handler` | Lambda Function URL (auth: `NONE`; CORS enforced by FastAPI/Mangum) |
+| `marketing-dashboard-scheduler` | `app.lambda_scheduler.handler` | Invoked directly by EventBridge Scheduler (no HTTP path) |
+
+Recommended Lambda configuration:
+- Architecture: `arm64`
+- Memory: 512 MB (HTTP) / 256 MB (scheduler)
+- Timeout: 30 s (HTTP) / 60 s (scheduler)
+
+Secrets that exceed Lambda's per-env-var size limit (Firebase service-account JSON, LinkedIn client secret, encryption key, scheduler secret) live in **one AWS Secrets Manager secret** (JSON blob) and are hydrated into `os.environ` by `secrets_loader` at cold start, before `Settings()` reads them.
 
 ---
 

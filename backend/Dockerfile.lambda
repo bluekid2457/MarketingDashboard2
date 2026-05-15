@@ -1,0 +1,25 @@
+# AWS Lambda container image for the marketing-dashboard backend.
+# One image, two functions:
+#   marketing-dashboard-http       CMD: ["app.main.handler"]
+#   marketing-dashboard-scheduler  CMD: ["app.lambda_scheduler.handler"]
+# CMD is set per-function in Lambda configuration (Console / CLI), NOT here.
+#
+# Build (arm64):
+#   docker buildx build --platform linux/arm64 -f backend/Dockerfile.lambda \
+#     -t marketing-dashboard:latest backend/
+#
+# This file is intentionally separate from `backend/Dockerfile` so the
+# local-dev uvicorn flow keeps working unchanged.
+
+FROM public.ecr.aws/lambda/python:3.11
+
+# Copy and install dependencies into Lambda's task root.
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements.txt
+
+# Copy application code.
+COPY app/ ${LAMBDA_TASK_ROOT}/app/
+
+# No CMD here -- set per-function in Lambda config:
+#   - HTTP Lambda:      app.main.handler
+#   - Scheduler Lambda: app.lambda_scheduler.handler

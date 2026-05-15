@@ -5,20 +5,25 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, deleteField, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 
+import { MarkdownPostPreview } from '@/components/MarkdownPostPreview';
+import { UnicodePostPreview } from '@/components/UnicodePostPreview';
+import { ChevronToggleIcon } from '@/components/ChevronToggleIcon';
 import { Spinner } from '@/components/Spinner';
 import DocumentContextHeader from '@/components/DocumentContextHeader';
 import { getFirebaseAuth, getFirebaseDb } from '@/lib/firebase';
+import { usePersistentToggle } from '@/lib/usePersistentToggle';
 import { getActiveAIKey } from '@/lib/aiConfig';
 import { findOrphanAdaptations } from '@/lib/orphans';
+import { listIntegrationConnections, type IntegrationConnection } from '@/lib/integrations';
+import { cancelScheduledPost as cancelScheduledPostApi, publishLinkedInNow, scheduleLinkedInPost } from '@/lib/publish';
+import {
+  PLATFORM_KEYS,
+  formatPlatformLabel,
+  parseScheduledPostRecord,
+  type PlatformKey,
+  type ScheduledPostRecord,
+} from '@/lib/scheduledPosts';
 import { getWorkflowContext, type WorkflowContext } from '@/lib/workflowContext';
-
-type PlatformKey = 'linkedin' | 'twitter' | 'medium' | 'newsletter' | 'blog';
-
-const PLATFORM_KEYS: readonly PlatformKey[] = ['linkedin', 'twitter', 'medium', 'newsletter', 'blog'] as const;
-
-function isPlatformKey(value: unknown): value is PlatformKey {
-  return typeof value === 'string' && (PLATFORM_KEYS as readonly string[]).includes(value);
-}
 
 type PlatformContent = Partial<Record<PlatformKey, string>>;
 
@@ -35,13 +40,8 @@ type PublishNoticeTone = 'success' | 'error' | 'info';
 type PublishNotice = {
   tone: PublishNoticeTone;
   message: string;
-};
-
-type ScheduledPostRecord = {
-  id: string;
-  articleTitle: string;
-  scheduledForMs: number;
-  platforms: PlatformKey[];
+  linkHref?: string;
+  linkText?: string;
 };
 
 type StringMap = Record<string, string>;
@@ -112,18 +112,6 @@ function parseScheduledAtInputValue(value: string): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-const PLATFORM_LABELS: Record<PlatformKey, string> = {
-  linkedin: 'LinkedIn',
-  twitter: 'X / Twitter',
-  medium: 'Medium',
-  newsletter: 'Newsletter',
-  blog: 'Blog',
-};
-
-function formatPlatformLabel(platform: PlatformKey): string {
-  return PLATFORM_LABELS[platform];
-}
-
 // Per-platform UI metadata used to render publish cards. Compose-URL handoff
 // only exists for LinkedIn / X — Medium / Newsletter / Blog cards offer
 // "Copy text" + "Schedule" because those platforms have no one-click intent URL.
@@ -137,7 +125,7 @@ type PlatformCardMeta = {
 const PLATFORM_CARD_META: Record<PlatformKey, PlatformCardMeta> = {
   linkedin: {
     badgeClassName: 'bg-blue-100 text-blue-800',
-    description: 'LinkedIn one-click handoff: we copy your content first, then open LinkedIn compose.',
+    description: 'LinkedIn one-click publish via your connected LinkedIn account.',
     emptyPlaceholder: 'No LinkedIn-ready content found yet. Generate platform copy in Adapt first.',
     copyButtonLabel: 'Copy LinkedIn Text',
   },
@@ -146,6 +134,12 @@ const PLATFORM_CARD_META: Record<PlatformKey, PlatformCardMeta> = {
     description: 'Opens X compose intent with your post text prefilled.',
     emptyPlaceholder: 'No X/Twitter-ready content found yet. Generate platform copy in Adapt first.',
     copyButtonLabel: 'Copy X Text',
+  },
+  instagram: {
+    badgeClassName: 'bg-pink-100 text-pink-800',
+    description: 'Copy your Instagram caption, then paste it into the Instagram app or Creator Studio. Schedule a reminder here.',
+    emptyPlaceholder: 'No Instagram-ready content found yet. Generate platform copy in Adapt first.',
+    copyButtonLabel: 'Copy Instagram Text',
   },
   medium: {
     badgeClassName: 'bg-emerald-100 text-emerald-800',
@@ -166,6 +160,9 @@ const PLATFORM_CARD_META: Record<PlatformKey, PlatformCardMeta> = {
     copyButtonLabel: 'Copy Blog Text',
   },
 };
+
+// Bucket A — plain-text feed platforms get a Unicode-substitution preview.
+const UNICODE_PLATFORMS: ReadonlySet<PlatformKey> = new Set(['linkedin', 'twitter', 'instagram']);
 
 export default function PublishPage() {
   const [currentUid, setCurrentUid] = useState<string | null>(null);
@@ -189,10 +186,23 @@ export default function PublishPage() {
   const [savingEditByKey, setSavingEditByKey] = useState<BooleanMap>({});
   const [deletingByKey, setDeletingByKey] = useState<BooleanMap>({});
   const [schedulingByKey, setSchedulingByKey] = useState<BooleanMap>({});
+  const [publishingByKey, setPublishingByKey] = useState<BooleanMap>({});
+  const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
+  const [confirmingCancelId, setConfirmingCancelId] = useState<string | null>(null);
   const [scheduledPosts, setScheduledPosts] = useState<ScheduledPostRecord[]>([]);
   const [plagiarismByKey, setPlagiarismByKey] = useState<Record<string, PlagiarismResult>>({});
   const [plagiarismRunningByKey, setPlagiarismRunningByKey] = useState<BooleanMap>({});
   const [workflowContext, setWorkflowContextState] = useState<WorkflowContext | null>(null);
+  const [linkedinConnection, setLinkedinConnection] = useState<IntegrationConnection | null>(null);
+
+  // Persistent collapse state for the per-card preview block. One state for
+  // the whole publish page — collapsing on the LinkedIn card also collapses
+  // the Twitter, Instagram, Medium, etc. cards. Stored in localStorage so
+  // the preference survives reloads (key: ``mdash:previewCollapse:publish``).
+  const [cardPreviewCollapsed, setCardPreviewCollapsed] = usePersistentToggle(
+    'mdash:previewCollapse:publish',
+    false,
+  );
 
   useEffect(() => {
     setWorkflowContextState(getWorkflowContext());
@@ -218,6 +228,34 @@ export default function PublishPage() {
 
     return unsubscribe;
   }, []);
+
+  // Load LinkedIn connection state for the signed-in user. This drives whether
+  // the LinkedIn button calls the direct-publish API or falls back to the
+  // clipboard-handoff path. Errors are swallowed (the user keeps the existing
+  // handoff flow), and the connection is cleared when the user signs out.
+  useEffect(() => {
+    if (!currentUid) {
+      setLinkedinConnection(null);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const connections = await listIntegrationConnections(currentUid);
+        if (cancelled) return;
+        const linkedin = connections.find((entry) => entry.provider === 'linkedin') ?? null;
+        setLinkedinConnection(linkedin);
+      } catch {
+        if (cancelled) return;
+        setLinkedinConnection(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUid]);
 
   useEffect(() => {
     if (isAuthLoading) {
@@ -300,24 +338,12 @@ export default function PublishPage() {
 
     const scheduledQuery = query(collection(db, 'users', currentUid, 'scheduledPosts'), orderBy('scheduledForMs', 'asc'));
     const unsubscribe = onSnapshot(scheduledQuery, (snapshot) => {
-      setScheduledPosts(
-        snapshot.docs
-          .map((documentSnapshot) => {
-            const data = documentSnapshot.data() as Record<string, unknown>;
-            const rawPlatforms = Array.isArray(data.platforms)
-              ? data.platforms
-              : [];
-            const platforms = rawPlatforms.filter(isPlatformKey);
-
-            return {
-              id: documentSnapshot.id,
-              articleTitle: asTrimmedString(data.articleTitle) || asTrimmedString(data.ideaTopic) || 'Untitled article',
-              scheduledForMs: typeof data.scheduledForMs === 'number' ? data.scheduledForMs : 0,
-              platforms,
-            } satisfies ScheduledPostRecord;
-          })
-          .filter((item) => item.scheduledForMs > 0),
-      );
+      const next: ScheduledPostRecord[] = [];
+      for (const documentSnapshot of snapshot.docs) {
+        const parsed = parseScheduledPostRecord(documentSnapshot.id, documentSnapshot.data() as Record<string, unknown>);
+        if (parsed) next.push(parsed);
+      }
+      setScheduledPosts(next);
     });
 
     return unsubscribe;
@@ -404,19 +430,35 @@ export default function PublishPage() {
     }
   }, []);
 
-  const isPlagiarismCleared = useCallback(
-    (key: string, text: string): boolean => {
-      const result = plagiarismByKey[key];
-      if (!result) return false;
-      if (result.verdict === 'high-risk') return false;
-      // Stale results (older than 30 minutes) require a re-check.
-      if (Date.now() - result.checkedAt > 30 * 60 * 1000) return false;
-      // Length changes invalidate the prior check.
-      if (Math.abs(result.flags.reduce((acc, flag) => acc + flag.passage.length, 0)) === 0 && text.length === 0) return false;
-      return true;
-    },
-    [plagiarismByKey],
-  );
+  const cancelScheduledPost = useCallback(async (postId: string) => {
+    if (!currentUid) {
+      setNotice({ tone: 'error', message: 'Sign in to cancel a scheduled post.' });
+      return;
+    }
+    setCancellingScheduledId(postId);
+    try {
+      const result = await cancelScheduledPostApi(postId);
+      if (result.success) {
+        setNotice({ tone: 'success', message: 'Scheduled post cancelled.' });
+        // The Firestore listener will remove the row from the list automatically.
+      } else if (result.error === 'status_not_cancellable') {
+        setNotice({ tone: 'error', message: 'This post is already publishing or published and can\'t be cancelled.' });
+      } else if (result.error === 'not_found') {
+        setNotice({ tone: 'error', message: 'Scheduled post not found (it may have already been cancelled).' });
+      } else if (result.error === 'not_signed_in') {
+        setNotice({ tone: 'error', message: 'Sign in to cancel a scheduled post.' });
+      } else if (result.error === 'network') {
+        setNotice({ tone: 'error', message: 'Network error while cancelling. Check your connection and try again.' });
+      } else {
+        setNotice({ tone: 'error', message: `Failed to cancel scheduled post: ${result.error}` });
+      }
+    } catch (error) {
+      setNotice({ tone: 'error', message: error instanceof Error ? error.message : 'Failed to cancel scheduled post.' });
+    } finally {
+      setCancellingScheduledId(null);
+      setConfirmingCancelId(null);
+    }
+  }, [currentUid]);
 
   const openTwitterIntent = useCallback((text: string) => {
     if (!asTrimmedString(text)) {
@@ -429,28 +471,82 @@ export default function PublishPage() {
     setNotice({ tone: 'success', message: 'Opened X/Twitter compose with your text prefilled.' });
   }, []);
 
-  const openLinkedInCompose = useCallback(async (text: string) => {
-    if (!asTrimmedString(text)) {
-      setNotice({ tone: 'error', message: 'No LinkedIn content is ready. Generate or edit content in Adapt first.' });
-      return;
-    }
+  // Direct-publish path. Only invoked when the user has connected their
+  // LinkedIn account (status === 'connected') — the button is disabled
+  // otherwise (see the disabled-state contract in specs/frontend.md), so
+  // the not-connected branch in this handler is purely defensive.
+  const publishToLinkedIn = useCallback(
+    async (adaptation: AdaptationRecord, text: string) => {
+      if (!asTrimmedString(text)) {
+        setNotice({ tone: 'error', message: 'No LinkedIn content is ready. Generate or edit content in Adapt first.' });
+        return;
+      }
 
-    const copied = await copyText(text, 'LinkedIn');
-    window.open('https://www.linkedin.com/feed/?shareActive=true', '_blank', 'noopener,noreferrer');
+      if (!currentUid) {
+        setNotice({ tone: 'error', message: 'Sign in to publish to LinkedIn.' });
+        return;
+      }
 
-    if (copied) {
-      setNotice({
-        tone: 'success',
-        message: 'Opened LinkedIn compose. Your post text is already copied, so you can paste and publish immediately.',
-      });
-      return;
-    }
+      if (linkedinConnection?.status !== 'connected') {
+        // Defensive guard — the button should already be disabled in this
+        // state. We avoid the legacy clipboard handoff entirely so users
+        // never silently post via a fallback path; instead we point them at
+        // Settings to complete the connection.
+        setNotice({
+          tone: 'error',
+          message: 'Connect LinkedIn in Settings to publish directly.',
+          linkHref: '/settings#integrations',
+          linkText: 'Open Settings',
+        });
+        return;
+      }
 
-    setNotice({
-      tone: 'info',
-      message: 'Opened LinkedIn compose. If clipboard access was blocked, copy from the preview box and paste into LinkedIn.',
-    });
-  }, [copyText]);
+      const cardKey = keyFor(adaptation.id, 'linkedin');
+      setPublishingByKey((previous) => ({ ...previous, [cardKey]: true }));
+      try {
+        const result = await publishLinkedInNow(currentUid, text);
+        if (result.success) {
+          setNotice({
+            tone: 'success',
+            message: 'Published to LinkedIn.',
+            linkHref: result.postUrl || undefined,
+            linkText: result.postUrl ? 'View on LinkedIn' : undefined,
+          });
+          return;
+        }
+
+        if (result.error === 'not_connected' || result.status === 401) {
+          setNotice({
+            tone: 'error',
+            message: 'LinkedIn connection expired. Reconnect in Settings.',
+            linkHref: '/settings#integrations',
+            linkText: 'Open Settings',
+          });
+          return;
+        }
+
+        if (result.error === 'missing_author_urn') {
+          setNotice({
+            tone: 'error',
+            message: 'LinkedIn account is missing the publish identity. Disconnect and reconnect in Settings.',
+            linkHref: '/settings#integrations',
+            linkText: 'Open Settings',
+          });
+          return;
+        }
+
+        setNotice({
+          tone: 'error',
+          message: `LinkedIn rejected the post (${result.status}). Try again or open Settings to reconnect.`,
+          linkHref: '/settings#integrations',
+          linkText: 'Open Settings',
+        });
+      } finally {
+        setPublishingByKey((previous) => ({ ...previous, [cardKey]: false }));
+      }
+    },
+    [currentUid, keyFor, linkedinConnection],
+  );
 
   const schedulePost = useCallback(async (adaptation: AdaptationRecord, platform: PlatformKey, articleTitle: string, angleLabel: string) => {
     if (!currentUid) {
@@ -480,32 +576,83 @@ export default function PublishPage() {
     const platformLabel = formatPlatformLabel(platform);
     setSchedulingByKey((previous) => ({ ...previous, [scheduleKey]: true }));
     try {
-      const scheduledDocRef = doc(collection(db, 'users', currentUid, 'scheduledPosts'));
-      const payload: Record<string, unknown> = {
+      // Capture the platform copy AT schedule time so a later edit to the
+      // adaptation doc cannot change what the scheduler posts.
+      const editingTextForCard = asTrimmedString(draftByKey[scheduleKey]);
+      const persistedText = asTrimmedString(adaptation.platforms[platform]);
+      const snapshotText = editingByKey[scheduleKey] && editingTextForCard
+        ? editingTextForCard
+        : persistedText;
+
+      if (!snapshotText) {
+        setNotice({ tone: 'error', message: `No ${platformLabel} content captured to schedule.` });
+        return;
+      }
+
+      // LinkedIn is the only platform currently routed through the server.
+      // Non-LinkedIn schedules continue to use the legacy direct-Firestore path
+      // until those publishers ship (see specs/automation.md Known Gaps).
+      if (platform !== 'linkedin') {
+        const scheduledDocRef = doc(collection(db, 'users', currentUid, 'scheduledPosts'));
+        await setDoc(scheduledDocRef, {
+          ideaId: adaptation.ideaId,
+          angleId: adaptation.angleId,
+          ideaTopic: articleTitle,
+          angleTitle: angleLabel,
+          articleTitle,
+          platforms: [platform],
+          scheduledForMs,
+          scheduledForIso: new Date(scheduledForMs).toISOString(),
+          status: 'scheduled',
+          contentSnapshot: { [platform]: snapshotText },
+          visibility: 'PUBLIC',
+          attemptCount: 0,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }, { merge: false });
+        setNotice({
+          tone: 'success',
+          message: `Scheduled ${platformLabel} reminder "${articleTitle}" for ${new Date(scheduledForMs).toLocaleString()}.`,
+        });
+        return;
+      }
+
+      const result = await scheduleLinkedInPost({
+        userId: currentUid,
+        scheduledForMs,
         ideaId: adaptation.ideaId,
         angleId: adaptation.angleId,
         ideaTopic: articleTitle,
         angleTitle: angleLabel,
         articleTitle,
-        platforms: [platform],
-        scheduledForMs,
-        scheduledForIso: new Date(scheduledForMs).toISOString(),
-        status: 'scheduled',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-
-      await setDoc(scheduledDocRef, payload, { merge: false });
-      setNotice({
-        tone: 'success',
-        message: `Scheduled ${platformLabel} post "${articleTitle}" for ${new Date(scheduledForMs).toLocaleString()}. It will appear on your dashboard calendar and notifications list.`,
+        contentSnapshotLinkedIn: snapshotText,
+        visibility: 'PUBLIC',
       });
+
+      if (result.success) {
+        setNotice({
+          tone: 'success',
+          message: `Scheduled LinkedIn post "${articleTitle}" for ${new Date(scheduledForMs).toLocaleString()}. It will fire automatically.`,
+        });
+        return;
+      }
+
+      // Error path — map specific backend slugs to actionable copy.
+      if (result.error === 'scheduled_too_soon') {
+        setNotice({ tone: 'error', message: 'Pick a time at least one minute in the future.' });
+      } else if (result.error === 'missing_linkedin_snapshot') {
+        setNotice({ tone: 'error', message: 'LinkedIn copy is empty. Add content before scheduling.' });
+      } else if (result.error === 'schedule_provisioning_failed') {
+        setNotice({ tone: 'error', message: 'Scheduling backend is temporarily unavailable. Please retry.' });
+      } else {
+        setNotice({ tone: 'error', message: 'Unable to save the schedule right now. Please try again.' });
+      }
     } catch {
       setNotice({ tone: 'error', message: 'Unable to save the schedule right now. Please try again.' });
     } finally {
       setSchedulingByKey((previous) => ({ ...previous, [scheduleKey]: false }));
     }
-  }, [currentUid, initialScheduleInput, keyFor, scheduleInputByKey]);
+  }, [currentUid, draftByKey, editingByKey, initialScheduleInput, keyFor, scheduleInputByKey]);
 
   const savePlatformEdit = useCallback(async (adaptation: AdaptationRecord, platform: PlatformKey) => {
     if (!currentUid) {
@@ -609,7 +756,25 @@ export default function PublishPage() {
 
   const upcomingScheduledPosts = useMemo(() => {
     const nowMs = Date.now();
-    return scheduledPosts.filter((item) => item.scheduledForMs >= nowMs).slice(0, 6);
+    return scheduledPosts
+      .filter((item) => {
+        if (item.status === 'failed' || item.status === 'published' || item.status === 'cancelled') {
+          return false;
+        }
+        return item.scheduledForMs >= nowMs;
+      })
+      .slice(0, 6);
+  }, [scheduledPosts]);
+
+  const failedScheduledPosts = useMemo(() => {
+    return scheduledPosts.filter((item) => item.status === 'failed').slice(0, 6);
+  }, [scheduledPosts]);
+
+  const recentlyPublishedScheduledPosts = useMemo(() => {
+    return scheduledPosts
+      .filter((item) => item.status === 'published')
+      .sort((a, b) => (b.publishedAtMs ?? 0) - (a.publishedAtMs ?? 0))
+      .slice(0, 6);
   }, [scheduledPosts]);
 
   // Show the persistent context header only when the user arrived from a single
@@ -649,7 +814,29 @@ export default function PublishPage() {
 
         <p className="mt-2 text-sm text-slate-600">Loaded adaptations: <span className="font-semibold text-slate-900">{visibleAdaptations.length}</span></p>
 
-        {notice ? <p className={`mt-4 rounded-xl border px-4 py-3 text-sm ${noticeColorClass}`}>{notice.message}</p> : null}
+        {notice ? (
+          <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${noticeColorClass}`}>
+            <p>{notice.message}</p>
+            {notice.linkHref ? (
+              <p className="mt-1">
+                {/^https?:\/\//i.test(notice.linkHref) ? (
+                  <a
+                    href={notice.linkHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-semibold underline"
+                  >
+                    {notice.linkText ?? notice.linkHref}
+                  </a>
+                ) : (
+                  <Link href={notice.linkHref} className="font-semibold underline">
+                    {notice.linkText ?? notice.linkHref}
+                  </Link>
+                )}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       {isAuthLoading || isAdaptationsLoading ? (
@@ -722,7 +909,6 @@ export default function PublishPage() {
                         const isDeleting = Boolean(deletingByKey[cardKey]);
                         const isScheduling = Boolean(schedulingByKey[cardKey]);
                         const plagiarism = plagiarismByKey[cardKey];
-                        const cleared = isPlagiarismCleared(cardKey, text);
                         const hasPublishHandoff = platform === 'linkedin' || platform === 'twitter';
 
                         return (
@@ -751,6 +937,40 @@ export default function PublishPage() {
                               }}
                             />
 
+                            <div
+                              className="mt-3 rounded-xl border border-slate-200 bg-white p-3"
+                              data-testid={`publish-preview-${platform}`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setCardPreviewCollapsed()}
+                                aria-expanded={!cardPreviewCollapsed}
+                                aria-controls={`publish-preview-body-${cardKey}`}
+                                className="flex w-full items-center justify-between text-left"
+                              >
+                                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                                  {UNICODE_PLATFORMS.has(platform)
+                                    ? `${platformLabel} preview (Unicode)`
+                                    : `${platformLabel} preview`}
+                                </span>
+                                <ChevronToggleIcon collapsed={cardPreviewCollapsed} />
+                              </button>
+                              {!cardPreviewCollapsed ? (
+                                <div id={`publish-preview-body-${cardKey}`} className="mt-2">
+                                  {UNICODE_PLATFORMS.has(platform) ? (
+                                    <UnicodePostPreview
+                                      platform={platform as 'linkedin' | 'twitter' | 'instagram'}
+                                      markdown={isEditingCard ? (draftByKey[cardKey] ?? text) : text}
+                                    />
+                                  ) : (
+                                    <MarkdownPostPreview
+                                      markdown={isEditingCard ? (draftByKey[cardKey] ?? text) : text}
+                                    />
+                                  )}
+                                </div>
+                              ) : null}
+                            </div>
+
                             {plagiarism ? (
                               <p
                                 className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
@@ -769,8 +989,8 @@ export default function PublishPage() {
                                   : ''}
                               </p>
                             ) : (
-                              <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                Plagiarism check has not been run on this {platformLabel} copy. Click &ldquo;Run plagiarism check&rdquo; before publishing or scheduling.
+                              <p className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                                Optional: run a plagiarism check on this {platformLabel} copy before publishing.
                               </p>
                             )}
 
@@ -786,19 +1006,44 @@ export default function PublishPage() {
                                 {plagiarismRunningByKey[cardKey] ? 'Checking…' : 'Run plagiarism check'}
                               </button>
 
-                              {platform === 'linkedin' ? (
-                                <button
-                                  type="button"
-                                  className="rounded-xl bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
-                                  onClick={() => {
-                                    void openLinkedInCompose(text);
-                                  }}
-                                  disabled={text.length === 0 || !cleared}
-                                  title={!cleared ? 'Run a passing plagiarism check before publishing.' : undefined}
-                                >
-                                  Publish to LinkedIn
-                                </button>
-                              ) : null}
+                              {platform === 'linkedin' ? (() => {
+                                const liLoading = linkedinConnection === null;
+                                const liConnected = linkedinConnection?.status === 'connected';
+                                const liDisabled =
+                                  text.length === 0 ||
+                                  !liConnected ||
+                                  Boolean(publishingByKey[cardKey]);
+                                const liTitle = liLoading
+                                  ? 'Checking LinkedIn connection…'
+                                  : !liConnected
+                                  ? 'Connect LinkedIn in Settings to post directly.'
+                                  : undefined;
+                                return (
+                                  <>
+                                    <button
+                                      type="button"
+                                      className="rounded-xl bg-blue-700 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
+                                      onClick={() => {
+                                        void publishToLinkedIn(adaptation, text);
+                                      }}
+                                      disabled={liDisabled}
+                                      title={liTitle}
+                                      data-testid="publish-linkedin-button"
+                                    >
+                                      {publishingByKey[cardKey] ? 'Posting…' : 'Publish to LinkedIn'}
+                                    </button>
+                                    {!liLoading && !liConnected ? (
+                                      <Link
+                                        href="/settings#integrations"
+                                        className="inline-flex items-center self-center text-sm font-semibold text-blue-700 hover:underline"
+                                        data-testid="publish-linkedin-connect-cta"
+                                      >
+                                        Connect LinkedIn →
+                                      </Link>
+                                    ) : null}
+                                  </>
+                                );
+                              })() : null}
 
                               {platform === 'twitter' ? (
                                 <button
@@ -807,8 +1052,7 @@ export default function PublishPage() {
                                   onClick={() => {
                                     openTwitterIntent(text);
                                   }}
-                                  disabled={text.length === 0 || !cleared}
-                                  title={!cleared ? 'Run a passing plagiarism check before publishing.' : undefined}
+                                  disabled={text.length === 0}
                                 >
                                   Publish to X / Twitter
                                 </button>
@@ -896,8 +1140,7 @@ export default function PublishPage() {
                                   onClick={() => {
                                     void schedulePost(adaptation, platform, articleTitle, angleLabel);
                                   }}
-                                  disabled={isScheduling || text.length === 0 || !cleared}
-                                  title={!cleared ? 'Run a passing plagiarism check before scheduling.' : undefined}
+                                  disabled={isScheduling || text.length === 0}
                                 >
                                   {isScheduling ? 'Scheduling...' : 'Schedule'}
                                 </button>
@@ -928,12 +1171,142 @@ export default function PublishPage() {
           <h2 className="section-title">Upcoming Scheduled Posts</h2>
           <p className="mt-1 text-xs text-slate-600">These will appear on your dashboard calendar and surface as reminders in notifications when due.</p>
           <ul className="mt-4 space-y-2 text-sm">
-            {upcomingScheduledPosts.map((item) => (
-              <li key={item.id} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                <p className="font-medium text-slate-800">{item.articleTitle}</p>
-                <p className="text-xs text-slate-600">
-                  {new Date(item.scheduledForMs).toLocaleString()} · {item.platforms.map((platform) => formatPlatformLabel(platform)).join(', ')}
+            {upcomingScheduledPosts.map((item) => {
+              const isCancelling = cancellingScheduledId === item.id;
+              const isConfirming = confirmingCancelId === item.id;
+              return (
+                <li key={item.id} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-slate-800">{item.articleTitle}</p>
+                    <p className="text-xs text-slate-600">
+                      {new Date(item.scheduledForMs).toLocaleString()} · {item.platforms.map((platform) => formatPlatformLabel(platform)).join(', ')}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {isConfirming ? (
+                      <>
+                        <button
+                          type="button"
+                          className="rounded-lg bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+                          onClick={() => { void cancelScheduledPost(item.id); }}
+                          disabled={isCancelling}
+                          data-testid="scheduled-post-confirm-cancel"
+                        >
+                          {isCancelling ? 'Cancelling…' : 'Confirm cancel'}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                          onClick={() => setConfirmingCancelId(null)}
+                          disabled={isCancelling}
+                        >
+                          Keep
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="rounded-lg border border-red-300 bg-white px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
+                        onClick={() => setConfirmingCancelId(item.id)}
+                        data-testid="scheduled-post-cancel"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      {!isAuthLoading && !isAdaptationsLoading && !loadError && failedScheduledPosts.length > 0 ? (
+        <section className="surface-card border-red-200 bg-red-50 p-6" data-testid="failed-scheduled-section">
+          <h2 className="section-title text-red-900">Failed Scheduled Posts</h2>
+          <p className="mt-1 text-xs text-red-800">These scheduled posts could not be published automatically.</p>
+          <ul className="mt-4 space-y-2 text-sm">
+            {failedScheduledPosts.map((item) => {
+              const isCancelling = cancellingScheduledId === item.id;
+              const isConfirming = confirmingCancelId === item.id;
+              return (
+                <li key={item.id} className="flex items-start justify-between gap-3 rounded-xl border border-red-300 bg-white px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-red-900">{item.articleTitle}</p>
+                    <p className="text-xs text-red-800">
+                      {new Date(item.scheduledForMs).toLocaleString()} · {item.platforms.map((platform) => formatPlatformLabel(platform)).join(', ')}
+                      {item.failureReason ? ` · ${item.failureReason.replace(/_/g, ' ')}` : ''}
+                    </p>
+                    {item.failureReason === 'token_expired' ? (
+                      <p className="mt-1 text-xs">
+                        <Link href="/settings#integrations" className="font-semibold text-blue-700 hover:underline">
+                          Reconnect LinkedIn →
+                        </Link>
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {isConfirming ? (
+                      <>
+                        <button
+                          type="button"
+                          className="rounded-lg bg-red-700 px-3 py-1 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+                          onClick={() => { void cancelScheduledPost(item.id); }}
+                          disabled={isCancelling}
+                          data-testid="failed-post-confirm-cancel"
+                        >
+                          {isCancelling ? 'Removing…' : 'Confirm remove'}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-lg border border-red-300 bg-white px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60"
+                          onClick={() => setConfirmingCancelId(null)}
+                          disabled={isCancelling}
+                        >
+                          Keep
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="rounded-lg border border-red-400 bg-white px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
+                        onClick={() => setConfirmingCancelId(item.id)}
+                        data-testid="failed-post-remove"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      {!isAuthLoading && !isAdaptationsLoading && !loadError && recentlyPublishedScheduledPosts.length > 0 ? (
+        <section className="surface-card border-emerald-200 bg-emerald-50 p-6" data-testid="recently-published-section">
+          <h2 className="section-title text-emerald-900">Recently Published</h2>
+          <p className="mt-1 text-xs text-emerald-800">Posts the scheduler published automatically.</p>
+          <ul className="mt-4 space-y-2 text-sm">
+            {recentlyPublishedScheduledPosts.map((item) => (
+              <li key={item.id} className="rounded-xl border border-emerald-300 bg-white px-3 py-2">
+                <p className="font-medium text-emerald-900">{item.articleTitle}</p>
+                <p className="text-xs text-emerald-800">
+                  {item.publishedAtMs ? new Date(item.publishedAtMs).toLocaleString() : new Date(item.scheduledForMs).toLocaleString()} · {item.platforms.map((platform) => formatPlatformLabel(platform)).join(', ')}
                 </p>
+                {item.postUrl ? (
+                  <p className="mt-1 text-xs">
+                    <a
+                      href={item.postUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-semibold text-blue-700 hover:underline"
+                    >
+                      View on LinkedIn →
+                    </a>
+                  </p>
+                ) : null}
               </li>
             ))}
           </ul>
